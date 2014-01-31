@@ -1,4 +1,4 @@
-#!/opt/epd-7.3-2-rh5-x86_64/bin/python
+#!/usr/bin/env python
 
 import sys, os
 from subprocess import call

@@ -1,4 +1,4 @@
-#!/opt/epd-7.3-2-rh5-x86_64/bin/python
+#!/usr/bin/env python
 
 import numpy as np, os, sys, re, operator as op
 from mpi4py import MPI
@@ -153,6 +153,8 @@ print 'MPI rank %d of %d: finished data exchange' % (mpirank, mpisize)
 # Repurpose the specreps to split the received representations
 specreps = splitspecreps(rspecreps)
 
+print 'MPI rank %d of %d: finished splitting representations' % (mpirank, mpisize)
+
 # Group the representations according to spectral group
 start, share = grpshares[mpirank]
 groupreps = [[] for gidx in range(share)]
@@ -161,6 +163,8 @@ for srclist in srclists:
 	for gidx in range(share):
 		for src in srclist:
 			groupreps[gidx].append((src, specreps.pop(0)))
+
+print 'MPI rank %d of %d: finished grouping representations' % (mpirank, mpisize)
 
 # Ensure that all groups have been assigned
 if len(specreps) > 0:
