@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import numpy as np, os, sys, re, operator as op
+from itertools import izip, repeat
 from mpi4py import MPI
 
 # Create a record type for the spectral representations
@@ -80,15 +81,16 @@ srcdir = sys.argv[2]
 destdir = sys.argv[3]
 
 mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
+identifier = 'MPI rank %d of %d' % (mpirank, mpisize)
 
-print 'MPI rank %d of %d: transfer from %s to %s' % (mpirank, mpisize, srcdir, destdir)
+print '%s: transfer from %s to %s' % (identifier, srcdir, destdir)
 
 # Grab a list of all spectral representations
 specfiles = findspecreps(srcdir, prefix=prefix)
 grpcounts = [sum(gc) for gc in zip(*[countspecreps(f[0]) for f in specfiles])]
 ngroups = len(grpcounts)
 
-print 'MPI rank %d of %d: finished local group counting' % (mpirank, mpisize)
+print '%s: finished local group counting' % identifier
 
 # Create an array to store all of the representations, ordered by group
 specreps = np.empty((sum(grpcounts), ), dtype=specreptype)
@@ -110,7 +112,7 @@ for specfile, specidx in specfiles:
 		specreps[start:end] = rep
 		offsets[i] = end
 
-print 'MPI rank %d of %d: finished local group parsing' % (mpirank, mpisize)
+print '%s: finished local group parsing' % identifier
 
 # Determine the group shares for each MPI rank
 share, rem = ngroups / mpisize, ngroups % mpisize
@@ -148,35 +150,29 @@ MPI.COMM_WORLD.Alltoallv([specreps, counts, displs, rectype],
 # Free the MPI type
 rectype.Free()
 
-print 'MPI rank %d of %d: finished data exchange' % (mpirank, mpisize)
+print '%s: finished data exchange' % identifier
 
-# Repurpose the specreps to split the received representations
-specreps = splitspecreps(rspecreps)
-
-print 'MPI rank %d of %d: finished splitting representations' % (mpirank, mpisize)
-
-# Group the representations according to spectral group
+# Figure the local portion of groups that were received
 start, share = grpshares[mpirank]
-groupreps = [[] for gidx in range(share)]
-# Received representations are grouped first by rank, then group, then source
-for srclist in srclists:
-	for gidx in range(share):
-		for src in srclist:
-			groupreps[gidx].append((src, specreps.pop(0)))
 
-print 'MPI rank %d of %d: finished grouping representations' % (mpirank, mpisize)
+# Enumerate the group and source indices for sorting of received representations
+indices = [(gidx, src) for srcs in srclists for gidx in range(share) for src in srcs]
 
-# Ensure that all groups have been assigned
-if len(specreps) > 0:
-	raise IndexError('Additional received representations were not characterized')
+# Sort by group, then by source index
+specreps = sorted(izip(indices, splitspecreps(rspecreps)), key=op.itemgetter(0))
+
+print '%s: finished splitting and sorting representations' % identifier
+
+fname = lambda grp: os.path.join(destdir, '%sSpecRepsSubvol%d.dat' % (prefix, grp))
+
+# Open files for every output group
+groupfiles = [open(fname(grp + start), 'wb') for grp in range(share)]
 
 # Write every grouped representation
-for grp, reps in zip(range(start, start + share), groupreps):
-	# Open an output file
-	outpath = os.path.join(destdir, '%sSpecRepsSubvol%d.dat' % (prefix, grp))
-	outfile = open(outpath, 'wb')
-	# Sort representations by source index before writing
-	for rep in sorted(reps, key=op.itemgetter(0)): rep[1].tofile(outfile)
-	outfile.close()
+for (gidx, src), rep in specreps:
+	# Save the representation in the file for the indicated group
+	rep.tofile(groupfiles[gidx])
 
-print 'MPI rank %d of %d: finished file writes' % (mpirank, mpisize)
+for gf in groupfiles: gf.close()
+
+print '%s: finished file writes' % identifier
