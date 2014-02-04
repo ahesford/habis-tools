@@ -33,7 +33,7 @@ def fhfft(infiles, lfht, freqrange=[None], tmpdir=None):
 	output matrix B. Save the matrix B[S,:], where S = slice(*freqrange).
 	Each matrix B is saved in a file whose name is determined by appending
 	'.spectral' to the corresponding value in infiles.
-	
+
 	The length of the Hadamard transforms must be a power of 2, and M must
 	be an integer multiple of the Hadamard transform length.
 	'''
@@ -45,44 +45,46 @@ def fhfft(infiles, lfht, freqrange=[None], tmpdir=None):
 
 	for infile in infiles:
 		# Read the input file
-		# Transpose and copy for faster FHT performance
-		a = mio.readbmat(infile).T.copy()
-		
+		a = mio.readbmat(infile)
+		# Reorder the input so that the FHT axis is continguous
+		a = np.reshape(a.flat, a.shape)
+
 		if a.dtype != np.float32 and not a.dtype != np.float64:
 			raise TypeError('Matrix must have a dtype of float32 or float64')
-		
+
 		if len(a.shape) != 2:
 			raise ValueError('Matrix must be two-dimensional')
-		
+
 		# If the dimensions have changed, create new arrays for the FFT
-		if a.shape != (nfht, nfft):
+		if a.shape != (nfft, nfht):
 			# Copy the new planned shape
-			nfht, nfft = a.shape
-			
+			nfft, nfht = a.shape
+
 			if nfht % lfht != 0:
 				raise ValueError('Second matrix dimension must be integer multiple of Hadamard transform length')
-			
+
 			# Create an intermediate array to store Hadamard results
-			b = pyfftw.n_byte_align_empty((nfht, nfft), pyfftw.simd_alignment, a.dtype)
-			
+			# The FFT axis should be contiguous here for FFT performance
+			b = pyfftw.n_byte_align_empty((nfft, nfht), pyfftw.simd_alignment, a.dtype, order='F')
+
 			# Create an output array to store the final FFT results
 			# The length of the FFT axis is half the input, plus one for DC
-			cdim = (nfht, nfft // 2 + 1)
+			cdim = (nfft // 2 + 1, nfht)
 			cdtype = np.complex64 if (a.dtype == np.float32) else np.complex128
-			c = pyfftw.n_byte_align_empty(cdim, pyfftw.simd_alignment, cdtype)
-			
+			c = pyfftw.n_byte_align_empty(cdim, pyfftw.simd_alignment, cdtype, order='F')
+
 			# Create an FFT plan before populating the Hadamard results
-			fwdfft = pyfftw.FFTW(b, c, axes=(1,))
-		
+			fwdfft = pyfftw.FFTW(b, c, axes=(0,))
+
 		# At this point, the gain compensation should be applied
-		
+
 		# Perform the tiled Hadamard transforms
 		for s in range(0, nfht, lfht):
 			e = s + lfht
-			b[s:e,:] = fht.fht(a[s:e,:], axes=0)
-			
+			b[:,s:e] = fht.fht(a[:,s:e], axes=1)
+
 		# At this point, time-gating should be applied
-		
+
 		# Perform the FFT
 		fwdfft()
 
@@ -90,7 +92,7 @@ def fhfft(infiles, lfht, freqrange=[None], tmpdir=None):
 		if tmpdir is not None:
 			outfile = os.path.join(tmpdir, os.path.basename(outfile))
 
-		mio.writebmat(c[:,slice(*freqrange)].T, outfile)
+		mio.writebmat(c[slice(*freqrange),:], outfile)
 
 
 def measparser(l):
