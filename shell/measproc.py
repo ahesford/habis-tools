@@ -88,11 +88,22 @@ def fhfft(infiles, lfht, freqrange=[None], tmpdir=None):
 		# Perform the FFT
 		fwdfft()
 
-		outfile = infile + '.spectral'
-		if tmpdir is not None:
-			outfile = os.path.join(tmpdir, os.path.basename(outfile))
-
+		# Write the spectral output
+		outfile = specfilename(infile, tmpdir)
 		mio.writebmat(c[slice(*freqrange),:], outfile)
+
+
+def specfilename(infile, tmpdir = None):
+	'''
+	Given an input file at a path infile and an optional temporary
+	directory, return an output file whose name is the input file name with
+	'.spectral' appended. If tmpdir is not None, replace the path to the
+	input file with the path to tmpdir.
+	'''
+	outfile = infile + '.spectral'
+	if tmpdir is not None:
+		outfile = os.path.join(tmpdir, os.path.basename(outfile))
+	return outfile
 
 
 def measparser(l):

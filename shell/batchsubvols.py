@@ -4,8 +4,7 @@ import numpy as np, os, sys, re
 
 from multiprocessing import Pool
 
-# Create a record type for the spectral representations
-specreptype = np.dtype([('val', np.complex64), ('idx', np.int64)])
+from habis import formats
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE (forward): %s <prefix> <srcdir> <destdir> ... <destdir>' % progname
@@ -14,32 +13,6 @@ def usage(progname):
 	print >> sys.stderr, '  To force forward mode when prefix is "-r", specify "--" before <prefix>'
 
 	sys.exit(1)
-
-
-def splitspecreps(a):
-	'''
-	Break a record array a of concatenated spectral representations, with
-	dtype [('val', np.complex64), ('idx', np.int64)], into a list of record
-	arrays corresponding to each group of spectral representations in the
-	original array. The number of records in the first group (output[0]) is
-	specified by n[0] = (a[0]['idx'] + 1), with output[0] = a[:n[0]].
-		
-	The number of records in a subsequent group (output[i]) is given by
-
-		n[i] = (a[sum(n[:i-1])]['idx'] + 1),
-		
-	with output[i] = a[sum(n[:i-1]):sum(n[:i])].
-	'''
-	start = 0
-	output = []
-	while start < len(a):
-		nvals = a[start]['idx'] + 1
-		if nvals < 1: raise ValueError('Spectral representation counts must be positive')
-		grp = a[start:start+nvals]
-		if len(grp) < nvals: raise ValueError('Could not read specified number of records')
-		output.append(a[start:start+nvals])
-		start += nvals
-	return output
 
 
 def batchspecrep(rep, nbatch = 1):
@@ -67,7 +40,7 @@ def batchspecrep(rep, nbatch = 1):
 	output, start = [], 1
 	for i, bs in enumerate(blocksizes):
 		# Create the output for this block, include a new header
-		output.append(np.empty((bs + 1,), dtype=specreptype));
+		output.append(np.empty((bs + 1,), dtype=formats.specreptype));
 		# Copy the new header, replacing the index value
 		output[-1][0] = rep[0]
 		output[-1][0]['idx'] = bs
@@ -90,7 +63,7 @@ def mergespecrep(reps):
 	# Compute the total number of samples in the merged specrep
 	replen = sum(rep[0]['idx'] for rep in reps)
 	# Make the output array with room for a header
-	output = np.empty((replen + 1,), dtype=specreptype)
+	output = np.empty((replen + 1,), dtype=formats.specreptype)
 	# Concatenate the inputs, skipping each header
 	output[1:] = np.concatenate([rep[1:] for rep in reps])
 	# Create the header in the output, overwriting the size
@@ -117,9 +90,9 @@ def batchrepfile(args):
 	filename = os.path.join(srcdir, specfile)
 
 	# Read the spectral representations from the input
-	lsreps = np.fromfile(filename, dtype=specreptype)
+	lsreps = np.fromfile(filename, dtype=formats.specreptype)
 	# Break the representations by group and then batch each group
-	batchreps = [batchspecrep(r, nbatch) for r in splitspecreps(lsreps)]
+	batchreps = [batchspecrep(r, nbatch) for r in formats.splitspecreps(lsreps)]
 	# Now concatenate representations for each batch and write to the output
 	for br, dr in zip(zip(*batchreps), destdirs):
 		np.concatenate(br).tofile(os.path.join(dr, specfile))
@@ -135,7 +108,7 @@ def mergerepfile(args):
 	'''
 	specfile, srcdirs, destdir = args
 	# Read all batched spectral representations and split the representations
-	lsreps = [splitspecreps(np.fromfile(os.path.join(srcdir, specfile), dtype=specreptype)) for srcdir in srcdirs]
+	lsreps = [formats.splitspecreps(np.fromfile(os.path.join(srcdir, specfile), dtype=formats.specreptype)) for srcdir in srcdirs]
 	# Merge corresponding groups and write the output
 	mergereps = [mergespecrep(reps) for reps in zip(*lsreps)]
 	np.concatenate(mergereps).tofile(os.path.join(destdir, specfile))
@@ -158,41 +131,42 @@ def findspecreps(dir, prefix='.*SpecRepsElem'):
 		for m in [regexp.match(f)] if m]
 
 
-# Perform preliminary argument checking
-if len(sys.argv) < 4: usage(sys.argv[0])
-
-if sys.argv[1] == '-r' or sys.argv[1] == '--':
-	# Force reverse mode if '-r' is specified
-	fwdmode = not (sys.argv[1] == '-r')
-	# Ensure enough arguments
-	if len(sys.argv) < 5: usage(sys.argv[0])
-	# Grab the file prefix and the source and destination directories
-	prefix = sys.argv[2]
-	srcdirs = sys.argv[3:-1]
-	destdir = sys.argv[-1]
-else:
-	fwdmode = True
-	# Ensure enough arguments
+if __name__ == '__main__':
+	# Perform preliminary argument checking
 	if len(sys.argv) < 4: usage(sys.argv[0])
-	# Grab the file prefix and the source and destination directories
-	prefix = sys.argv[1]
-	srcdir = sys.argv[2]
-	destdirs = sys.argv[3:]
 
-# Batching only makes sense if there are 2 or more chunks
-if (fwdmode and len(destdirs) < 2) or (not fwdmode and len(srcdirs) < 2):
-	sys.exit('Batching is just a copy when nbatch is one')
+	if sys.argv[1] == '-r' or sys.argv[1] == '--':
+		# Force reverse mode if '-r' is specified
+		fwdmode = not (sys.argv[1] == '-r')
+		# Ensure enough arguments
+		if len(sys.argv) < 5: usage(sys.argv[0])
+		# Grab the file prefix and the source and destination directories
+		prefix = sys.argv[2]
+		srcdirs = sys.argv[3:-1]
+		destdir = sys.argv[-1]
+	else:
+		fwdmode = True
+		# Ensure enough arguments
+		if len(sys.argv) < 4: usage(sys.argv[0])
+		# Grab the file prefix and the source and destination directories
+		prefix = sys.argv[1]
+		srcdir = sys.argv[2]
+		destdirs = sys.argv[3:]
 
-# Find the files for batch processing
-# In reverse mode, file names are pulled from the first source directory
-files = []
-if fwdmode: files = findspecreps(srcdir, prefix)
-else: files = findspecreps(srcdirs[0], prefix)
+	# Batching only makes sense if there are 2 or more chunks
+	if (fwdmode and len(destdirs) < 2) or (not fwdmode and len(srcdirs) < 2):
+		sys.exit('Batching is just a copy when nbatch is one')
 
-if len(files) < 1: sys.exit('No files found for batching')
+	# Find the files for batch processing
+	# In reverse mode, file names are pulled from the first source directory
+	files = []
+	if fwdmode: files = findspecreps(srcdir, prefix)
+	else: files = findspecreps(srcdirs[0], prefix)
 
-# Create a multiprocessing pool
-p = Pool()
+	if len(files) < 1: sys.exit('No files found for batching')
 
-if fwdmode: p.map(batchrepfile, ((f[0], srcdir, destdirs) for f in files))
-else: p.map(mergerepfile, ((f[0], srcdirs, destdir) for f in files))
+	# Create a multiprocessing pool
+	p = Pool()
+
+	if fwdmode: p.map(batchrepfile, ((f[0], srcdir, destdirs) for f in files))
+	else: p.map(mergerepfile, ((f[0], srcdirs, destdir) for f in files))
