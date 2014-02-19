@@ -36,11 +36,12 @@ def batchspecrep(rep, nbatch = 1):
 	# Figure the number of records in each block
 	numrecs = len(rep) - 1
 	blocksizes = [numrecs // nbatch + int(i < numrecs % nbatch) for i in range(nbatch)]
+	dtype = formats.specreptype()
 	# Build the output arrays; skip header in the input
 	output, start = [], 1
 	for i, bs in enumerate(blocksizes):
 		# Create the output for this block, include a new header
-		output.append(np.empty((bs + 1,), dtype=formats.specreptype));
+		output.append(np.empty((bs + 1,), dtype=dtype))
 		# Copy the new header, replacing the index value
 		output[-1][0] = rep[0]
 		output[-1][0]['idx'] = bs
@@ -63,7 +64,7 @@ def mergespecrep(reps):
 	# Compute the total number of samples in the merged specrep
 	replen = sum(rep[0]['idx'] for rep in reps)
 	# Make the output array with room for a header
-	output = np.empty((replen + 1,), dtype=formats.specreptype)
+	output = np.empty((replen + 1,), dtype=formats.specreptype())
 	# Concatenate the inputs, skipping each header
 	output[1:] = np.concatenate([rep[1:] for rep in reps])
 	# Create the header in the output, overwriting the size
@@ -90,7 +91,7 @@ def batchrepfile(args):
 	filename = os.path.join(srcdir, specfile)
 
 	# Read the spectral representations from the input
-	lsreps = np.fromfile(filename, dtype=formats.specreptype)
+	lsreps = np.fromfile(filename, dtype=formats.specreptype())
 	# Break the representations by group and then batch each group
 	batchreps = [batchspecrep(r, nbatch) for r in formats.splitspecreps(lsreps)]
 	# Now concatenate representations for each batch and write to the output
@@ -108,7 +109,10 @@ def mergerepfile(args):
 	'''
 	specfile, srcdirs, destdir = args
 	# Read all batched spectral representations and split the representations
-	lsreps = [formats.splitspecreps(np.fromfile(os.path.join(srcdir, specfile), dtype=formats.specreptype)) for srcdir in srcdirs]
+	dtype = formats.specreptype()
+	lsreps = [formats.splitspecreps(
+			np.fromfile(os.path.join(srcdir, specfile), dtype=dtype))
+			for srcdir in srcdirs]
 	# Merge corresponding groups and write the output
 	mergereps = [mergespecrep(reps) for reps in zip(*lsreps)]
 	np.concatenate(mergereps).tofile(os.path.join(destdir, specfile))

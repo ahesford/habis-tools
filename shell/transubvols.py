@@ -41,8 +41,10 @@ if __name__ == '__main__':
 
 	print '%s: finished local group counting' % identifier
 
+	dtype = formats.specreptype()
+
 	# Create an array to store all of the representations, ordered by group
-	specreps = np.empty((sum(grpcounts), ), dtype=formats.specreptype)
+	specreps = np.empty((sum(grpcounts), ), dtype=dtype)
 
 	# Keep track of the offsets for each group as the array is populated
 	offsets = [0]
@@ -50,7 +52,7 @@ if __name__ == '__main__':
 
 	for specfile, specidx in specfiles:
 		# Read the representations for each source and split by group
-		lsreps = formats.splitspecreps(np.fromfile(specfile, dtype=formats.specreptype))
+		lsreps = formats.splitspecreps(np.fromfile(specfile, dtype=dtype))
 		# Ensure that the number of groups is consistent
 		if len(lsreps) != ngroups:
 			raise ValueError('Spectral representation group count must not change')
@@ -92,7 +94,7 @@ if __name__ == '__main__':
 	rectype.Commit()
 
 	# Allocate an array to store received representations and exchange them
-	rspecreps = np.empty((sum(rcounts), ), dtype=formats.specreptype)
+	rspecreps = np.empty((sum(rcounts), ), dtype=dtype)
 	MPI.COMM_WORLD.Alltoallv([specreps, counts, displs, rectype],
 			[rspecreps, rcounts, rdispls, rectype])
 
