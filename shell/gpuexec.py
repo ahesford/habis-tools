@@ -2,9 +2,8 @@
 
 import sys, os
 from subprocess import call
-from multiprocessing import Process
 from mpi4py import MPI
-from pyajh import util
+from pyajh import util, process
 
 def procexec(args):
 	'''
@@ -40,16 +39,9 @@ if __name__ == '__main__':
 	localblocks = blocklist[start:start+share]
 
 	for blocks in util.grouplist(localblocks, ngpus):
-		procs = []
-		try:
+		with process.ProcessPool() as pool:
 			for b, g in zip(blocks, gpus):
 				pargs = args[:1] + [g, b] + args[1:]
-				p = Process(target=procexec, args=(pargs,))
-				p.start()
-				procs.append(p)
-			for p in procs: p.join()
-		except:
-			for p in procs:
-				p.terimate()
-				p.join()
-			raise
+				pool.addtask(target=procexec, args=(pargs,))
+			pool.start()
+			pool.wait()
