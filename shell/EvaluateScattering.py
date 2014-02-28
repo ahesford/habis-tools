@@ -2,7 +2,8 @@
 
 import sys, os
 from subprocess import call
-from multiprocessing import Process
+
+from pyajh import process
 
 def procexec(prog, args, inputs):
 	'''
@@ -35,69 +36,62 @@ def facetindex(fname):
 	return int(facetlabel.replace('facet', ''), base=10)
 
 
-# The default name for the EvaluateScattering CUDA program
-defprogname = 'EvaluateScattering'
-# The environment variable checked for the CUDA program path
-evalscatenv = 'EVALUATESCATTERING'
-
-if len(sys.argv) < 6:
-	print >> sys.stderr, 'USAGE: %s <gpus> <freq> <elemlocs> <sensitivity> <input> ...' % sys.argv[0]
-	print >> sys.stderr, '  File names MUST end with an extension .facet<index>.<suffix> for an'
-	print >> sys.stderr, '  arbitrary extension <ext> (no dots) and an integer <idx> between 0 and 39'
-	print >> sys.stderr, ''
-	print >> sys.stderr, '  Override the environment variable %s with the path to' % evalscatenv
-	print >> sys.stderr, '  the %s CUDA program (default: $HOME/bin/EvaluateScattering)' % defprogname
-
-	sys.exit(128)
-
-try:
-	# Try to grab the CUDA program from the environment
-	evalscat = os.environ[evalscatenv]
-except KeyError:
+if __name__ == '__main__':
+	# The default name for the EvaluateScattering CUDA program
+	defprogname = 'EvaluateScattering'
+	# The environment variable checked for the CUDA program path
+	evalscatenv = 'EVALUATESCATTERING'
+	
+	if len(sys.argv) < 6:
+		print >> sys.stderr, 'USAGE: %s <gpus> <freq> <elemlocs> <sensitivity> <input> ...' % sys.argv[0]
+		print >> sys.stderr, '  File names MUST end with an extension .facet<index>.<suffix> for an'
+		print >> sys.stderr, '  arbitrary extension <ext> (no dots) and an integer <idx> between 0 and 39'
+		print >> sys.stderr, ''
+		print >> sys.stderr, '  Override the environment variable %s with the path to' % evalscatenv
+		print >> sys.stderr, '  the %s CUDA program (default: $HOME/bin/EvaluateScattering)' % defprogname
+	
+		sys.exit(128)
+	
 	try:
-		# Otherwise, try $HOME/bin/EvaluateScattering
-		bindir = os.path.join(os.environ['HOME'], 'bin')
+		# Try to grab the CUDA program from the environment
+		evalscat = os.environ[evalscatenv]
 	except KeyError:
-		# If $HOME is undefined, use the local directory
-		print >> sys.stderr, 'WARNING: $HOME undefined, trying local directory for %s' % defprogname
-		bindir = '.'
-
-	evalscat = os.path.join(bindir, defprogname)
-
-print >> sys.stderr, 'Trying %s for %s CUDA program' % (evalscat, defprogname)
-
-# Grab the list of GPUs to use
-gpus = [int(s.strip()) for s in sys.argv[1].split(',')]
-ngpus = len(gpus)
-
-# Grab the frequency and the names of the element location and sensitivity files
-freq, elemlocs, elemsens = sys.argv[2:5]
-# Grab the remaining files and pull out each file's associated facet index
-scatfiles = [(f, facetindex(f)) for f in sys.argv[5:]]
-
-# Process files in groups corresponding to common facet indices
-for fidx in set(f[-1] for f in scatfiles):
-	# Grab all files that share the current facet
-	facetfiles = [f[0] for f in scatfiles if f[1] == fidx]
-	# Spawn one process for each GPU
-	procs = []
-	try:
-		# The only positional argument will be the executable name
-		args = [evalscat]
-
-		for i, g in enumerate(gpus):
-			kwargs = {}
-			# In the "args" argument, pass the device ID, frequency, source
-			# facet index, and the element location and sensitivity files
-			kwargs['args'] = [g, freq, fidx, elemlocs, elemsens]
-			# Inputs the "inputs" argument, pass a share of the inputs
-			kwargs['inputs'] = facetfiles[i::ngpus]
-			p = Process(target=procexec, args=args, kwargs=kwargs)
-			p.start()
-			procs.append(p)
-		for p in procs: p.join()
-	except:
-		for p in procs:
-			p.terimate()
-			p.join()
-		raise
+		try:
+			# Otherwise, try $HOME/bin/EvaluateScattering
+			bindir = os.path.join(os.environ['HOME'], 'bin')
+		except KeyError:
+			# If $HOME is undefined, use the local directory
+			print >> sys.stderr, 'WARNING: $HOME undefined, trying local directory for %s' % defprogname
+			bindir = '.'
+	
+		evalscat = os.path.join(bindir, defprogname)
+	
+	print >> sys.stderr, 'Trying %s for %s CUDA program' % (evalscat, defprogname)
+	
+	# Grab the list of GPUs to use
+	gpus = [int(s.strip()) for s in sys.argv[1].split(',')]
+	ngpus = len(gpus)
+	
+	# Grab the frequency and the names of the element location and sensitivity files
+	freq, elemlocs, elemsens = sys.argv[2:5]
+	# Grab the remaining files and pull out each file's associated facet index
+	scatfiles = [(f, facetindex(f)) for f in sys.argv[5:]]
+	
+	# The only positional argument for subprocesses is the executable name
+	args = [evalscat]
+	
+	# Process files in groups corresponding to common facet indices
+	for fidx in set(f[-1] for f in scatfiles):
+		# Grab all files that share the current facet
+		facetfiles = [f[0] for f in scatfiles if f[1] == fidx]
+		with process.ProcessPool() as pool:
+			for i, g in enumerate(gpus):
+				kwargs = {}
+				# In the "args" argument, pass the device ID, frequency, source
+				# facet index, and the element location and sensitivity files
+				kwargs['args'] = [g, freq, fidx, elemlocs, elemsens]
+				# Inputs the "inputs" argument, pass a share of the inputs
+				kwargs['inputs'] = facetfiles[i::ngpus]
+				pool.addtask(target=procexec, args=args, kwargs=kwargs)
+			pool.start()
+			pool.wait()
