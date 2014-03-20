@@ -55,19 +55,21 @@ def normalize(sig, env):
 
 def getenvelope(sig, ref, thresh=0.01):
 	'''
-	Compute a spectral envelope to approximately convert the spectral
-	magnitude of the input signal to the desired shape given in ref. The
-	signal is padded (or truncated) to match the length of ref. The output
-	envelope retains the modified length.
+	Compute a complex spectral envelope to approximately convert the
+	spectral characteristics of the input signal to the desired spectral
+	characteristics in ref. The signal is padded (or truncated) to match
+	the length of ref. The output envelope retains the modified length.
 
 	Wherever the spectral magnitude of sig falls below the specified
-	threshold thresh, the envelope will have zero amplitude.
+	threshold thresh (relative to the peak amplitude), the envelope will
+	have zero amplitude.
 
 	Both sig and env should be 1-D arrays or column vectors.
 	'''
 	fsig = fft.fft(sig, len(ref))
-	# Eliminate zero to avoid complaints
-	fsiga = (np.abs(fsig) > thresh).choose(1., abs(fsig))
+	fsigmax = np.max(fsig)
+	# Eliminate zeros to avoid complaints
+	fsiga = (np.abs(fsig) > thresh * fsigmax).choose(1., fsig)
 	return (np.abs(fsig) > thresh).choose(0., ref / fsiga)
 
 
