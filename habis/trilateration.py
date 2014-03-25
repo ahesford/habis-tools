@@ -3,7 +3,8 @@ Routines for performing acoustic trilateration.
 '''
 
 import numpy as np, math
-from numpy import fft
+from numpy import fft, linalg as la
+from scipy.sparse.linalg import lsmr
 from pyajh import cutil
 
 def jacobian(centers, pos, times=None, c=None):
@@ -118,8 +119,56 @@ def costfunc(centers, pos, times, c):
 	if rank != 2: raise TypeError('Element centers must be a rank-2 array')
 
 	nrows, ndim = centers.shape
-	if len(pos) != ndim + 1:
-		raise TypeError('Dimensionality of pos must exceed that of centers by 1')
+	tau = 0.
+	if len(pos) > ndim: tau = pos[ndim]
+	elif len(pos) < ndim:
+		raise TypeError('Dimensionality of pos must at least match that of centers')
 
-	return ((c * (times / 2. - pos[ndim]))**2
+	return ((c * (times / 2. - tau))**2
 			- np.sum((centers - pos[np.newaxis,:ndim])**2, axis=1))
+
+
+def newton(centers, times, c, pos=None, maxit=100, tol=1e-6, **kwargs):
+	'''
+	For known elements with coordinates specified in the rank-2 array
+
+		centers = [c1, c2, ..., cn],
+
+	use Newton-Raphson iteration to recover the position of an unknown
+	element associated with round-trip arrival times
+
+		times = [t1, t2, ..., tn]
+
+	through a medium with sound speed c.
+
+	An initial estimate pos may be specified, but is assumed to be the
+	origin by default. Iterations will stop after maxit iterations or when
+	the norm of a computed update is less than tol times the norm of the
+	guess used to produce the update, whichever occurs first.
+
+	The inverse of the Jacobian is computed using the LSMR algorithm
+	(scipy.sparse.linalg.lsmr). Additional kwargs are passed directly to
+	the LSMR function.
+	'''
+	try: rank = len(centers.shape)
+	except AttributeError:
+		centers = np.array(centers)
+		rank = len(centers.shape)
+	if rank != 2: raise TypeError('Element centers must be a rank-2 array')
+
+	# Ensure that a copy is made if a position guess was specified
+	if pos is not None: pos = np.array(pos)
+	else: pos = np.zeros((centers.shape[-1],), dtype=centers.dtype)
+
+	for i in range(maxit):
+		# Build the Jacobian and right-hand side
+		jac = jacobian(centers, pos)
+		cost = costfunc(centers, pos, times, c)
+		# Use LSMR to invert the system
+		delt = lsmr(jac, cost, **kwargs)[0]
+		# Check for convergence
+		conv = (la.norm(delt) < tol * la.norm(pos))
+		pos -= delt
+		if conv: break
+
+	return pos
