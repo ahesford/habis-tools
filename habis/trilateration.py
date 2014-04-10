@@ -391,7 +391,6 @@ class PlaneTrilateration(PointTrilateration):
 			conv = (la.norm(delt) < tol * la.norm(pos))
 			# Add the update and break when converged
 			pos -= delt.reshape((nelts, ncols), order='C')
-			print pos[0]
 			if conv: break
 
 		return pos
