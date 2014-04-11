@@ -244,7 +244,7 @@ class PlaneTrilateration(PointTrilateration):
 		sup = super(PlaneTrilateration, self)
 		jacs = [sup.jacobian(p, t) for p, t in zip(pos, times)]
 
-		# Determine the normal to the plane of the elements
+		# Determine the normal to element plane
 		normal = facet.lsqnormal(pos[:,:ndim])
 
 		# Build the MVP and its adjoint for a LinearOperator
@@ -264,18 +264,14 @@ class PlaneTrilateration(PointTrilateration):
 			ntrilat = nelts * nrows
 			# Reshape the independent trilateration parts
 			ytri = np.reshape(y[:ntrilat], (nelts, nrows), order='C')
-			# Pull the coplanar parts and compute a mean
-			yplan = y[ntrilat:ntrilat+nelts]
-			ypmean = np.mean(yplan)
 			# Store the output
 			x = np.empty((nelts, ncols), dtype=self.centers.dtype)
-			# Compute the spatial portion of the element positions
-			for j, yt, yp, xv in zip(jacs, ytri, yplan, x):
-				# Compute the independent trilateration part
+			# Compute spatial, independent portion of element positions
+			for j, yt, xv in zip(jacs, ytri, x):
 				xv[:] = np.dot(j.T, yt)
-				# Include coplanarity contribution
-				# (Does not affect optional delays)
-				xv[:ndim] += normal * (yp - ypmean)
+			# Include coplanarity contribution
+			yplan = y[ntrilat:ntrilat+nelts,np.newaxis]
+			x[:,:ndim] += np.dot(yplan - np.mean(yplan), normal[np.newaxis,:])
 			# Include mean-delay contribution
 			x[:,-1] += y[-1]
 			return x.ravel('C')
