@@ -4,6 +4,10 @@ Routines for manipulating HABIS signals.
 
 import numpy as np, math
 from numpy import fft
+from scipy.signal import hilbert
+from operator import itemgetter
+from itertools import groupby
+
 from pyajh import cutil
 
 def delay(sig, ref, osamp=1):
@@ -87,3 +91,40 @@ def shifter(sig, d, n=None):
 	kidx = fft.fftshift(np.arange(-nsig/2, nsig/2))
 	sh = np.exp(2j * math.pi * d * kidx / nsig)
 	return fft.ifft(fsig * sh)
+
+
+def envpeaks(sig, thresh=3., nwin=None):
+	'''
+	Return a (start, end) tuple to specify the slice [start:end] for each
+	peak identified in the envelope of the signal sig. The envelope is the
+	magnitude of the analytic signal computed by scipy.signal.hilbert. A
+	peak is a region that exceeds the mean envelope value by at least
+	thresh standard deviations.
+
+	If nwin is None, the mean envelope value and standard deviation used
+	for thresholding are computed using the full signal. Otherwise, if nwin
+	is a slice object, the mean and standard deviation will be computed
+	using the specified slice of the envelope. If nwin is an integer, the
+	slice is assumed to start at 0 and end at nwin.
+
+	The signal should be a 1-D real array.
+	'''
+	if thresh < 0:
+		raise ValueError('Argument thresh must be positive')
+	# Ensure that the slice value is appropriate
+	if nwin is None or isinstance(nwin, int):
+		nwin = slice(nwin)
+	elif not isinstance(nwin, slice):
+		raise TypeError('Argument nwin must be None, integer or slice')
+
+	# Compute the Hilbert transform
+	env = np.abs(hilbert(sig))
+	emu = np.mean(env[nwin])
+	esd = np.std(env[nwin])
+
+	# Find all indices that exceed the threshold
+	peaks = (env > (thresh * esd + emu)).nonzero()[0]
+	# Group continguous indices
+	groups = [map(itemgetter(1), g)
+			for k, g in groupby(enumerate(peaks), lambda(i, x): i - x)]
+	return [(g[0], g[-1] + 1) for g in groups]
