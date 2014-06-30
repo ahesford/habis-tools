@@ -159,7 +159,7 @@ class PointTrilateration(object):
 		nrows, ndim = self.centers.shape
 		ncols = ndim + int(usedelay)
 		# Ensure that a copy is made if a position guess was specified
-		if pos is not None: np.array(pos)
+		if pos is not None: pos = np.array(pos)
 		else: pos = np.zeros((ncols,), dtype=self.centers.dtype)
 
 		for i in range(maxit):

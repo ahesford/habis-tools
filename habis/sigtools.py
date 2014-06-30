@@ -3,14 +3,54 @@ Routines for manipulating HABIS signals.
 '''
 
 import numpy as np, math
-from numpy import fft
+from numpy import fft, linalg as nla
+from scipy import linalg as la
 from scipy.signal import hilbert
-from operator import itemgetter
+from operator import itemgetter, add
 from itertools import groupby
 
 from pyajh import cutil
 
-def delay(sig, ref, osamp=1):
+
+def pronyfit(deg, x0, h, y):
+	'''
+	Use Prony's method to fit deg complex-weighted, complex exponentials to
+	a signal y sampled according to the scheme y[i] = y(x0 + i * h). The
+	return values are lm, c, rms, where the approximate signal yp is
+
+		yp = reduce(add, (cv * exp(x * lv) for lv, cv in zip(lm, c)))
+
+	for a sample fector x = x0 + h * arange(len(y)). The RMS error between
+	yp and y is returned in rms.
+	'''
+	# Build the system to recover polynomial coefficients
+	A = la.hankel(y[:-deg], y[-deg-1:])
+	a = -A[:,:deg]
+	b = A[:,deg]
+	s = nla.lstsq(a, b)[0]
+
+	# Find the roots of the polynomial
+	p = np.flipud(np.hstack((s,1)))
+	u = np.roots(p)
+	# The roots yield the exponential factors
+	lm = np.log(u.astype(complex)) / h
+
+	# Solve for the amplitude coefficients
+	emat = np.ones((len(y), 1)) * u[None,:]
+	kmat = np.arange(len(y))[:,None] * np.ones((1,deg))
+	A = np.power(emat, kmat)
+	f = nla.lstsq(A, y)[0]
+	# Convert the coefficients
+	c = f / np.exp(lm * x0)
+
+	# Characterize the error
+	x = x0 + h * np.arange(len(y)).astype(complex)
+	approx = reduce(add, (cv * np.exp(x * lv) for lv, cv in zip(lm, c)))
+	rms = np.sqrt((abs(approx-y)**2).sum() / len(y))
+	return lm, c, rms
+
+
+def delay(sig, ref, osamp=1, restrict=None):
 	'''
 	Determine the delay of a signal sig that maximizes the
 	cross-correlation between sig and a reference signal ref.
@@ -18,9 +58,11 @@ def delay(sig, ref, osamp=1):
 	The signal and reference will be interpolated by at least a factor
 	osamp, if provided, to yield fractional-sample delays.
 
-	Both sig and ref should be 1-D arrays or column vectors.
+	If restrict is provided and not None, it should be a sequence (a, b)
+	that specifies the range of samples (at the original sampling rate)
+	over which cross-correlation should be maximized.
 
-	Correlations are done using single precision.
+	Both sig and ref should be 1-D arrays or column vectors.
 	'''
 	if osamp < 1:
 		raise ValueError ('Oversampling factor must be at least unity')
@@ -31,14 +73,20 @@ def delay(sig, ref, osamp=1):
 
 	# Find the next power of 2 needed to capture the desired oversampling
 	nint = cutil.ceilpow2(osamp * npad)
-	cfft = np.zeros((nint,), dtype=np.complex64)
+	cfft = np.zeros((nint,), dtype=sfft.dtype)
 	# Copy the convolution FFT into the padded array
 	halfpad = npad / 2
 	cfft[:halfpad] = sfft[:halfpad] * np.conj(rfft[:halfpad])
 	cfft[-halfpad:] = sfft[-halfpad:] * np.conj(rfft[-halfpad:])
-	# Find the delay and handle wrapping properly
-	t = np.argmax(fft.ifft(cfft).real)
+	csig = fft.ifft(cfft)
+	# Find the delay, restricting the range if desired
+	if restrict is not None:
+		start, end = [int(r * nint / npad) for r in restrict[:2]]
+		t = np.argmax(csig.real[start:end]) + start
+	else: t = np.argmax(csig.real)
+	# Unwrap negative values
 	if t >= nint / 2: t = t - nint
+	# Scale the index by the real oversampling rate
 	return t * npad / float(nint)
 
 
