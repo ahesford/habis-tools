@@ -12,41 +12,52 @@ from itertools import groupby
 from pyajh import cutil
 
 
-def pronyfit(deg, x0, h, y):
+def aprony(maxdeg, x0, h, y, thresh=3.0):
 	'''
-	Use Prony's method to fit deg complex-weighted, complex exponentials to
-	a signal y sampled according to the scheme y[i] = y(x0 + i * h). The
-	return values are lm, c, rms, where the approximate signal yp is
+	Use an approximate Prony's method to fit at most maxdeg
+	complex-weighted, complex exponentials to a signal y sampled according
+	to the scheme y[i] = y(x0 + i * h). The complex exponentials are found
+	by approximately inverting the Hankel system using a truncated SVD,
+	where singular values more than thresh standard deviations above the
+	mean are discarded. If there are M singular values retained, a total of
+	M complex exponentials are recovered.
+
+	The return values are lm, c, rms, where the approximate signal yp is
 
 		yp = reduce(add, (cv * exp(x * lv) for lv, cv in zip(lm, c)))
 
-	for a sample fector x = x0 + h * arange(len(y)). The RMS error between
+	for a sample vector x = x0 + h * arange(len(y)). The RMS error between
 	yp and y is returned in rms.
 	'''
 	# Build the system to recover polynomial coefficients
-	A = la.hankel(y[:-deg], y[-deg-1:])
-	a = -A[:,:deg]
-	b = A[:,deg]
-	s = nla.lstsq(a, b)[0]
+	A = la.hankel(y[:-maxdeg], y[-maxdeg-1:])
+	a = -A[:,:-1]
+	b = A[:,-1]
 
-	# Find the roots of the polynomial
-	p = np.flipud(np.hstack((s,1)))
-	u = np.roots(p)
-	# The roots yield the exponential factors
+	# Approximately invert the polynomial equation using SVD
+	u, s, v = la.svd(a, full_matrices=False)
+	# Strip out singular values falling below the threshold, invert the rest
+	adeg = int(np.sum(s > np.mean(s) + thresh * np.std(s)))
+	s = 1. / s[:adeg]
+	s = np.dot(np.conj(v[:adeg,:].T), s * np.dot(np.conj(u[:,:adeg].T), b))
+
+	# Find the roots of the polynomial, which yield exponential factors
+	# Add unity high-order coefficient and reverse order (high-order first)
+	u = np.roots(np.flipud(np.hstack((s,1))))
+	# Keep only the adeg largest roots
+	idx = [v[0] for v in sorted(enumerate(np.abs(u)), key=itemgetter(-1))]
+	u = u[idx[-adeg:]]
+	# The remaining roots yield the relevant exponential factors
 	lm = np.log(u.astype(complex)) / h
 
 	# Solve for the amplitude coefficients
-	emat = np.ones((len(y), 1)) * u[None,:]
-	kmat = np.arange(len(y))[:,None] * np.ones((1,deg))
-	A = np.power(emat, kmat)
-	f = nla.lstsq(A, y)[0]
-	# Convert the coefficients
-	c = f / np.exp(lm * x0)
+	A = (u[None,:]**np.arange(len(y))[:,None]) * u[np.newaxis,:]**(x0 / h)
+	c = nla.lstsq(A, y)[0]
 
 	# Characterize the error
 	x = x0 + h * np.arange(len(y)).astype(complex)
 	approx = reduce(add, (cv * np.exp(x * lv) for lv, cv in zip(lm, c)))
-	rms = np.sqrt((abs(approx-y)**2).sum() / len(y))
+	rms = cutil.mse(approx, y)
 	return lm, c, rms
 
 
