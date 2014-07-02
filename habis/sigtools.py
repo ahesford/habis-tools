@@ -12,15 +12,15 @@ from itertools import groupby
 from pyajh import cutil
 
 
-def aprony(maxdeg, x0, h, y, thresh=3.0):
+def aprony(maxdeg, x0, h, y, rcond=-1):
 	'''
 	Use an approximate Prony's method to fit at most maxdeg
 	complex-weighted, complex exponentials to a signal y sampled according
 	to the scheme y[i] = y(x0 + i * h). The complex exponentials are found
 	by approximately inverting the Hankel system using a truncated SVD,
-	where singular values less than thresh standard deviations above the
-	mean are discarded. If there are M singular values retained, a total of
-	M complex exponentials are recovered.
+	where singular values not more than rcond times the largest singular
+	value are discarded. If there are M singular values retained, a total
+	of M complex exponentials are recovered.
 
 	The return values are lm, c, rms, where the approximate signal yp is
 
@@ -34,30 +34,28 @@ def aprony(maxdeg, x0, h, y, thresh=3.0):
 	a = -A[:,:-1]
 	b = A[:,-1]
 
-	# Approximately invert the polynomial equation using SVD
-	u, s, v = la.svd(a, full_matrices=False)
-	# Strip out singular values falling below the threshold, invert the rest
-	adeg = int(np.sum(s > np.mean(s) + thresh * np.std(s)))
-	s = 1. / s[:adeg]
-	s = np.dot(np.conj(v[:adeg,:].T), s * np.dot(np.conj(u[:,:adeg].T), b))
+	# Approximately invert the polynomial equation using truncated SVD
+	s, res, adeg, sigma = nla.lstsq(a, b, rcond=rcond)
 
 	# Find the roots of the polynomial, which yield exponential factors
 	# Add unity high-order coefficient and reverse order (high-order first)
 	u = np.roots(np.flipud(np.hstack((s,1))))
-	# Keep only the adeg largest roots
-	idx = [v[0] for v in sorted(enumerate(np.abs(u)), key=itemgetter(-1))]
-	u = u[idx[-adeg:]]
-	# The remaining roots yield the relevant exponential factors
+	# The roots yield the relevant exponential factors
 	lm = np.log(u.astype(complex)) / h
 
-	# Solve for the amplitude coefficients
+	# Solve for the approximate amplitude coefficients using truncated SVD
 	A = (u[None,:]**np.arange(len(y))[:,None]) * u[np.newaxis,:]**(x0 / h)
-	c = nla.lstsq(A, y)[0]
+	u, s, v = la.svd(A)
+	# Truncate to the approximate degree noted above, unless more
+	# very small singular values need squashing
+	cdeg = min(int(np.sum(s > s[0] * np.finfo(s.dtype).eps)), adeg)
+	s = 1. / s[:cdeg]
+	c = np.dot(np.conj(v[:cdeg,:].T), s * np.dot(np.conj(u[:,:cdeg].T), y))
 
-	# Characterize the error
+	# Characterize the error and select the most significant contributors
 	x = x0 + h * np.arange(len(y)).astype(complex)
-	approx = reduce(add, (cv * np.exp(x * lv) for lv, cv in zip(lm, c)))
-	rms = cutil.mse(approx, y)
+	rms = [cutil.mse(y - cv * np.exp(x * lv), y) for lv, cv in zip(lm, c)]
+	rms, c, lm = [np.array(f) for f in zip(*sorted(zip(rms, c, lm))[-adeg:])]
 	return lm, c, rms
 
 
