@@ -18,7 +18,7 @@ def aprony(maxdeg, x0, h, y, thresh=3.0):
 	complex-weighted, complex exponentials to a signal y sampled according
 	to the scheme y[i] = y(x0 + i * h). The complex exponentials are found
 	by approximately inverting the Hankel system using a truncated SVD,
-	where singular values more than thresh standard deviations above the
+	where singular values less than thresh standard deviations above the
 	mean are discarded. If there are M singular values retained, a total of
 	M complex exponentials are recovered.
 
