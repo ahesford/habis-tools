@@ -185,3 +185,59 @@ def envpeaks(sig, thresh=3., nwin=None):
 	groups = [map(itemgetter(1), g)
 			for k, g in groupby(enumerate(peaks), lambda(i, x): i - x)]
 	return [(g[0], g[-1] + 1) for g in groups]
+
+
+def bandpass(sig, start, end, tails=None):
+	'''
+	Given a time-domain signal sig, perform a bandpass operation that zeros
+	all frequencies below the frequency bin at index start and above (and
+	including) the frequency bin at index end. A complex FFT is assumed, so
+	the filter will be applied to positive and negative indices.
+
+	If tails is provided, it should be a 1-D array of length N that will
+	modify the frequencies of sig according to the formula
+
+		fsig[start:start+N/2] *= tails[:N/2],
+		fsig[end-N/2:end] *= tails[-N/2:],
+		fsig[-start-N/2:-start] *= conj(reversed(tails[:N/2])),
+		fsig[-end:-end+N/2] *= conj(reversed(tails[-N/2:])),
+
+	where fsig = fft(sig).
+
+	Both sig and tails should be 1-D arrays.
+	'''
+	lsig = len(sig)
+	# Find the maximum positive frequency and the minimum negative frequency
+	fmax = int(lsig - 1) / 2
+	fmin = -int(lsig / 2)
+
+	# Check the window for sanity
+	if start >= end:
+		raise ValueError('Starting index should be less than ending index')
+	if start < 0 or start >= fmax:
+		raise ValueError('Starting index should be positive but less than maximum frequency')
+	if end < 0 or end > fmax:
+		raise ValueError('Ending index should be positive but not exceed maximum frequency')
+
+	# Check the tail for sanity
+	if tails is not None and len(tails) > (end - start):
+		raise ValueError('Single-side tail should not exceed half window width')
+
+	# Transform the signal and apply the window
+	fsig = fft.fft(sig)
+	# Positive frequency window
+	fsig[:start] = 0
+	fsig[end:fmax+1] = 0
+	# Negative frequency window
+	fsig[lsig+fmin:lsig-end+1] = 0
+	fsig[lsig-start+1:] = 0
+
+	# Apply the tails
+	if tails is not None:
+		ltails = len(tails) / 2
+		fsig[start:start+ltails] *= tails[:ltails]
+		fsig[end-ltails:end] *= tails[-ltails:]
+		fsig[lsig-start:lsig-start-ltails:-1] *= np.conj(tails[:ltails])
+		fsig[lsig-end+ltails:lsig-end:-1] *= np.conj(tails[-ltails:])
+
+	return fsig
