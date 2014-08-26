@@ -12,6 +12,24 @@ from itertools import groupby
 from pyajh import cutil
 
 
+def dimcompat(sig, ndim=1):
+	'''
+	Given an input signal sig, ensure that it is compatible with an ndarray
+	of dimension ndim. (That is, the number of dimensions is either ndim or
+	every extra dimension has unity length.) If the array is compatible,
+	return an ndarray squeezed to the proper dimensionality.
+
+	If ndim is None, any dimensionality is satisfactory; sig is still
+	squeezed and the output is guaranteed to be an ndarray.
+	
+	If the signal is incompatible, a TypeError is raised.
+	'''
+	sig = np.squeeze(sig)
+	if ndim is not None and sig.ndim != ndim:
+		raise TypeError('Signal is not of dimension %d' % ndim)
+	return sig
+
+
 def aprony(maxdeg, x0, h, y, rcond=-1):
 	'''
 	Use an approximate Prony's method to fit at most maxdeg
@@ -75,6 +93,11 @@ def delay(sig, ref, osamp=1, restrict=None):
 	'''
 	if osamp < 1:
 		raise ValueError ('Oversampling factor must be at least unity')
+
+	# Ensure dimensional compatibility of the input arrays
+	sig = dimcompat(sig, 1)
+	ref = dimcompat(ref, 1)
+
 	# Find the size of FFT needed to represent the correlation
 	npad = cutil.ceilpow2(len(sig) + len(ref))
 	sfft = fft.fft(sig, npad)
@@ -108,6 +131,7 @@ def normalize(sig, env):
 
 	Both sig and env should be 1-D arrays or column vectors.
 	'''
+	sig = dimcompat(sig, 1)
 	nsig = len(sig)
 	fsig = fft.fft(sig, n=len(env))
 	fsig *= env
@@ -127,6 +151,8 @@ def getenvelope(sig, ref, thresh=0.01):
 
 	Both sig and env should be 1-D arrays or column vectors.
 	'''
+	sig = dimcompat(sig, 1)
+	ref = dimcompat(ref, 1)
 	fsig = fft.fft(sig, len(ref))
 	fsigmax = np.max(fsig)
 	# Eliminate zeros to avoid complaints
@@ -143,11 +169,15 @@ def shifter(sig, d, n=None):
 
 	The signal should be a 1-D array.
 	'''
+	sig = dimcompat(sig, 1)
 	fsig = fft.fft(sig, n)
 	nsig = len(fsig)
 	kidx = fft.fftshift(np.arange(-nsig/2, nsig/2))
 	sh = np.exp(2j * math.pi * d * kidx / nsig)
-	return fft.ifft(fsig * sh)
+	ssig = fft.ifft(fsig * sh)
+	if not np.issubdtype(sig.dtype, np.complexfloating):
+		ssig = ssig.real
+	return ssig.astype(sig.dtype)
 
 
 def envpeaks(sig, thresh=3., nwin=None):
@@ -166,6 +196,7 @@ def envpeaks(sig, thresh=3., nwin=None):
 
 	The signal should be a 1-D real array.
 	'''
+	sig = dimcompat(sig, 1)
 	if thresh < 0:
 		raise ValueError('Argument thresh must be positive')
 	# Ensure that the slice value is appropriate
@@ -206,8 +237,10 @@ def bandpass(sig, start, end, tails=None):
 
 	Both sig and tails should be 1-D arrays.
 	'''
-	lsig = len(sig)
+	# Ensure that the input is 1-D compatible
+	sig = dimcompat(sig, 1)
 	# Find the maximum positive frequency and the minimum negative frequency
+	lsig = len(sig)
 	fmax = int(lsig - 1) / 2
 	fmin = -int(lsig / 2)
 
@@ -240,4 +273,8 @@ def bandpass(sig, start, end, tails=None):
 		fsig[lsig-start:lsig-start-ltails:-1] *= np.conj(tails[:ltails])
 		fsig[lsig-end+ltails:lsig-end:-1] *= np.conj(tails[-ltails:])
 
-	return fsig
+	# If the input was real, ensure that the output is real too
+	bsig = fft.ifft(fsig)
+	if not np.issubdtype(sig.dtype, np.complexfloating):
+		bsig = bsig.real
+	return bsig.astype(sig.dtype)
