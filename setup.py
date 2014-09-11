@@ -24,7 +24,7 @@ def configuration(parent_package='', top_path=None):
 if __name__ == '__main__':
 	from numpy.distutils.core import setup
 
-	setup(name = 'habis', version = '0.5',
+	setup(name = 'habis', version = '0.6',
 			description = DOCLINES[0],
 			long_description = '\n'.join(DOCLINES[2:]),
 			author = 'Andrew J. Hesford',

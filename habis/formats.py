@@ -20,11 +20,11 @@ def splitspecreps(a):
 	corresponding to each group of spectral representations in the original
 	array. The number of records in the first group (output[0]) is
 	specified by n[0] = (a[0]['idx'] + 1), with output[0] = a[:n[0]].
-		
+
 	The number of records in a subsequent group (output[i]) is given by
 
 		n[i] = (a[sum(n[:i-1])]['idx'] + 1),
-		
+
 	with output[i] = a[sum(n[:i-1]):sum(n[:i])].
 	'''
 	start = 0
@@ -45,7 +45,7 @@ def countspecreps(f):
 	the number of components in each group within the sequence. Thus, if A
 	represents the array of habis.formats.specreptype() records listed in the
 	file f, the output array n will have
-	
+
 		n[0] = (A[0]['idx'] + 1), and
 		n[i] = (A[sum(n[:i-1])]['idx'] + 1).
 	'''
@@ -65,3 +65,75 @@ def countspecreps(f):
 		infile.seek(nrec * dtype.itemsize, os.SEEK_CUR)
 
 	return n
+
+
+def readfirecapture(f):
+	'''
+	Read the capture of a single HABIS fire sequence (with any number of
+	transmit repetitions) in CSV format. The file has 4 header lines and is
+	comma-delimited. The format of each line is a sequence of integers
+
+		channel, repetition, samples...
+
+	where samples are in the range [-8192,8192). Channel values are indexed
+	from zero.
+
+	The data is sorted first by channel and then by repetition index before
+	processing.
+
+	The return value is a tuple (output, channels, repetitions), where
+	output is 3-D array of the form output[i,j,k], where i is the receive
+	channel index, j is the repetition, and k is the sample index. Every
+	receive channel must contain the same number of repetitions or a
+	ValueError will be raised. The list channels contains elements that
+	indicate the channel indices identified in the file, such that
+	channels[i] is the listed channel index for slice output[i,:,:].
+	The list repetitions is similarly defined such that reptitions[j] is
+	the listed repetition index for slice output[:,j,:].
+	'''
+	# Read the data
+	data = np.genfromtxt(f, skip_header=4, delimiter=',')
+	# Sort the data according to channel and repetition
+	idx = sorted((d[0], d[1], i) for i, d in enumerate(data[:,:2].astype(int)))
+	data = data[[v[-1] for v in idx]]
+	# Count the channels and reptitions
+	def counter(x, y):
+		"Count the channel and repetition in a result dictionary tuple"
+		try: x[0][y[0]] += 1
+		except KeyError: x[0][y[0]] = 1
+		try: x[1][y[1]] += 1
+		except KeyError: x[1][y[1]] = 1
+		return x
+	channels, repetitions = reduce(counter, idx, ({}, {}))
+	# Ensure that all channels have the same repetition count
+	if len(set(channels.values())) != 1:
+		raise ValueError('All channels must have the same number of reptitions')
+	if len(set(repetitions.values())) != 1:
+		raise ValueError('Each channel must have same set of reptition indices')
+
+	# Strip out the channel and repetition indices
+	channels = sorted(channels.keys())
+	repetitions = sorted(repetitions.keys())
+
+	nchan = len(channels)
+	nreps = len(repetitions)
+	nsamps = data.shape[-1] - 2
+
+	return data[:,2:].reshape((nchan, nreps, nsamps)), channels, repetitions
+
+
+def readfiresequence(fmt, findx):
+	'''
+	Read a series of HABIS fire capture fires whose names are given by the
+	Python format string fmt. The string fmt is passed to the format
+	function with each value in the sequence findx to produce a unique
+	filename. The output arrays of readfirecapture() are collected, in
+	sequence, and concatenated along a new first axis.
+
+	The channel and reptition indices returned by readfirecapture() are
+	ignored. However, because np.concatenate() is used to produce the
+	concatenated output, every readfirecapture() array must have the same
+	shape.
+	'''
+	return np.concatenate([readfirecapture(fmt.format(f))[0][np.newaxis,:,:,:]
+		for f in findx], axis=0)
