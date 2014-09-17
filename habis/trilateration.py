@@ -5,7 +5,7 @@ Routines for performing acoustic trilateration.
 import numpy as np, math
 from numpy import fft, linalg as la
 from scipy.sparse.linalg import lsmr, LinearOperator
-from pyajh import cutil
+from pycwp import cutil
 
 from . import facet
 

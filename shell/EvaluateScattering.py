@@ -3,7 +3,7 @@
 import sys, os
 from subprocess import call
 
-from pyajh import process
+from pycwp import process
 
 def procexec(prog, args, inputs):
 	'''

@@ -3,7 +3,7 @@
 import sys, os
 from subprocess import call
 from mpi4py import MPI
-from pyajh import util, process
+from pycwp import util, process
 
 def procexec(args):
 	'''

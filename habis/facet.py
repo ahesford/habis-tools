@@ -6,7 +6,7 @@ import numpy as np
 from numpy import linalg as la
 from scipy.sparse.linalg import lsmr
 
-from pyajh import cutil
+from pycwp import cutil
 
 
 def normal(f):

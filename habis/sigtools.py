@@ -9,7 +9,7 @@ from scipy.signal import hilbert
 from operator import itemgetter, add
 from itertools import groupby
 
-from pyajh import cutil
+from pycwp import cutil
 
 
 def dimcompat(sig, ndim=1):

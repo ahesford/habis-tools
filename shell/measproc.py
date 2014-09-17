@@ -4,7 +4,7 @@ import numpy as np, os, sys, fht, pyfftw, getopt, operator as op
 from collections import defaultdict
 from mpi4py import MPI
 
-from pyajh import mio, process
+from pycwp import mio, process
 
 
 def usage(progname=None):
