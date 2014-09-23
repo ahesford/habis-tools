@@ -67,7 +67,17 @@ def countspecreps(f):
 	return n
 
 
-def readfirecapture(f):
+def repreducer(n):
+	'''
+	This is a factory function that returns a reducer function, suitable
+	for use in readfiresequence and readfirecapture, which selects only
+	rows whose repetition index matches the specified integer n.
+	'''
+	def reducefunc(mat): return mat[mat[:,1].astype(int) == n]
+	return reducefunc
+
+
+def readfirecapture(f, reducer=None):
 	'''
 	Read the capture of a single HABIS fire sequence (with any number of
 	transmit repetitions) in CSV format. The file has 4 header lines and is
@@ -90,11 +100,19 @@ def readfirecapture(f):
 	channels[i] is the listed channel index for slice output[i,:,:].
 	The list repetitions is similarly defined such that reptitions[j] is
 	the listed repetition index for slice output[:,j,:].
+
+	If reducer is not None, it should be a callable that takes as input the
+	raw array data read from f and returns a filtered version of the data
+	that will be processed as that were the raw data read from the file.
 	'''
-	# Read the data
-	data = np.genfromtxt(f, skip_header=4, delimiter=',')
+	# Read the data and use the reducer filter if appropriate
+	data = np.genfromtxt(f, skip_header=4, delimiter=',', dtype=int)
+	# If reducer is None, a TypeError is raised; just ignore it
+	try: data = reducer(data)
+	except TypeError: pass
+
 	# Sort the data according to channel and repetition
-	idx = sorted((d[0], d[1], i) for i, d in enumerate(data[:,:2].astype(int)))
+	idx = sorted((d[0], d[1], i) for i, d in enumerate(data[:,:2]))
 	data = data[[v[-1] for v in idx]]
 	# Count the channels and reptitions
 	def counter(x, y):
@@ -122,7 +140,7 @@ def readfirecapture(f):
 	return data[:,2:].reshape((nchan, nreps, nsamps)), channels, repetitions
 
 
-def readfiresequence(fmt, findx):
+def readfiresequence(fmt, findx, reducer=None):
 	'''
 	Read a series of HABIS fire capture fires whose names are given by the
 	Python format string fmt. The string fmt is passed to the format
@@ -134,6 +152,9 @@ def readfiresequence(fmt, findx):
 	ignored. However, because np.concatenate() is used to produce the
 	concatenated output, every readfirecapture() array must have the same
 	shape.
+
+	The reducer is passed to readfirecapture for processing per-fire data.
 	'''
-	return np.concatenate([readfirecapture(fmt.format(f))[0][np.newaxis,:,:,:]
-		for f in findx], axis=0)
+	data = [readfirecapture(fmt.format(f), reducer=reducer)[0][np.newaxis,:,:,:]
+			for f in findx]
+	return np.concatenate(data, axis=0)
