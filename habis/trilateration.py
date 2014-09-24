@@ -4,10 +4,86 @@ Routines for performing acoustic trilateration.
 
 import numpy as np, math
 from numpy import fft, linalg as la
+from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsmr, LinearOperator
 from pycwp import cutil
 
 from . import facet
+
+class ArrivalTimeFinder(object):
+	'''
+	Given an (Nt x Nt) map of arrival times for signals broadcast by Nt
+	transmitter channels (along the rows) and received by a coincident set
+	of Nt receiver channels (along the columns), determine a set of Nt
+	round-trip arrival times that optimally (in the least-squares sense)
+	predict the entire arrival-time map.
+
+	The map can be a masked array to exclude some measurements from
+	consideration.
+	'''
+	def __init__(self, atmap):
+		'''
+		Initialize an ArrivalTimeFinder using the (optionally masked)
+		map of (Nt x Nt) arrival times of signals. The arrival time
+		atmap[i][j] is that observed at receive channel j for a
+		transmission from channel i.
+		'''
+		# Copy the arrival-time map
+		self.atmap = atmap
+
+
+	@property
+	def atmap(self): return self._atmap
+
+	@atmap.setter
+	def atmap(self, atmap):
+		# Ensure the map has the right shape
+		try: shape = atmap.shape
+		except AttributeError:
+			atmap = np.array(atmap)
+			shape = atmap.shape
+		if len(shape) != 2:
+			raise TypeError('Arrival time map must be of rank 2')
+		if shape[0] != shape[1]:
+			raise TypeError('Arrival time map must be square')
+
+		# Capture a copy to the arrival-time map
+		self._atmap = atmap.copy()
+
+	@atmap.deleter
+	def atmap(self): del self._atmap
+
+
+	def times(self, itargs={}):
+		'''
+		Return, using LSMR (scipy.sparse.linagl.lsmr), the optimum
+		arrival times based on the previously provided arrival-time
+		map. The dictionary itargs is passed to LSMR.
+		'''
+		# Build the sparse matrix relating optimum times to the map
+		nx, ny = self.atmap.shape
+		data, indices, indptr = [], [], [0]
+		for i in range(nx):
+			for j in range(ny):
+				if i == j:
+					indices.append(i)
+					data.append(1.)
+				else:
+					indices.extend([min(i, j), max(i,j)])
+					data.extend([0.5, 0.5])
+				indptr.append(len(data))
+		matrix = csr_matrix((data, indices, indptr), dtype=np.float32)
+
+		# Flatten the map
+		atmap = self.atmap.ravel()
+		# Try to determine a mask of values to keep
+		try: mask = np.logical_not(atmap.mask)
+		except AttributeError: mask = np.ones(atmap.shape, dtype=bool)
+
+		# Solve the system
+		times = lsmr(matrix[mask], atmap[mask], **itargs)[0]
+		return times
+
 
 class PointTrilateration(object):
 	'''

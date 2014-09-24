@@ -218,7 +218,7 @@ def envpeaks(sig, thresh=3., nwin=None):
 	return [(g[0], g[-1] + 1) for g in groups]
 
 
-def bandpass(sig, start, end, tails=None):
+def bandpass(sig, start, end, tails=None, n=None):
 	'''
 	Given a time-domain signal sig, perform a bandpass operation that zeros
 	all frequencies below the frequency bin at index start and above (and
@@ -235,12 +235,15 @@ def bandpass(sig, start, end, tails=None):
 
 	where fsig = fft(sig).
 
+	If n is not None, the signal will be zero-padded or truncated, as
+	necessary, to length n before it is Fourier transformed for filtering.
+
 	Both sig and tails should be 1-D arrays.
 	'''
 	# Ensure that the input is 1-D compatible
 	sig = dimcompat(sig, 1)
 	# Find the maximum positive frequency and the minimum negative frequency
-	lsig = len(sig)
+	lsig = len(sig) if n is None else n
 	fmax = int(lsig - 1) / 2
 	fmin = -int(lsig / 2)
 
@@ -257,7 +260,7 @@ def bandpass(sig, start, end, tails=None):
 		raise ValueError('Single-side tail should not exceed half window width')
 
 	# Transform the signal and apply the window
-	fsig = fft.fft(sig)
+	fsig = fft.fft(sig, n=n)
 	# Positive frequency window
 	fsig[:start] = 0
 	fsig[end:fmax+1] = 0
