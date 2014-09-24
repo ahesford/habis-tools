@@ -121,11 +121,15 @@ class PointTrilateration(object):
 
 		The Jacobian takes the form
 
-			J = 2 * [ D[i,j] ],
+			J = [ D[i,j] ],
 
 		where entries take the form
 
-			D[i,j] = centers[i,j] - pos[j].
+			D[i,j] = (centers[i,j] - pos[j]) / dist(i)
+
+		for a distance
+
+			dist(i) = sqrt(sum(centers[i,j] - pos[j], j)).
 		'''
 		# Ensure that pos is at least a 2-D row vector
 		pos = cutil.asarray(pos, 1)
@@ -136,7 +140,8 @@ class PointTrilateration(object):
 			raise TypeError('Dimensionality of pos does not match Jacobian shape')
 
 		# Compute the spatial variations for this Jacobian
-		jac = 2 * (self.centers - pos[np.newaxis,:ndim])
+		dist = np.sqrt(np.sum((self.centers - pos[np.newaxis,:])**2, axis=1))
+		jac = (self.centers - pos[np.newaxis,:ndim]) / dist[:,np.newaxis]
 
 		return jac
 
@@ -152,8 +157,8 @@ class PointTrilateration(object):
 
 		The cost function takes the form
 
-			F[i] = c**2 * (times[i] / 2)**2 -
-				sum((centers[i] - pos[newaxis,:])**2).
+			F[i] = c * times[i] / 2 -
+				sqrt(sum((centers[i] - pos[newaxis,:])**2)).
 		'''
 		# Ensure the arguments are properly formatted
 		pos = cutil.asarray(pos, 1)
@@ -164,13 +169,11 @@ class PointTrilateration(object):
 		if len(times) != nrows:
 			raise TypeError('Arrival time counts must match known element count')
 
-		# Account for a one-way signal delay, if provided
 		if len(pos) != ndim:
 			raise TypeError('Dimensionality of pos must be compatible with that of known elements')
 
-		atimes = times / 2.
-		dist = np.sum((self.centers - pos[np.newaxis,:ndim])**2, axis=1)
-		return (self.c * atimes)**2 - dist
+		dist = np.sqrt(np.sum((self.centers - pos[np.newaxis,:ndim])**2, axis=1))
+		return self.c * times / 2 - dist
 
 
 	def newton(self, times, pos=None, maxit=100, tol=1e-6, itargs={}):
