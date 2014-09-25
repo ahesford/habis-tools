@@ -214,7 +214,171 @@ class PointTrilateration(object):
 		return pos
 
 
-class PlaneTrilateration(PointTrilateration):
+class MultiPointTrilateration(PointTrilateration):
+	'''
+	Use the fixed positions of known elements, embedded in a medium of
+	known wave speed, to simultaneously determine the unknown positions of
+	additional elements using the measured arrival times of signals
+	reflected from the known elements.
+
+	Optionally, the sound speed can be recovered along with the positions.
+	'''
+	def __init__(self, centers, c=1.507):
+		'''
+		Create a trilateration object using a collection of elements
+		whose positions are specified along rows of the rank-2 array
+		centers. The wave speed c is used to relate round-trip arrival
+		times to distances.
+		'''
+		# Initialize according to super
+		sup = super(MultiPointTrilateration, self).__init__(centers, c)
+
+
+	def cost(self, pos, times):
+		'''
+		Compute the cost function associated with Newton-Raphson
+		iterations for acoustic trilateration as configured in the
+		object instance. The rank-2 position array pos specifies,
+		row-wise, the estimated coordinates of all unknown elements.
+
+		The rank-2 array times specifies along its rows arrival times
+		that characterize the separations between the corresponding
+		element in pos and each of the previously configured elements.
+
+		The cost function is the concatenation of the cost functions
+		for independent, per-element trilateration problems.
+		'''
+		# Treat the positions and times as a rank-2 array
+		pos = cutil.asarray(pos, 2, False)
+		times = cutil.asarray(times, 2, False)
+
+		# The position vector has one extra row for normal components
+		nelts, ncols = pos.shape
+		nrows, ndim = self.centers.shape
+
+		if ncols != ndim:
+			raise TypeError('Element positions must have same dimensionality as reference points')
+		if times.shape[0] != nelts:
+			raise TypeError('Numbers of rows in pos must match that of times')
+		if times.shape[-1] != nrows:
+			raise TypeError('Per-element arrival time counts must match known element count')
+
+		# Build the per-element trilateration costs
+		sup = super(MultiPointTrilateration, self)
+		cfunc = [sup.cost(p, t) for p, t in zip(pos, times)]
+
+		# Concatenate all contributions for the global cost
+		return np.concatenate(cfunc)
+
+
+	def jacobian(self, pos):
+		'''
+		Computes the Jacobian matrix of the cost function described in
+		the docstring for cost(), as a scipy LinearOperator, to
+		facilitate Newton-Raphson iteration for simultaneous acoustic
+		trilateration of multiple unknown elements. If the object's
+		varc property is True,
+
+		Each row of the rank-2 array pos specifies the current position
+		estimate for one of the unknown elements.
+
+		The Jacobian consists of a block-diagonal part whose blocks
+		correspond to independent trilateration problems to recover
+		element positions, followed by rows to enforce the coplanarity
+		of all elements.
+
+		The vector acted on by the LinearOperator should follow the
+		form of the argument pos, flattened in row-major order.
+		'''
+		# Treat the positions as a rank-2 array
+		pos = cutil.asarray(pos, 2, False)
+
+		nelts, ncols = pos.shape
+		nrows, ndim = self.centers.shape
+
+		if ncols != ndim:
+			raise TypeError('Element positions must have same dimensionality of reference points')
+
+		# Build the per-element Jacobian blocks
+		sup = super(MultiPointTrilateration, self)
+		jacs = [sup.jacobian(p) for p in pos]
+
+		# Build the MVP and its adjoint for a LinearOperator
+		def mv(x):
+			# Reshape the element coordinates for convenience
+			x = np.reshape(x, (nelts, ncols), order='C')
+			# Compute the independent trilateration parts
+			y = [np.dot(j, xv) for j, xv in zip(jacs, x)]
+			return np.concatenate(y)
+
+		def mvt(y):
+			ntrilat = nelts * nrows
+			# Reshape the independent trilateration parts
+			ytri = np.reshape(y[:ntrilat], (nelts, nrows), order='C')
+			# Store the output
+			x = np.empty((nelts, ncols), dtype=self.centers.dtype)
+			# Compute spatial, independent portion of element positions
+			for j, yt, xv in zip(jacs, ytri, x):
+				xv[:] = np.dot(j.T, yt)
+			return x.ravel('C')
+
+		jshape = (nelts * nrows, nelts * ncols)
+		jac = LinearOperator(shape=jshape, matvec=mv,
+				rmatvec=mvt, dtype=self.centers.dtype)
+		return jac
+
+
+	def newton(self, times, pos=None, maxit=100, tol=1e-6, itargs={}):
+		'''
+		Use Newton-Raphson iteration to recover the positions of
+		unknown element associated with the provided round-trip arrival
+		times that correspond to known element positions configured for
+		the object instance.
+
+		Initial estimates pos may be specified, but are assumed to be
+		zero by default. The rank-2 array pos should specifies the
+		estimated coordinates of one element along each row.
+
+		Iterations will stop after maxit iterations or when the norm of
+		a computed update is less than tol times the norm of the guess
+		used to produce the update, whichever occurs first.
+
+		The inverse of the Jacobian is computed using the LSMR
+		algorithm (scipy.sparse.linalg.lsmr). The dictionary itargs is
+		passed to the LSMR function as its kwargs.
+		'''
+		times = cutil.asarray(times, 2)
+
+		nrows, ndim = self.centers.shape
+		nelts = times.shape[0]
+
+		if times.shape[1] != nrows:
+			raise TypeError('Per-element arrival time counts must match known element count')
+
+		if pos is not None: pos = np.array(pos)
+		else: pos = np.zeros((nelts, ndim), dtype=self.centers.dtype)
+
+		if pos.shape[1] != ndim:
+			raise TypeError('Element positions must specify an arrival delay parameter')
+		if pos.shape[0] != nelts:
+			raise TypeError('Number of rows in pos must match that of times')
+
+		for i in range(maxit):
+			# Build the Jacobian and right-hand side
+			jac = self.jacobian(pos)
+			cost = self.cost(pos, times)
+			# Use LSMR to invert the system
+			delt = lsmr(jac, cost, **itargs)[0]
+			# Check for convergence
+			conv = (la.norm(delt) < tol * la.norm(pos))
+			# Add the update and break when converged
+			pos -= delt.reshape((nelts, ndim), order='C')
+			if conv: break
+
+		return pos
+
+
+class PlaneTrilateration(MultiPointTrilateration):
 	'''
 	Use the fixed positions of known elements, embedded in a medium of
 	known wave speed, to determine the unknown position of a collection of
@@ -257,32 +421,26 @@ class PlaneTrilateration(PointTrilateration):
 			raise TypeError('Element positions must have same dimensionality of reference points')
 
 		# Build the per-element Jacobian blocks
-		sup = super(PlaneTrilateration, self)
-		jacs = [sup.jacobian(p) for p in pos]
+		bjac = super(PlaneTrilateration, self).jacobian(pos)
 
 		# Determine the normal to element plane
 		normal = facet.lsqnormal(pos)
 
 		# Build the MVP and its adjoint for a LinearOperator
 		def mv(x):
+			# Use the per-element Jacobian to compute the first part
+			y = bjac.matvec(x)
 			# Reshape the element coordinates for convenience
 			x = np.reshape(x, (nelts, ncols), order='C')
-			# Compute the independent trilateration parts
-			y = [np.dot(j, xv) for j, xv in zip(jacs, x)]
 			# Compute the coplanarity parts
 			relx = x - np.mean(x, axis=0)
-			y.append(np.dot(relx, normal))
-			return np.concatenate(y)
+			return np.concatenate([y, np.dot(relx, normal)])
 
 		def mvt(y):
 			ntrilat = nelts * nrows
-			# Reshape the independent trilateration parts
+			# Compute the independent trilateration contribution
+			x = bjac.rmatvec(y[:ntrilat]).reshape((nelts, ncols), order='C')
 			ytri = np.reshape(y[:ntrilat], (nelts, nrows), order='C')
-			# Store the output
-			x = np.empty((nelts, ncols), dtype=self.centers.dtype)
-			# Compute spatial, independent portion of element positions
-			for j, yt, xv in zip(jacs, ytri, x):
-				xv[:] = np.dot(j.T, yt)
 			# Include coplanarity contribution
 			yplan = y[ntrilat:ntrilat+nelts,np.newaxis]
 			x += np.dot(yplan - np.mean(yplan), normal[np.newaxis,:])
@@ -325,63 +483,10 @@ class PlaneTrilateration(PointTrilateration):
 			raise TypeError('Per-element arrival time counts must match known element count')
 
 		# Build the per-element trilateration costs
-		sup = super(PlaneTrilateration, self)
-		cfunc = [sup.cost(p, t) for p, t in zip(pos, times)]
+		cfunc = super(PlaneTrilateration, self).cost(pos, times)
 
 		# Add costs to enforce coplanarity
 		relpos = pos - np.mean(pos, axis=0)
 		normal = facet.lsqnormal(pos)
-		cfunc.append(np.dot(relpos, normal))
-
-		# Concatenate all contributions for the global cost
-		return np.concatenate(cfunc)
-
-
-	def newton(self, times, pos=None, maxit=100, tol=1e-6, itargs={}):
-		'''
-		Use Newton-Raphson iteration to recover the positions of
-		unknown element associated with the provided round-trip arrival
-		times that correspond to known element positions configured for
-		the object instance. The positions are required to be coplanar.
-
-		Initial estimates pos may be specified, but are assumed to be
-		zero by default. The rank-2 array pos should specifies the
-		estimated coordinates of one element along each row.
-		
-		Iterations will stop after maxit iterations or when the norm of
-		a computed update is less than tol times the norm of the guess
-		used to produce the update, whichever occurs first.
-
-		The inverse of the Jacobian is computed using the LSMR
-		algorithm (scipy.sparse.linalg.lsmr). The dictionary itargs is
-		passed to the LSMR function as its kwargs.
-		'''
-		times = cutil.asarray(times, 2)
-
-		nrows, ndim = self.centers.shape
-		nelts = times.shape[0]
-
-		if times.shape[1] != nrows:
-			raise TypeError('Per-element arrival time counts must match known element count')
-
-		if pos is not None: pos = np.array(pos)
-		else: pos = np.zeros((nelts, ndim), dtype=self.centers.dtype)
-
-		if pos.shape[1] != ndim:
-			raise TypeError('Element positions must specify an arrival delay parameter')
-		if pos.shape[0] != nelts:
-			raise TypeError('Number of rows in pos must match that of times')
-
-		for i in range(maxit):
-			# Build the Jacobian and right-hand side
-			jac = self.jacobian(pos)
-			cost = self.cost(pos, times)
-			# Use LSMR to invert the system
-			delt = lsmr(jac, cost, **itargs)[0]
-			# Check for convergence
-			conv = (la.norm(delt) < tol * la.norm(pos))
-			# Add the update and break when converged
-			pos -= delt.reshape((nelts, ndim), order='C')
-			if conv: break
-
-		return pos
+		# Concatenate both contributions for the global cost
+		return np.concatenate([cfunc, np.dot(relpos, normal)])
