@@ -21,33 +21,25 @@ def normal(f):
 	nelts, ndim = f.shape
 
 	try: eps = np.finfo(f.dtype).eps
-	except ValueError: eps = 1.0e-7
+	except ValueError: eps = 1.0
 
 	# If there aren't enough points on the facet, pick the midpoint
 	if nelts < 3:
-		n = np.mean(f, axis=0)
-		return n / max(la.norm(n), eps)
+		return cutil.vecnormalize(np.mean(f, axis=0))
 
 	# The first reference direction points from one corner to another
-	ref = f[-1] - f[0]
-	ref /= max(la.norm(ref), eps)
+	ref = cutil.vecnormalize(f[-1] - f[0])
 	# Enumerate local directions of all other elements
-	vecs = f[1:-1,:] - f[0][np.newaxis,:]
-	lvecs = la.norm(vecs, axis=1)
-	vecs /= np.fmax(lvecs[:,np.newaxis], eps)
+	vecs = cutil.vecnormalize(f[1:-1,:] - f[0][np.newaxis,:], axis=1)
 	# Find the vector most orthogonal to the reference
 	v = vecs[np.argmin(np.dot(vecs, ref)),:]
-	# Compute the normal and its length
-	n = np.cross(v, ref)
-	nnrm = la.norm(n)
+	# Compute the normal
+	n = cutil.vecnormalize(np.cross(v, ref))
 
 	# If the cross product is very small, treat the elements as collinear
-	if nnrm < eps:
-		n = np.mean(f, axis=0)
-		return n / max(la.norm(n), eps)
+	if la.norm(n) < eps:
+		return cutil.vecnormalize(np.mean(f, axis=0))
 
-	# Otherwise, normalize the vector and pick the right direction
-	n /= nnrm
 	# Find length of normal segment connecting origin to facet plane
 	d = np.dot(f[0], n)
 	# If d is positive, the normal already points outward
@@ -70,13 +62,10 @@ def lsqnormal(f, maxit=100, tol=1e-6, itargs={}):
 	f = cutil.asarray(f, 2, False)
 	nelts, ndim = f.shape
 
-	try: eps = np.finfo(f.dtype).eps
-	except ValueError: eps = tol
-
 	# Find the midpoint of the facet
 	mp = np.mean(f, axis=0)
-	# If the norm is small, don't normalize
-	guess = mp / max(la.norm(mp), eps)
+	# The guess is the vector pointing toward the midpoint
+	guess = cutil.vecnormalize(normal(f))
 
 	# If there aren't enough points on the facet, use the midpoint
 	if nelts < 3: return guess
@@ -95,6 +84,6 @@ def lsqnormal(f, maxit=100, tol=1e-6, itargs={}):
 		if conv: break
 
 	# Normalize and check directionality of the normal
-	guess /= max(la.norm(guess), eps)
+	guess = cutil.vecnormalize(guess)
 	d = np.dot(mp, guess)
 	return guess if (d > 0) else -guess
