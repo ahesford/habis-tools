@@ -3,6 +3,7 @@ Routines for manipulating HABIS data file formats.
 '''
 
 import numpy as np
+import pandas
 
 def specreptype():
 	'''
@@ -106,7 +107,7 @@ def readfirecapture(f, reducer=None):
 	that will be processed as that were the raw data read from the file.
 	'''
 	# Read the data and use the reducer filter if appropriate
-	data = np.genfromtxt(f, skip_header=4, delimiter=',', dtype=int)
+	data = pandas.read_csv(f, skiprows=4, header=None).values
 	# If reducer is None, a TypeError is raised; just ignore it
 	try: data = reducer(data)
 	except TypeError: pass

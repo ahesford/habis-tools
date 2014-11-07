@@ -6,6 +6,7 @@ import numpy as np, math
 from numpy import fft, linalg as la
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsmr, LinearOperator
+from scipy.optimize import fmin_bfgs
 from pycwp import cutil
 
 from . import facet
@@ -54,7 +55,21 @@ class ArrivalTimeFinder(object):
 	def atmap(self): del self._atmap
 
 
-	def times(self, itargs={}):
+	def bfgs(self, itargs={}):
+		'''
+		Return, using BFGS (scipy.optimize.fmin_bfgs), the optimum
+		arrival times based on the previously provided arrival-time
+		map. The dictionary itargs is passed to BFGS.
+		'''
+		# Create a function that computes the cost functional
+		def f(x):
+			atest = 0.5 * (x[:,np.newaxis] + x[np.newaxis,:])
+			return ((atest - self.atmap)**2).sum()
+		times = fmin_bfgs(f, np.diag(self.atmap), **itargs)
+		return times
+
+
+	def lsmr(self, itargs={}):
 		'''
 		Return, using LSMR (scipy.sparse.linagl.lsmr), the optimum
 		arrival times based on the previously provided arrival-time
