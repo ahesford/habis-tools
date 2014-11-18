@@ -18,7 +18,7 @@ if __name__ == '__main__':
 	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 	identifier = 'MPI rank %d of %d' % (mpirank, mpisize)
 
-	print '%s: transfer from %s to %s' % (identifier, srcdir, destdir)
+	print '%s: transfer from %s to %s' % (identifier, srcdir, os.path.dirname(destform))
 
 	# Grab a list of all spectral representations
 	specfiles = formats.findenumfiles(srcdir, prefix=inprefix, suffix='\.dat')
