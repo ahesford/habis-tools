@@ -14,7 +14,7 @@ from habis import formats
 
 def usage(progname = 'redistribute.py'):
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, "Usage:", binfile, "[-h] [-s svolfile] [-n nodelist] <srcdir>/<inprefix> <destdir>/<outprefix>"
+	print >> sys.stderr, "Usage:", binfile, "[-h] [-s svolfile] [-n nodelist] [-i host-suffix] <srcdir>/<inprefix> <destdir>/<outprefix>"
 
 if __name__ == '__main__':
 	optlist, args = getopt.getopt(sys.argv[1:], 'hi:n:s:')
@@ -64,28 +64,23 @@ if __name__ == '__main__':
 
 	# Accumulate the list of sources on every rank, and flatten into one dictionary
 	srclists = MPI.COMM_WORLD.allgather(specfiles)
-	srclists = dict(kv for kv in s.items() for s in srclists)
+	srclists = dict(kv for s in srclists for kv in s.items())
 
+	# If a subvolume list was specified, use it; otheruse use all subvolumes
 	if svolfile is not None:
-		# If a subvolume list was specified, use it
-		svols = np.fromfile(svolfile, dtype=np.int32)
-		if len(svols) != svols[0] + 1:
-			MPI.COMM_WORLD.Abort(1)
-			sys.exit('Subvolume file header does not agree with length')
-		svols = svols[1:].tolist()
-	else:
-		# If a subvolume list was not specified, use all identified subvolumes
-		svols = sorted(srclists.keys())
+		svols = np.loadtxt(svolfile).astype(int).tolist()
+	else: svols = sorted(srclists.keys())
 
 	# If a receiving nodelist was not specified, use all participating nodes
 	if nodelist is None: nodelist = range(mpisize)
+
 	# Figure the share of subvolumes to be received at this rank
 	share, rem = len(svols) / len(nodelist), len(svols) % len(nodelist)
 	try:
 		drank = nodelist.index(mpirank)
 		start = drank * share + min(drank, rem)
 		if drank < rem: share += 1
-		rcvsvols = set(svols[start:start+share])
+		rcvsvols = svols[start:start+share]
 	except ValueError:
 		rcvsvols = []
 
