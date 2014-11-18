@@ -3,7 +3,22 @@ Routines for manipulating HABIS data file formats.
 '''
 
 import numpy as np
+import re, os
 import pandas
+
+def findenumfiles(dir, prefix='.*?', suffix=''):
+	'''
+	Find all files in the directory dir with a name matching the regexp
+	r'^<PREFIX>([0-9]+)<SUFFIX>$', where <PREFIX> is replaced with an
+	optional prefix and <SUFFIX> is replaced with an optional suffix to
+	restrict the search, and return a list of tuples in which the first
+	item is the name and the second item is the matched integer.
+	'''
+	# Build the regexp and filter the list of files in the directory
+	regexp = re.compile(r'^%s([0-9]+)%s$' % (prefix, suffix))
+	return [(os.path.join(dir, f), int(m.group(1)))
+			for f in os.listdir(dir) for m in [regexp.match(f)] if m]
+
 
 def specreptype():
 	'''

@@ -1,33 +1,19 @@
 #!/usr/bin/env python
 
-import numpy as np, os, sys, re, operator as op
+import numpy as np, os, sys, operator as op
 from itertools import izip, repeat
 from mpi4py import MPI
 
 from habis import formats
 
-def findspecreps(dir, prefix='.*'):
-	'''
-	Find all files in the directory dir with a name matching the regexp
-	r'^<PREFIX>SpecRepsElem([0-9]+).dat$', where <PREFIX> is replaced with
-	an optional prefix to restrict the search, and return a list of tuples
-	in which the first item is the name and the second item is the matched
-	integer.
-	'''
-
-	# Build the regexp and filter the list of files in the directory
-	regexp = re.compile(r'^%sSpecRepsElem([0-9]+).dat$' % prefix)
-	return [(os.path.join(dir, f), int(m.group(1)))
-			for f in os.listdir(dir) for m in [regexp.match(f)] if m]
-
 if __name__ == '__main__':
-	if len(sys.argv) < 4:
-		sys.exit('USAGE: %s <prefix> <srcdir> <destdir>' % sys.argv[0])
+	if len(sys.argv) < 3:
+		sys.exit('USAGE: %s <srcdir>/<inprefix> <destdir>/<outprefix>' % sys.argv[0])
 	
-	# Grab the prefix and the source and destination directories
-	prefix = sys.argv[1]
-	srcdir = sys.argv[2]
-	destdir = sys.argv[3]
+	# Grab the in prefix and the source directory
+	srcdir, inprefix = os.path.split(sys.argv[1])
+	# The destination directory and prefix can remain joined together
+	destform = sys.argv[2]
 
 	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 	identifier = 'MPI rank %d of %d' % (mpirank, mpisize)
@@ -35,7 +21,7 @@ if __name__ == '__main__':
 	print '%s: transfer from %s to %s' % (identifier, srcdir, destdir)
 
 	# Grab a list of all spectral representations
-	specfiles = findspecreps(srcdir, prefix=prefix)
+	specfiles = formats.findenumfiles(srcdir, prefix=inprefix, suffix='\.dat')
 	grpcounts = [sum(gc) for gc in zip(*[formats.countspecreps(f[0]) for f in specfiles])]
 	ngroups = len(grpcounts)
 
@@ -114,7 +100,7 @@ if __name__ == '__main__':
 
 	print '%s: finished splitting and sorting representations' % identifier
 
-	fname = lambda grp: os.path.join(destdir, '%sSpecRepsSubvol%d.dat' % (prefix, grp))
+	fname = lambda grp: '%s%d.dat' % (destform, grp)
 
 	# Open files for every output group
 	groupfiles = [open(fname(grp + start), 'wb') for grp in range(share)]
