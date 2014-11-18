@@ -50,6 +50,7 @@ if __name__ == '__main__':
 			offsets[i] = end
 
 	print '%s: finished local group parsing' % identifier
+	MPI.COMM_WORLD.Barrier()
 
 	# Determine the group shares for each MPI rank
 	share, rem = ngroups / mpisize, ngroups % mpisize
@@ -81,6 +82,8 @@ if __name__ == '__main__':
 
 	# Allocate an array to store received representations and exchange them
 	rspecreps = np.empty((sum(rcounts), ), dtype=dtype)
+	MPI.COMM_WORLD.Barrier()
+
 	MPI.COMM_WORLD.Alltoallv([specreps, counts, displs, rectype],
 			[rspecreps, rcounts, rdispls, rectype])
 
