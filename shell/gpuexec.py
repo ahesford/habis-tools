@@ -10,7 +10,7 @@ from pycwp import util, process
 
 def usage(progname = 'gpuexec.py'):
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, "Usage:", binfile, "[-h] [-m] <-b blocks | -l blockfile> <gpus> <command> [args] ..."
+	print >> sys.stderr, "Usage:", binfile, "[-h] [-m] [-r] <-b blocks | -l blockfile> <gpus> <command> [args] ..."
 
 def procexec(args):
 	'''
@@ -26,13 +26,15 @@ def procexec(args):
 if __name__ == '__main__':
 	# Set default options
 	blocklist, blockfile = None, None
-	multiblock = False
+	multiblock, userank = False, False
 
 	# Parse the command-line arguments
-	optlist, args = getopt.getopt(sys.argv[1:], 'hmb:l:')
+	optlist, args = getopt.getopt(sys.argv[1:], 'hmrb:l:')
 	for opt in optlist:
 		if opt[0] == '-m':
 			multiblock = True
+		elif opt[0] == '-r':
+			userank = True
 		elif opt[0] == '-b':
 			blocklist = range(int(opt[1]))
 		elif opt[0] == '-l':
@@ -81,7 +83,9 @@ if __name__ == '__main__':
 	for blocks in util.grouplist(localblocks, ngpus):
 		with process.ProcessPool() as pool:
 			for b, g in zip(blocks, gpus):
-				pargs = args[:1] + [g, b] + args[1:]
+				# The blocking arguments may include a node rank
+				bargs = [g, b] + ([rank] if userank else [])
+				pargs = args[:1] + bargs + args[1:]
 				pool.addtask(target=procexec, args=(pargs,))
 			pool.start()
 			pool.wait()
