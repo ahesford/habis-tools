@@ -1,0 +1,144 @@
+#!/usr/bin/env python
+
+import sys, itertools, ConfigParser, numpy as np
+
+from pycwp import boxer, mio
+
+# Define a new ConfigurationError exception
+class ConfigurationError(Exception): pass
+
+def usage(progname):
+	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+
+
+def makebox(config):
+	'''
+	Return a boxer.Box3D object configured as specified in the [grid]
+	section of the provided ConfigParser object.
+	'''
+	try:
+		# Grab the lo and hi corners of the box
+		lo = [float(s) for s in config.get('grid', 'lo').split()]
+		hi = [float(s) for s in config.get('grid', 'hi').split()]
+
+		box = boxer.Box3D(lo, hi) 
+
+		# Assign the number of cells
+		box.ncell = [int(s) for s in config.get('grid', 'ncells').split()]
+
+	except (ConfigParser.Error, ValueError):
+		raise ConfigurationError('Box configuration is not valid')
+
+	return box
+
+
+def cellspeeds(cells, contrast):
+	'''
+	Given a set of cells, return a dictionary of relative sound-speed
+	values computed from the mio.readbmat-read 3-D contrast map.
+	'''
+	# Convert contrast values to sound speeds
+	speeds = {}
+	for cell in sorted(cells, key=lambda x: (x[-1], x[-2], x[-3])):
+		ct = contrast[cell[0], cell[1], cell[2]]
+		speeds[cell] = 1. / np.sqrt(ct + 1.).real
+
+	return speeds
+
+
+def averager(box, seg, hits, speeds):
+	'''
+	Compute the average relative sound speed over the boxer.Segment3D seg.
+	For each hit record of the form (i, j, k, tmin, tmax) in the list hits,
+	the relative sound speed in the interval of seg from length tmin to
+	tmax is given by the dictionary entry speeds[hit[:3]]. Outside of the
+	hit cells, the relative sound speed is unity.
+	'''
+	seglen, integral = 0.0, 0.0
+
+	for (i, j, k, tmin, tmax) in hits:
+		# Grab the cell speed
+		spd = speeds[(i, j, k)]
+		# Grab the intersection start and end lengths
+		tmin = max(0, tmin)
+		tmax = min(seg.length, tmax)
+		dx = (tmax - tmin) / seg.length
+		integral += dx * spd
+		seglen += dx
+
+	# Count the default speed outside of the hit range
+	integral += 1.0 - seglen
+	return integral
+
+
+def tracerEngine(config):
+	'''
+	Uses ray-marching to compute average sound speeds along segments
+	passing from elements on the hemispheric transducer array to focal
+	regions within a specified 3-D grid of contrast values.
+	'''
+
+	box = makebox(config)
+	print 'Using grid shape', box.ncell
+
+	# Try to read the contrast file
+	try:
+		contrast = mio.readbmat(config.get('grid', 'contrast'))
+	except ConfigParser.Error:
+		raise ConfigurationError('Configuration must specify a contrast file')
+	except: raise
+
+	if box.ncell != contrast.shape:
+		raise ConfigurationError('Configured grid does not match contrast-file grid')
+
+	try:
+		# Try to read the facet file, the list of element groups, and the group size
+		elements = np.loadtxt(config.get('paths', 'elements'))
+		groups = tuple(int(s) for s in config.get('paths', 'groups').split())
+		elementsPerGroup = int(config.get('paths', 'elementsPerGroup'))
+
+		# Grab the center and output formats
+		centerFormat = config.get('paths', 'centerFormat')
+		outputFormat = config.get('paths', 'outputFormat')
+	except ConfigParser.Error:
+		raise ConfigurationError('Incomplete [paths] section in configuration')
+
+	for grp in groups:
+		# Read the focal centers for this group
+		centers = np.loadtxt(centerFormat.format(grp))
+		# Find the first element in this group
+		first = elementsPerGroup * grp
+		# Build a list to store the rank-2 average speeds for this group
+		avgspeeds = []
+		# Process one element at a time
+		for e in elements[first:first+elementsPerGroup]:
+			# Build a list of segments for this group
+			segs = [boxer.Segment3D(e, cen) for cen in centers]
+			# Collect a list of hits for each focal center in this group
+			hits = [box.raymarcher(seg) for seg in segs]
+
+			# Read the sound speeds for every unique cell encountered
+			speeds = cellspeeds(set(c[:3] for h in hits for c in h), contrast)
+
+			# Average sound speed for all propagation paths
+			avgs = [averager(box, seg, hl, speeds) for seg, hl in zip(segs, hits)]
+			avgspeeds.append(avgs)
+
+		# Save the average speeds for this group
+		np.savetxt(outputFormat.format(grp), avgspeeds, fmt='%13.8f')
+
+
+if __name__ == '__main__':
+	if len(sys.argv) != 2:
+		usage(sys.argv[0])
+		sys.exit(1)
+
+	# Read the configuration file
+	config = ConfigParser.SafeConfigParser()
+	if len(config.read(sys.argv[1])) == 0:
+		print >> sys.stderr, 'ERROR: configuration file %s does not exist' % sys.argv[1]
+		usage(sys.argv[0])
+		sys.exit(1)
+
+	# Call the tracer engine
+	tracerEngine(config)
