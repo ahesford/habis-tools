@@ -2,6 +2,7 @@
 
 import sys, itertools, ConfigParser, numpy as np
 
+from mpi4py import MPI
 from pycwp import boxer, mio
 
 # Define a new ConfigurationError exception
@@ -77,9 +78,10 @@ def tracerEngine(config):
 	passing from elements on the hemispheric transducer array to focal
 	regions within a specified 3-D grid of contrast values.
 	'''
-
+	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 	box = makebox(config)
-	print 'Using grid shape', box.ncell
+	if mpirank == 0:
+		print 'Using grid shape', box.ncell
 
 	# Try to read the contrast file
 	try:
@@ -106,14 +108,27 @@ def tracerEngine(config):
 	for grp in groups:
 		# Read the focal centers for this group
 		centers = np.loadtxt(centerFormat.format(grp))
+		# Compute the start and share of the local center chunk
+		ncenters = len(centers)
+		share, srem = ncenters / mpisize, ncenters % mpisize
+		start = mpirank * share + min(mpirank, srem)
+		if mpirank < srem: share += 1
+
 		# Find the first element in this group
 		first = elementsPerGroup * grp
 		# Build a list to store the rank-2 average speeds for this group
 		avgspeeds = []
 		# Process one element at a time
-		for e in elements[first:first+elementsPerGroup]:
+		for elnum, elt in enumerate(elements[first:first+elementsPerGroup]):
+			# Wait until all processes arrive
+			MPI.COMM_WORLD.Barrier()
+
+			if mpirank == 0:
+				print 'Ray-marching for element', elnum, 'in group', grp
+
 			# Build a list of segments for this group
-			segs = [boxer.Segment3D(e, cen) for cen in centers]
+			segs = [boxer.Segment3D(elt, cen)
+					for cen in centers[start:start+share]]
 			# Collect a list of hits for each focal center in this group
 			hits = [box.raymarcher(seg) for seg in segs]
 
@@ -122,10 +137,14 @@ def tracerEngine(config):
 
 			# Average sound speed for all propagation paths
 			avgs = [averager(box, seg, hl, speeds) for seg, hl in zip(segs, hits)]
-			avgspeeds.append(avgs)
+			# Gather averages on the head node
+			avgather = MPI.COMM_WORLD.gather(avgs)
+			if mpirank == 0:
+				avgspeeds.extend([a for avg in avgather for a in avg])
 
-		# Save the average speeds for this group
-		np.savetxt(outputFormat.format(grp), avgspeeds, fmt='%13.8f')
+		# Save the average speeds for this group (head-node only)
+		if mpirank == 0:
+			np.savetxt(outputFormat.format(grp), avgspeeds, fmt='%13.8f')
 
 
 if __name__ == '__main__':
