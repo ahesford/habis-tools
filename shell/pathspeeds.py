@@ -96,7 +96,10 @@ def tracerEngine(config):
 	try:
 		# Try to read the facet file, the list of element groups, and the group size
 		elements = np.loadtxt(config.get('paths', 'elements'))
-		groups = tuple(int(s) for s in config.get('paths', 'groups').split())
+		groupRange = tuple(int(s) for s in config.get('paths', 'groups').split())
+		groups = range(*groupRange)
+		if mpirank == 0:
+			print 'Will average path speeds in range(%d,%d)' % groupRange
 		elementsPerGroup = int(config.get('paths', 'elementsPerGroup'))
 
 		# Grab the center and output formats
