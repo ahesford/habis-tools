@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 
 import os, sys, itertools, ConfigParser, numpy as np
-import ctypes, multiprocessing
+import multiprocessing, Queue
 import socket
+import json
 
 from operator import mul
 
@@ -16,22 +17,7 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def realarray(shape):
-	'''
-	Create a multiprocessing.Array shared instance to act as a backing
-	store for a Numpy array of float32 values with the specified shape.
-	
-	Returns the tuple (base, narray), where base is the multiprocess.Array
-	instance and narray is the Numpy structure atop the backer. The Numpy
-	array is stored in row-major (C) order.
-	'''
-	base = multiprocessing.Array(ctypes.c_float, reduce(mul, shape))
-	narray = np.frombuffer(base.get_obj(), dtype=np.float32).reshape(shape)
-
-	return base, narray
-
-
-def getdelays(datafile, reffile, osamp, output=None, start=0, stride=1):
+def getdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
 	'''
 	Given a datafile that contains a T x R x Ns matrix of Ns-sample
 	waveforms transmitted by T elements and received by R elements, and a
@@ -46,9 +32,10 @@ def getdelays(datafile, reffile, osamp, output=None, start=0, stride=1):
 	must be a 1-dimensional matrix. Both files must contain 32-bit
 	floating-point values.
 
-	The computed delays populate rows of the provided matrix mat. If mat is
-	None, a new Numpy array is created and filled with zeros wherever
-	stride skips values. The output array is always returned.
+	The return value is a list of 2-tuples, wherein the first element is
+	a flattened waveform index and the second element is the corresponding
+	delay in samples. If queue is not None, the result list is also placed
+	in the queue using queue.put().
 	'''
 	# Read the data and reference files; force proper shapes and dtypes
 	data = mio.readbmat(datafile, dim=3, dtype=np.float32)
@@ -59,19 +46,17 @@ def getdelays(datafile, reffile, osamp, output=None, start=0, stride=1):
 	if ref.shape[0] != ns:
 		raise TypeError('Number of samples in data and reference waveforms must agree')
 
-	# If the output is not provided, create it
-	if output is None:
-		output = np.zeros(data.shape[:-1], dtype=np.float32)
 
-	if output.shape != (t, r):
-		raise TypeError('Shape of output must match first two dimensions of data')
-
-	# Process the results for the appropriate rows
+	# Compute the strided results
+	result = []
 	for idx in range(start, t * r, stride):
 		row, col = np.unravel_index(idx, (t, r), 'C')
-		output[row,col] = sigtools.delay(data[row,col], ref, osamp)
+		result.append((idx, sigtools.delay(data[row,col], ref, osamp)))
 
-	return output
+	try: queue.put(result)
+	except AttributeError: pass
+
+	return result
 
 
 def atimesEngine(config):
@@ -82,12 +67,24 @@ def atimesEngine(config):
 	cross-correlation with a reference pulse, plus some constant offset.
 	'''
 	try:
-		# Grab the data and reference files
-		datafile = config.get('atimes', 'datafile')
+		# Grab the reference and output files
 		reffile = config.get('atimes', 'reffile')
 		outfile = config.get('atimes', 'outfile')
 	except ConfigParser.Error:
-		raise ConfigurationError('Configuration must specify data, reference, and output files in [atimes]')
+		raise ConfigurationError('Configuration must specify reference and output files in [atimes]')
+
+	try:
+		# Try to grab the list of data files
+		datalist = config.get('atimes', 'data')
+	except ConfigParser.Error:
+		raise ConfigurationError('Configuration must specify input data files in [atimes]')
+
+	try:
+		# Assume the list of data files is a valid JSON object
+		datafiles = json.loads(datalist)
+	except ValueError:
+		# If JSON decoding fails, treat the list as whitespace-delimited strings
+		datafiles = datalist.split()
 
 	try:
 		# Grab the oversampling rate
@@ -98,7 +95,7 @@ def atimesEngine(config):
 	try:
 		# Grab the number of processes to use (optional)
 		nproc = int(config.get('general', 'nproc'))
-	except ConfigParser.Error:
+	except ConfigParser.NoOptionError:
 		nproc = process.preferred_process_count()
 	except:
 		raise ConfigurationError('Invalid specification of process count in [general]')
@@ -110,35 +107,70 @@ def atimesEngine(config):
 	except:
 		raise ConfigurationError('Configuration must specify float sampling period and temporal offset in [sampling]')
 
-	# Determine the shape of the multipath data
-	shape = mio.getmattype(datafile, dim=3, dtype=np.float32)[0]
+	try:
+		symmetrize = config.getboolean('atimes', 'symmetrize')
+	except ConfigParser.NoOptionError:
+		symmetrize = False
+	except:
+		raise ConfigureError('Invalid specification of symmetrize in [atimes]')
 
-	# Create the shared memory that will store the delays
-	dlbase, delays = realarray(shape[:-1])
+	# Determine the shape of the first multipath data
+	t, r, ns = mio.getmattype(datafiles[0], dim=3, dtype=np.float32)[0]
 
-	# Spawn the desired processes to perform the cross-correlation
-	with process.ProcessPool() as pool:
-		hostname = socket.gethostname()
-		execname = os.path.basename(sys.argv[0])
+	# Check that all subsequent data files have the same shape
+	for datafile in datafiles[1:]:
+		tp, rp, nsp = mio.getmattype(datafile, dim=3, dtype=np.float32)[0]
+		if (tp, rp, nsp) != (t, r, ns):
+			raise TypeError('All input waveform data must have same shape')
 
-		for i in range(nproc):
-			# Pick a useful hostname
-			procname = '{:s}-{:s}-Rank{:d}'.format(hostname, execname, i)
-			args = (datafile, reffile, osamp, delays, i, nproc)
-			pool.addtask(target=getdelays, name=procname, args=args)
+	# Store results for all data files in this list
+	times = []
 
-		pool.start()
-		pool.wait()
+	# Grab the hostname and executable name for pretty process naming
+	hostname = socket.gethostname()
+	execname = os.path.basename(sys.argv[0])
 
-	# Compute the actual signal arrival times
-	delays = delays * dt + t0
+	for datafile in datafiles:
+		# Create a result queue and a list to store the accumulated results
+		queue = multiprocessing.Queue(nproc)
+		delays = np.zeros((t, r), dtype=np.float32)
 
-	# Prepare the arrival-time finder
-	atf = trilateration.ArrivalTimeFinder(delays)
-	times = atf.lsmr()
+		# Spawn the desired processes to perform the cross-correlation
+		with process.ProcessPool() as pool:
+
+			for i in range(nproc):
+				# Pick a useful hostname
+				procname = '{:s}-{:s}-Rank{:d}'.format(hostname, execname, i)
+				args = (datafile, reffile, osamp, queue, i, nproc)
+				pool.addtask(target=getdelays, name=procname, args=args)
+
+			pool.start()
+
+			# Wait for all processes to respond
+			responses = 0
+			while responses < nproc:
+				try:
+					results = queue.get(timeout=0.1)
+					for idx, delay in results:
+						row, col = np.unravel_index(idx, (t, r), 'C')
+						delays[row,col] = delay
+					responses += 1
+				except Queue.Empty: pass
+
+			pool.wait()
+
+		# Compute the actual signal arrival times
+		delays = delays * dt + t0
+		if symmetrize: delays = 0.5 * (delays + delays.T)
+
+		# Prepare the arrival-time finder
+		atf = trilateration.ArrivalTimeFinder(delays)
+		# Compute the times for this data file and add to the result list
+		times.append(atf.lsmr())
 
 	# Save the output as a text file
-	np.savetxt(outfile, times, fmt='%16.8f')
+	# Each data file gets a column
+	np.savetxt(outfile, np.transpose(times), fmt='%16.8f')
 
 
 if __name__ == '__main__':
