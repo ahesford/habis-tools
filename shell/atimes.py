@@ -36,10 +36,11 @@ def getdelays(datafile, reffile, osamp, output=None, start=0, stride=1):
 	Given a datafile that contains a T x R x Ns matrix of Ns-sample
 	waveforms transmitted by T elements and received by R elements, and a
 	corresponding Ns-sample reference waveform stored in reffile, perform
-	cross-correlation on every received waveform for every stride transmit
-	waveforms, starting at index start, to identify the delay of the
-	received waveform relative to the reference. The waveforms are
-	oversampled by the factor osamp when performing the cross-correlation.
+	cross-correlation on every stride-th received waveform, starting at
+	index start, to identify the delay of the received waveform relative to
+	the reference. The waveforms are oversampled by the factor osamp when
+	performing the cross-correlation. The start index and stride span array
+	of T x R waveforms flattened in row-major order.
 
 	The data file must contain a 3-dimensional matrix, while the reference
 	must be a 1-dimensional matrix. Both files must contain 32-bit
@@ -53,19 +54,22 @@ def getdelays(datafile, reffile, osamp, output=None, start=0, stride=1):
 	data = mio.readbmat(datafile, dim=3, dtype=np.float32)
 	ref = mio.readbmat(reffile, dim=1, dtype=np.float32)
 
-	if data.shape[-1] != ref.shape[0]:
+	t, r, ns = data.shape
+
+	if ref.shape[0] != ns:
 		raise TypeError('Number of samples in data and reference waveforms must agree')
 
 	# If the output is not provided, create it
 	if output is None:
 		output = np.zeros(data.shape[:-1], dtype=np.float32)
 
-	if data.shape[:-1] != output.shape:
+	if output.shape != (t, r):
 		raise TypeError('Shape of output must match first two dimensions of data')
 
 	# Process the results for the appropriate rows
-	for row in range(start, data.shape[0], stride):
-		output[row] = [sigtools.delay(sig, ref, osamp) for sig in data[row]]
+	for idx in range(start, t * r, stride):
+		row, col = np.unravel_index(idx, (t, r), 'C')
+		output[row,col] = sigtools.delay(data[row,col], ref, osamp)
 
 	return output
 
