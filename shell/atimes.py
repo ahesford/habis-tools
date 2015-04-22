@@ -3,7 +3,6 @@
 import os, sys, itertools, ConfigParser, numpy as np
 import multiprocessing, Queue
 import socket
-import json
 
 from operator import mul
 
@@ -67,24 +66,20 @@ def atimesEngine(config):
 	cross-correlation with a reference pulse, plus some constant offset.
 	'''
 	try:
+		# Try to grab the list of input data files
+		datafiles = [items[1] for items in config.items('atimes') if items[0].startswith('datafile')]
+	except ConfigParser.Error:
+		raise ConfigurationError('Configuration must specify an [atimes] section')
+
+	if len(datafiles) < 1:
+		raise ConfigurationError('Configuration must specify at least one datafile in [atimes]')
+
+	try:
 		# Grab the reference and output files
 		reffile = config.get('atimes', 'reffile')
 		outfile = config.get('atimes', 'outfile')
 	except ConfigParser.Error:
 		raise ConfigurationError('Configuration must specify reference and output files in [atimes]')
-
-	try:
-		# Try to grab the list of data files
-		datalist = config.get('atimes', 'data')
-	except ConfigParser.Error:
-		raise ConfigurationError('Configuration must specify input data files in [atimes]')
-
-	try:
-		# Assume the list of data files is a valid JSON object
-		datafiles = json.loads(datalist)
-	except ValueError:
-		# If JSON decoding fails, treat the list as whitespace-delimited strings
-		datafiles = datalist.split()
 
 	try:
 		# Grab the oversampling rate
