@@ -4,8 +4,6 @@ import os, sys, itertools, ConfigParser, numpy as np
 import multiprocessing, Queue
 import socket
 
-from operator import mul
-
 from pycwp import mio, process
 from habis import sigtools, trilateration
 

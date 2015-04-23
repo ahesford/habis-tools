@@ -1,10 +1,7 @@
 #!/usr/bin/env python
 
-import os, sys, itertools, ConfigParser, numpy as np
+import os, sys, time, itertools, ConfigParser, numpy as np
 import multiprocessing
-import socket
-
-from operator import mul
 
 from habis import trilateration
 
@@ -17,35 +14,18 @@ def usage(progname):
 
 def getreflpos(args):
 	'''
-	For args = (times, elemlocs, guess, c), with a list of N round-trip
-	arrival times and an N-by-3 matrix elemlocs of reference element
-	locatations, use Newton's method in
-	habis.trilateration.PointTrilateration to determine, starting with the
-	provided 3-dimensional guess position, the position of a zero-radius
-	reflector in a medium with sound speed c.
+	For args = (times, elocs, guess, c), with a list of N round-trip
+	arrival times and an N-by-3 matrix elocs of reference element
+	locatations, use habis.trilateration.PointTrilateration to determine,
+	starting with the provided 3-dimensional guess position, the position
+	of a zero-radius reflector in a medium with sound speed c.
 
-	The return value is a 3-tuple specifying the final coordinates of the
-	center.
+	The return value is the 3-dimensional position of the reflector.
 	'''
 	times, elemlocs, guess, c = args
 	t = trilateration.PointTrilateration(elemlocs, c)
 	# Offset the arrival times by the propagation time
 	# from reflector surface to center and back
-	return t.newton(times, pos=guess)
-
-
-def geteltpos(times, reflocs, guess, c):
-	'''
-	Given an N-by-M matrix of round-trip arrival times and an M-by-3 matrix
-	reflocs of reference element location, use Newton's method in
-	habis.trilateration.PlaneTrilateration to determine, starting with the
-	N-by-3 matrix of guess positions, the locations of N elements in a
-	medium with sound speed c.
-
-	The return value is an N-by-3 matrix specifying the final coordinates
-	of the center.
-	'''
-	t = trilateration.PlaneTrilateration(reflocs, c)
 	return t.newton(times, pos=guess)
 
 
@@ -104,22 +84,19 @@ def trilaterationEngine(config):
 	pool = multiprocessing.Pool(processes=nproc)
 
 	# Compute the reflector positions in parallel
+	# Use async calls to correctly handle keyboard interrupts
 	result = pool.map_async(getreflpos,
 			((t, elements, g, c) for t, g in zip(times.T, guess)))
-
-	# Loop to check for completed results
-	while True:
-		try:
-			reflectors = np.array(result.get(0.1))
-			# Stop looping when the result is available
-			break
-		except multiprocessing.TimeoutError: pass
+	# Wait for results to complete
+	while not result.ready(): time.sleep(0.1)
 
 	# Save the reflector positions
-	np.savetxt(outreflector, reflectors, fmt='%16.8f')
+	reflectors = np.array(result.get())
+	np.savetxt(outreflector, result.get(), fmt='%16.8f')
 
 	# Create and save a refined estimate of the reflector locations
-	relements = geteltpos(times, reflectors, elements, c)
+	pltri = trilateration.PlaneTrilateration(reflectors, c)
+	relements = pltri.newton(times, pos=elements)
 	np.savetxt(outelements, relements, fmt='%16.8f')
 
 
