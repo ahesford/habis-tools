@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import os, sys, time, itertools, ConfigParser, numpy as np
+import os, sys, itertools, ConfigParser, numpy as np
 import multiprocessing
 
 from habis import trilateration
@@ -24,8 +24,6 @@ def getreflpos(args):
 	'''
 	times, elemlocs, guess, c = args
 	t = trilateration.PointTrilateration(elemlocs, c)
-	# Offset the arrival times by the propagation time
-	# from reflector surface to center and back
 	return t.newton(times, pos=guess)
 
 
@@ -87,12 +85,15 @@ def trilaterationEngine(config):
 	# Use async calls to correctly handle keyboard interrupts
 	result = pool.map_async(getreflpos,
 			((t, elements, g, c) for t, g in zip(times.T, guess)))
-	# Wait for results to complete
-	while not result.ready(): time.sleep(0.1)
+	while True:
+		try:
+			reflectors = result.get(5)
+			break
+		except multiprocessing.TimeoutError:
+			pass
 
 	# Save the reflector positions
-	reflectors = np.array(result.get())
-	np.savetxt(outreflector, result.get(), fmt='%16.8f')
+	np.savetxt(outreflector, reflectors, fmt='%16.8f')
 
 	# Create and save a refined estimate of the reflector locations
 	pltri = trilateration.PlaneTrilateration(reflectors, c)
