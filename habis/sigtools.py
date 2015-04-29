@@ -77,19 +77,20 @@ def aprony(maxdeg, x0, h, y, rcond=-1):
 	return lm, c, rms
 
 
-def delay(sig, ref, osamp=1, restrict=None):
+def delay(sig, ref, osamp=1, allowneg=False):
 	'''
-	Determine the delay of a signal sig that maximizes the
+	Determine and return the delay of a signal sig that maximizes
 	cross-correlation between sig and a reference signal ref.
 
 	The signal and reference will be interpolated by at least a factor
 	osamp, if provided, to yield fractional-sample delays.
 
-	If restrict is provided and not None, it should be a sequence (a, b)
-	that specifies the range of samples (at the original sampling rate)
-	over which cross-correlation should be maximized.
+	If allowneg is True, the return value will be a tuple (d, s), where d
+	is the delay that maximizes the absolute value of the
+	cross-correlation, and s is the sign (-1 or 1, integer) of the
+	cross-correlation at this point.
 
-	Both sig and ref should be 1-D arrays or column vectors.
+	Both sig and ref should be 1-D arrays or column vectors of real values.
 	'''
 	if osamp < 1:
 		raise ValueError ('Oversampling factor must be at least unity')
@@ -100,26 +101,26 @@ def delay(sig, ref, osamp=1, restrict=None):
 
 	# Find the size of FFT needed to represent the correlation
 	npad = cutil.ceilpow2(len(sig) + len(ref))
-	sfft = fft.fft(sig, npad)
-	rfft = fft.fft(ref, npad)
-
 	# Find the next power of 2 needed to capture the desired oversampling
 	nint = cutil.ceilpow2(osamp * npad)
-	cfft = np.zeros((nint,), dtype=sfft.dtype)
-	# Copy the convolution FFT into the padded array
-	halfpad = npad / 2
-	cfft[:halfpad] = sfft[:halfpad] * np.conj(rfft[:halfpad])
-	cfft[-halfpad:] = sfft[-halfpad:] * np.conj(rfft[-halfpad:])
-	csig = fft.ifft(cfft)
-	# Find the delay, restricting the range if desired
-	if restrict is not None:
-		start, end = [int(r * nint / npad) for r in restrict[:2]]
-		t = np.argmax(csig.real[start:end]) + start
-	else: t = np.argmax(csig.real)
-	# Unwrap negative values
+	# Compute the interpolated cross-correlation
+	csig = fft.irfft(fft.rfft(sig, npad) * np.conj(fft.rfft(ref, npad)), nint)
+
+	# Find the point of maximal correlation
+	if allowneg:
+		t = np.argmax(np.abs(csig))
+		# Determine the sign of the correlation
+		s = int(math.copysign(1., csig[t]))
+	else: t = np.argmax(csig)
+
+	# Unwrap negative values and scale by the oversampling rate
 	if t >= nint / 2: t = t - nint
-	# Scale the index by the real oversampling rate
-	return t * npad / float(nint)
+	t *= npad / float(nint)
+
+	if allowneg:
+		return t, s
+	else:
+		return t
 
 
 def normalize(sig, env):
@@ -167,16 +168,16 @@ def shifter(sig, d, n=None):
 	padded (or truncated) to length n before its FFT is computed. The
 	output signal retains its modified length.
 
-	The signal should be a 1-D array.
+	The signal should be a 1-D real array.
 	'''
 	sig = dimcompat(sig, 1)
-	fsig = fft.fft(sig, n)
+	if n is None:
+		n = len(sig)
+	fsig = fft.rfft(sig, n)
 	nsig = len(fsig)
-	kidx = fft.fftshift(np.arange(-nsig/2, nsig/2))
-	sh = np.exp(2j * math.pi * d * kidx / nsig)
-	ssig = fft.ifft(fsig * sh)
-	if not np.issubdtype(sig.dtype, np.complexfloating):
-		ssig = ssig.real
+	kidx = np.arange(0, nsig)
+	sh = np.exp(2j * math.pi * d * kidx / n)
+	ssig = fft.irfft(fsig * sh, n)
 	return ssig.astype(sig.dtype)
 
 
@@ -222,62 +223,46 @@ def bandpass(sig, start, end, tails=None, n=None):
 	'''
 	Given a time-domain signal sig, perform a bandpass operation that zeros
 	all frequencies below the frequency bin at index start and above (and
-	including) the frequency bin at index end. A complex FFT is assumed, so
-	the filter will be applied to positive and negative indices.
+	including) the frequency bin at index end. An R2C FFT is used, so
+	the bins correspond to positive frequencies only.
 
 	If tails is provided, it should be a 1-D array of length N that will
 	modify the frequencies of sig according to the formula
 
 		fsig[start:start+N/2] *= tails[:N/2],
 		fsig[end-N/2:end] *= tails[-N/2:],
-		fsig[-start-N/2:-start] *= conj(reversed(tails[:N/2])),
-		fsig[-end:-end+N/2] *= conj(reversed(tails[-N/2:])),
 
-	where fsig = fft(sig).
+	where fsig = rfft(sig).
 
 	If n is not None, the signal will be zero-padded or truncated, as
 	necessary, to length n before it is Fourier transformed for filtering.
 
-	Both sig and tails should be 1-D arrays.
+	Both sig and tails should be 1-D, real arrays.
 	'''
 	# Ensure that the input is 1-D compatible
 	sig = dimcompat(sig, 1)
-	# Find the maximum positive frequency and the minimum negative frequency
-	lsig = len(sig) if n is None else n
-	fmax = int(lsig - 1) / 2
-	fmin = -int(lsig / 2)
+	# Find the maximum positive frequency
+	if n is None: n = len(sig)
 
 	# Check the window for sanity
 	if start >= end:
 		raise ValueError('Starting index should be less than ending index')
-	if start < 0 or start >= fmax:
-		raise ValueError('Starting index should be positive but less than maximum frequency')
-	if end < 0 or end > fmax:
-		raise ValueError('Ending index should be positive but not exceed maximum frequency')
 
 	# Check the tail for sanity
 	if tails is not None and len(tails) > (end - start):
 		raise ValueError('Single-side tail should not exceed half window width')
 
-	# Transform the signal and apply the window
-	fsig = fft.fft(sig, n=n)
-	# Positive frequency window
+	# Transform the signal
+	fsig = fft.rfft(sig, n=n)
+	# Apply the frequency window
 	fsig[:start] = 0
-	fsig[end:fmax+1] = 0
-	# Negative frequency window
-	fsig[lsig+fmin:lsig-end+1] = 0
-	fsig[lsig-start+1:] = 0
+	fsig[end:] = 0
 
 	# Apply the tails
 	if tails is not None:
 		ltails = len(tails) / 2
 		fsig[start:start+ltails] *= tails[:ltails]
 		fsig[end-ltails:end] *= tails[-ltails:]
-		fsig[lsig-start:lsig-start-ltails:-1] *= np.conj(tails[:ltails])
-		fsig[lsig-end+ltails:lsig-end:-1] *= np.conj(tails[-ltails:])
 
-	# If the input was real, ensure that the output is real too
-	bsig = fft.ifft(fsig)
-	if not np.issubdtype(sig.dtype, np.complexfloating):
-		bsig = bsig.real
+	bsig = fft.irfft(fsig, n)
 	return bsig.astype(sig.dtype)
