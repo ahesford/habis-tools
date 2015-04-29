@@ -14,7 +14,77 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def getdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
+def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
+	'''
+	Compute the delay matrix for a T x R x Ns matrix of Ns-sample
+	waveforms, transmitted by T elements and received by R elements. If
+	delayfile is specified and can be read as a T x R matrix, the delays
+	are read from that file. Otherwise, the waveform matrix is read from
+	datafile, a reference waveform is read from reffile, and
+	cross-correlation is used (with an oversampling rate of osamp) in the
+	form of habis.sigtools.delay to determine the T x R delay matrix.
+
+	If delayfile is specified but computation is required, the computed
+	matrix will be saved to delayfile. Any existing content will be
+	overwritten.
+
+	Computations are done in parallel using nproc processes.
+	'''
+	# Grab the dimensions of the waveform matrix
+	t, r, ns = mio.getmattype(datafile, dim=3, dtype=np.float32)[0]
+
+	try:
+		# Try to read an existing delay file and check its size
+		delays = np.loadtxt(delayfile)
+		if delays.shape != (t, r):
+			raise ValueError('Delay file has wrong shape; recomputing')
+		return delays
+	except (ValueError, IOError):
+		# ValueError if format is inappropriate or delayfile is None
+		# IOError if delayfile does not point to an existent file
+		pass
+
+	# Grab the hostname and executable name for pretty process naming
+	hostname = socket.gethostname()
+	execname = os.path.basename(sys.argv[0])
+
+	# Create a result queue and a matrix to store the accumulated results
+	queue = multiprocessing.Queue(nproc)
+	delays = np.zeros((t, r), dtype=np.float32)
+
+	# Spawn the desired processes to perform the cross-correlation
+	with process.ProcessPool() as pool:
+		for i in range(nproc):
+			# Pick a useful hostname
+			procname = '{:s}-{:s}-Rank{:d}'.format(hostname, execname, i)
+			args = (datafile, reffile, osamp, queue, i, nproc)
+			pool.addtask(target=calcdelays, name=procname, args=args)
+
+		pool.start()
+
+		# Wait for all processes to respond
+		responses = 0
+		while responses < nproc:
+			try:
+				results = queue.get(timeout=0.1)
+				for idx, delay in results:
+					row, col = np.unravel_index(idx, (t, r), 'C')
+					delays[row,col] = delay
+				responses += 1
+			except Queue.Empty: pass
+
+		pool.wait()
+
+	try:
+		# Save the computed delays, if desired
+		np.savetxt(delayfile, delays, fmt='%16.8f')
+	except (ValueError, IOError):
+		pass
+
+	return delays
+
+
+def calcdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
 	'''
 	Given a datafile that contains a T x R x Ns matrix of Ns-sample
 	waveforms transmitted by T elements and received by R elements, and a
@@ -64,8 +134,21 @@ def atimesEngine(config):
 	cross-correlation with a reference pulse, plus some constant offset.
 	'''
 	try:
-		# Try to grab the list of input data files
-		datafiles = [items[1] for items in config.items('atimes') if items[0].startswith('datafile')]
+		datafiles = []
+		delayfiles = {}
+		# Loop through all [atimes] records looking for datafiles
+		for key, value in config.items('atimes'):
+			if key.startswith('datafile'):
+				# Add the datafile to the list
+				datafiles.append(value)
+				# A matching delay file can be specified by
+				# swapping 'datafile' with 'delayfile' in key
+				delaykey = key.replace('datafile', 'delayfile', 1)
+				# The delayfile is optional, but if found, the
+				# dictionary is keyed on the data file name
+				try: delayfiles[value] = config.get('atimes', delaykey)
+				except ConfigParser.NoOptionError: pass
+				
 	except ConfigParser.Error:
 		raise ConfigurationError('Configuration must specify an [atimes] section')
 
@@ -107,6 +190,13 @@ def atimesEngine(config):
 	except:
 		raise ConfigureError('Invalid specification of symmetrize in [atimes]')
 
+	try:
+		usediag = config.getboolean('atimes', 'usediag')
+	except ConfigParser.NoOptionError:
+		usediag = False
+	except:
+		raise ConfigureError('Invalid specification of symmetrize in [atimes]')
+
 	# Determine the shape of the first multipath data
 	t, r, ns = mio.getmattype(datafiles[0], dim=3, dtype=np.float32)[0]
 
@@ -119,41 +209,20 @@ def atimesEngine(config):
 	# Store results for all data files in this list
 	times = []
 
-	# Grab the hostname and executable name for pretty process naming
-	hostname = socket.gethostname()
-	execname = os.path.basename(sys.argv[0])
-
 	for datafile in datafiles:
-		# Create a result queue and a list to store the accumulated results
-		queue = multiprocessing.Queue(nproc)
-		delays = np.zeros((t, r), dtype=np.float32)
+		# Try to read or compute the delay matrix for this data set
+		delayfile = delayfiles.get(datafile, None)
+		print 'Finding delays for data set', datafile
+		delays = finddelays(datafile, reffile, osamp, nproc, delayfile)
 
-		# Spawn the desired processes to perform the cross-correlation
-		with process.ProcessPool() as pool:
-
-			for i in range(nproc):
-				# Pick a useful hostname
-				procname = '{:s}-{:s}-Rank{:d}'.format(hostname, execname, i)
-				args = (datafile, reffile, osamp, queue, i, nproc)
-				pool.addtask(target=getdelays, name=procname, args=args)
-
-			pool.start()
-
-			# Wait for all processes to respond
-			responses = 0
-			while responses < nproc:
-				try:
-					results = queue.get(timeout=0.1)
-					for idx, delay in results:
-						row, col = np.unravel_index(idx, (t, r), 'C')
-						delays[row,col] = delay
-					responses += 1
-				except Queue.Empty: pass
-
-			pool.wait()
-
-		# Compute the actual signal arrival times
+		# Convert delays to arrival times
 		delays = delays * dt + t0
+
+		if usediag:
+			# Skip optimization in favor of matrix diagonal
+			times.append(np.diag(delays))
+			continue
+
 		if symmetrize: delays = 0.5 * (delays + delays.T)
 
 		# Prepare the arrival-time finder
