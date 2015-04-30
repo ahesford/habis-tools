@@ -4,11 +4,18 @@ import os, sys, itertools, ConfigParser, numpy as np
 import multiprocessing, Queue
 import socket
 
-from pycwp import mio, process
+from pycwp import mio, process, cutil
 from habis import sigtools, trilateration
 
 # Define a new ConfigurationError exception
 class ConfigurationError(Exception): pass
+
+# Extend the SafeConfigParser to allow the getboolean to provide a default setting
+class ExtendedConfigParser(ConfigParser.SafeConfigParser):
+	def getbooldefault(self, section, option, default):
+		try: return self.getboolean(section, option)
+		except ConfigParser.NoOptionError: return default
+
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -183,19 +190,9 @@ def atimesEngine(config):
 	except:
 		raise ConfigurationError('Configuration must specify float sampling period and temporal offset in [sampling]')
 
-	try:
-		symmetrize = config.getboolean('atimes', 'symmetrize')
-	except ConfigParser.NoOptionError:
-		symmetrize = False
-	except:
-		raise ConfigureError('Invalid specification of symmetrize in [atimes]')
-
-	try:
-		usediag = config.getboolean('atimes', 'usediag')
-	except ConfigParser.NoOptionError:
-		usediag = False
-	except:
-		raise ConfigureError('Invalid specification of symmetrize in [atimes]')
+	symmetrize = config.getbooldefault('atimes', 'symmetrize', False)
+	usediag = config.getbooldefault('atimes', 'usediag', False)
+	maskoutliers = config.getbooldefault('atimes', 'maskoutliers', False)
 
 	# Determine the shape of the first multipath data
 	t, r, ns = mio.getmattype(datafiles[0], dim=3, dtype=np.float32)[0]
@@ -223,6 +220,7 @@ def atimesEngine(config):
 			times.append(np.diag(delays))
 			continue
 
+		if maskoutliers: delays = cutil.mask_outliers(delays)
 		if symmetrize: delays = 0.5 * (delays + delays.T)
 
 		# Prepare the arrival-time finder
@@ -241,7 +239,7 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	config = ConfigParser.SafeConfigParser()
+	config = ExtendedConfigParser()
 	if len(config.read(sys.argv[1])) == 0:
 		print >> sys.stderr, 'ERROR: configuration file %s does not exist' % sys.argv[1]
 		usage(sys.argv[0])
