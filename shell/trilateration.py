@@ -4,9 +4,7 @@ import os, sys, itertools, ConfigParser, numpy as np
 import multiprocessing
 
 from habis import trilateration
-
-# Define a new ConfigurationError exception
-class ConfigurationError(Exception): pass
+from habis.habiconf import HabisConfigError, HabisConfigParser
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -41,20 +39,20 @@ def trilaterationEngine(config):
 		guessfile = config.get('trilateration', 'guessfile')
 		facetfile = config.get('trilateration', 'facetfile')
 	except ConfigParser.Error:
-		raise ConfigurationError('Configuration must specify timefile, guessfile, and facetfile in [trilateration]')
+		raise HabisConfigError('Configuration must specify timefile, guessfile, and facetfile in [trilateration]')
 
 	try:
 		# Grab the output file locations
 		outreflector = config.get('trilateration', 'outreflector')
 		outelements = config.get('trilateration', 'outelements')
 	except ConfigParser.Error:
-		raise ConfigurationError('Configuration must specify outreflector and outfacet in [trilateration]')
+		raise HabisConfigError('Configuration must specify outreflector and outfacet in [trilateration]')
 
 	try:
 		# Grab the element range
 		elementRange = [int(s) for s in config.get('trilateration', 'elementrange').split()]
 	except:
-		raise ConfigurationError('Configuration must specify elementrange in [trilateration]')
+		raise HabisConfigError('Configuration must specify elementrange in [trilateration]')
 
 	try:
 		# Grab the number of processes to use (optional)
@@ -62,14 +60,14 @@ def trilaterationEngine(config):
 	except ConfigParser.NoOptionError:
 		nproc = process.preferred_process_count()
 	except:
-		raise ConfigurationError('Invalid specification of process count in [general]')
+		raise HabisConfigError('Invalid specification of process count in [general]')
 
 	try:
 		# Grab the sound speed and radius
 		c = float(config.get('trilateration', 'c'))
 		radius = float(config.get('trilateration', 'radius'))
 	except:
-		raise ConfigurationError('Configuration must specify sound-speed c and radius in [trilateration]')
+		raise HabisConfigError('Configuration must specify sound-speed c and radius in [trilateration]')
 
 	# Pull the element indices
 	elements = np.loadtxt(facetfile)[range(*elementRange)]
@@ -107,9 +105,11 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	config = ConfigParser.SafeConfigParser()
-	if len(config.read(sys.argv[1])) == 0:
-		print >> sys.stderr, 'ERROR: configuration file %s does not exist' % sys.argv[1]
+	config = HabisConfigParser()
+	try:
+		config.readfp(open(sys.argv[1]))
+	except:
+		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])
 		sys.exit(1)
 

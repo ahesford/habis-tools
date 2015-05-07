@@ -6,15 +6,7 @@ import socket
 
 from pycwp import mio, process, cutil
 from habis import sigtools, trilateration
-
-# Define a new ConfigurationError exception
-class ConfigurationError(Exception): pass
-
-# Extend the SafeConfigParser to allow the getboolean to provide a default setting
-class ExtendedConfigParser(ConfigParser.SafeConfigParser):
-	def getbooldefault(self, section, option, default):
-		try: return self.getboolean(section, option)
-		except ConfigParser.NoOptionError: return default
+from habis.habiconf import HabisConfigError, HabisConfigParser
 
 
 def usage(progname):
@@ -157,38 +149,38 @@ def atimesEngine(config):
 				except ConfigParser.NoOptionError: pass
 				
 	except ConfigParser.Error:
-		raise ConfigurationError('Configuration must specify an [atimes] section')
+		raise HabisConfigError('Configuration must specify an [atimes] section')
 
 	if len(datafiles) < 1:
-		raise ConfigurationError('Configuration must specify at least one datafile in [atimes]')
+		raise HabisConfigError('Configuration must specify at least one datafile in [atimes]')
 
 	try:
 		# Grab the reference and output files
 		reffile = config.get('atimes', 'reffile')
 		outfile = config.get('atimes', 'outfile')
 	except ConfigParser.Error:
-		raise ConfigurationError('Configuration must specify reference and output files in [atimes]')
+		raise HabisConfigError('Configuration must specify reference and output files in [atimes]')
 
 	try:
 		# Grab the oversampling rate
-		osamp = int(config.get('atimes', 'osamp'))
+		osamp = config.getint('atimes', 'osamp')
 	except (ConfigParser.Error, ValueError):
-		raise ConfigurationError('Configuration must specify oversampling rate as integer in [atimes]')
+		raise HabisConfigError('Configuration must specify oversampling rate as integer in [atimes]')
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = int(config.get('general', 'nproc'))
+		nproc = config.getint('general', 'nproc')
 	except ConfigParser.NoOptionError:
 		nproc = process.preferred_process_count()
 	except:
-		raise ConfigurationError('Invalid specification of process count in [general]')
+		raise HabisConfigError('Invalid specification of process count in [general]')
 
 	try:
 		# Determine the number of samples and offset, in microsec
-		dt = float(config.get('sampling', 'period'))
-		t0 = float(config.get('sampling', 'offset'))
+		dt = config.getfloat('sampling', 'period')
+		t0 = config.getfloat('sampling', 'offset')
 	except:
-		raise ConfigurationError('Configuration must specify float sampling period and temporal offset in [sampling]')
+		raise HabisConfigError('Configuration must specify float sampling period and temporal offset in [sampling]')
 
 	symmetrize = config.getbooldefault('atimes', 'symmetrize', False)
 	usediag = config.getbooldefault('atimes', 'usediag', False)
@@ -239,9 +231,11 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	config = ExtendedConfigParser()
-	if len(config.read(sys.argv[1])) == 0:
-		print >> sys.stderr, 'ERROR: configuration file %s does not exist' % sys.argv[1]
+	config = HabisConfigParser()
+	try:
+		config.readfp(open(sys.argv[1]))
+	except:
+		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])
 		sys.exit(1)
 
