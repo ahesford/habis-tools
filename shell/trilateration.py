@@ -50,13 +50,13 @@ def trilaterationEngine(config):
 
 	try:
 		# Grab the element range
-		elementRange = [int(s) for s in config.get('trilateration', 'elementrange').split()]
+		elementRange = config.getlist('trilateration', 'elementrange', int)
 	except:
 		raise HabisConfigError('Configuration must specify elementrange in [trilateration]')
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = int(config.get('general', 'nproc'))
+		nproc = config.getint('general', 'nproc')
 	except ConfigParser.NoOptionError:
 		nproc = process.preferred_process_count()
 	except:
@@ -64,8 +64,8 @@ def trilaterationEngine(config):
 
 	try:
 		# Grab the sound speed and radius
-		c = float(config.get('trilateration', 'c'))
-		radius = float(config.get('trilateration', 'radius'))
+		c = config.getfloat('trilateration', 'c')
+		radius = config.getfloat('trilateration', 'radius')
 	except:
 		raise HabisConfigError('Configuration must specify sound-speed c and radius in [trilateration]')
 
