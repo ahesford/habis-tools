@@ -174,3 +174,87 @@ def readfiresequence(fmt, findx, reducer=None):
 	data = [readfirecapture(fmt.format(f), reducer=reducer)[0][np.newaxis,:,:,:]
 			for f in findx]
 	return np.concatenate(data, axis=0)
+
+
+def readballfile(f, retwin=None):
+	'''
+	Given a file f, which may be an already-open file object or a string
+	specifying the name, read the waveform data measured at 512 receive
+	channels from transmissions from each of the 512 transmit channels.
+
+	If retwin is not None, it should be a tuple (start, length) that
+	specifies the start and length of the temporal window over which all
+	waveforms will be read.
+
+	Each receive channel has a header that specifies, in this order:
+
+		1. Transmit index (int, recorded as float32)
+		2. Element position in the hemispheric array (3 float32)
+		   - Coordinate origin is at center of hemisphere
+		   - Coordinates may have an arbitrary (x, y) offset
+		   - The z axis points "out of the bowl" of the hemisphere
+		3. Index of first sample of recorded window (int32)
+		   - Sample 0 corresponds to time immediately after transmit
+		   - Sampling frequency is 20 MHz
+		4. Number of samples, nt, in each captured waveform (int32)
+
+	Following the header, 512 received waveforms (one per transmission) are
+	stored as a block of (512 * nt) int16 values indicating ADC counts.
+	Receive channel data blocks (header + waveforms) are concatenated in
+	the file.
+
+	The return value is a tuple containing, in order:
+
+		1. List of 512 transmit indices (as ints)
+		2. List of 512 element-coordinate 3-tuples (x, y, z)
+		3. 2-tuple (start, length) of expanded time window
+		   - Time window is smallest possible window that fully
+		     contains the recording windows for every receive channel
+		4. 512 x 512 x Ns array of waveforms
+		   - Transmit axis varies along first axis
+		   - Receive axis varies along second axis
+		   - Ns is length of expanded time window
+		   - Values read as int16 are converted to float32
+	'''
+	# Open the input file if it isn't already open
+	if isinstance(f, (str, unicode)): f = open(f, mode='rb')
+
+	# Record the transmit indices, element coordinates and time windows
+	twins = []
+	txidx = []
+	elcrd = []
+	# Also store each waveform block
+	waveforms = []
+
+	for i in range(512):
+		# The Tx index is 1-based in the file; adjust
+		idx = np.fromfile(f, count=1, dtype=np.float32)[0]
+		txidx.append(int(idx) - 1)
+		# Convert coordinates to Python floats
+		crd = np.fromfile(f, count=3, dtype=np.float32)
+		elcrd.append(tuple(float(c) for c in crd))
+		# Grab the local window, convert to Python ints
+		win = tuple(np.fromfile(f, count=2, dtype=np.int32))
+		twins.append(tuple(int(w) for w in win))
+		# Read the waveforms for this receive channel
+		wform = np.fromfile(f, count=512 * win[-1], dtype=np.int16)
+		waveforms.append(wform.reshape((512, win[-1]), order='C'))
+
+	# If a return window was not specified, figure out the minimum necessary
+	if retwin is None:
+		start = min(w[0] for w in twins)
+		end = max(w[0] + w[1] for w in twins)
+		retwin = (start, end - start)
+
+	# Create an array to store the concatenated waveforms
+	outwaves = np.zeros((512, 512, retwin[-1]), dtype=np.float32)
+
+	for ridx, (win, waves) in enumerate(zip(twins, waveforms)):
+		istart = max(0, retwin[0] - win[0])
+		ostart = max(0, win[0] - retwin[0])
+		iend = min(win[1], retwin[0] + retwin[1] - win[0])
+		oend = min(retwin[1], win[0] + win[1] - retwin[0])
+		# Record the waveforms in the output array
+		outwaves[:,ridx,ostart:oend] = waves[:,istart:iend]
+
+	return txidx, elcrd, retwin, outwaves
