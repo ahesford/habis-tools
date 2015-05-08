@@ -2,9 +2,12 @@
 Routines for manipulating HABIS data file formats.
 '''
 
+import mmap
 import numpy as np
 import re, os
 import pandas
+
+from itertools import count as icount
 
 def findenumfiles(dir, prefix='.*?', suffix=''):
 	'''
@@ -176,85 +179,175 @@ def readfiresequence(fmt, findx, reducer=None):
 	return np.concatenate(data, axis=0)
 
 
-def readballfile(f, retwin=None):
+class CalibrationSet(object):
 	'''
-	Given a file f, which may be an already-open file object or a string
-	specifying the name, read the waveform data measured at 512 receive
-	channels from transmissions from each of the 512 transmit channels.
-
-	If retwin is not None, it should be a tuple (start, length) that
-	specifies the start and length of the temporal window over which all
-	waveforms will be read.
-
-	Each receive channel has a header that specifies, in this order:
-
-		1. Transmit index (int, recorded as float32)
-		2. Element position in the hemispheric array (3 float32)
-		   - Coordinate origin is at center of hemisphere
-		   - Coordinates may have an arbitrary (x, y) offset
-		   - The z axis points "out of the bowl" of the hemisphere
-		3. Index of first sample of recorded window (int32)
-		   - Sample 0 corresponds to time immediately after transmit
-		   - Sampling frequency is 20 MHz
-		4. Number of samples, nt, in each captured waveform (int32)
-
-	Following the header, 512 received waveforms (one per transmission) are
-	stored as a block of (512 * nt) int16 values indicating ADC counts.
-	Receive channel data blocks (header + waveforms) are concatenated in
-	the file.
-
-	The return value is a tuple containing, in order:
-
-		1. List of 512 transmit indices (as ints)
-		2. List of 512 element-coordinate 3-tuples (x, y, z)
-		3. 2-tuple (start, length) of expanded time window
-		   - Time window is smallest possible window that fully
-		     contains the recording windows for every receive channel
-		4. 512 x 512 x Ns array of waveforms
-		   - Transmit axis varies along first axis
-		   - Receive axis varies along second axis
-		   - Ns is length of expanded time window
-		   - Values read as int16 are converted to float32
+	A class to encapsulate a (possibly multi-facet) set of pulse-echo
+	measurements from a single target.
 	'''
-	# Open the input file if it isn't already open
-	if isinstance(f, (str, unicode)): f = open(f, mode='rb')
+	# Create a type to describe a receive-channel record
+	hdrtype = np.dtype([('idx', 'f4'), ('crd', '3f4'), ('win', '2i4')])
 
-	# Record the transmit indices, element coordinates and time windows
-	twins = []
-	txidx = []
-	elcrd = []
-	# Also store each waveform block
-	waveforms = []
+	def __init__(self, f, ntx=512, dtype=np.int16):
+		'''
+		Associate the CalibrationSet object with the data in f, a
+		file-like object or string specifying a file name. Each receive
+		channel in the data set is assumed to have records for ntx
+		transmissions. If f is a file-like object, parsing starts from
+		the current file position.
 
-	for i in range(512):
-		# The Tx index is 1-based in the file; adjust
-		idx = np.fromfile(f, count=1, dtype=np.float32)[0]
-		txidx.append(int(idx) - 1)
-		# Convert coordinates to Python floats
-		crd = np.fromfile(f, count=3, dtype=np.float32)
-		elcrd.append(tuple(float(c) for c in crd))
-		# Grab the local window, convert to Python ints
-		win = tuple(np.fromfile(f, count=2, dtype=np.int32))
-		twins.append(tuple(int(w) for w in win))
-		# Read the waveforms for this receive channel
-		wform = np.fromfile(f, count=512 * win[-1], dtype=np.int16)
-		waveforms.append(wform.reshape((512, win[-1]), order='C'))
+		The datatype of the waveform signals can be overridden with the
+		dtype argument.
 
-	# If a return window was not specified, figure out the minimum necessary
-	if retwin is None:
-		start = min(w[0] for w in twins)
-		end = max(w[0] + w[1] for w in twins)
-		retwin = (start, end - start)
+		Each block of waveform data is memory-mapped from the source
+		file. This mapping is copy-on-write; changes do not persist.
 
-	# Create an array to store the concatenated waveforms
-	outwaves = np.zeros((512, 512, retwin[-1]), dtype=np.float32)
+		** NOTE **
+		In the file, each receive channel has an associated transmit
+		index. The transmit index is 1-based in the file, but is
+		converted to a 0-based record in this encapsulation.
+		'''
+		# Open the file if it does not exist
+		if isinstance(f, (str, unicode)): f = open(f, mode='rb')
 
-	for ridx, (win, waves) in enumerate(zip(twins, waveforms)):
-		istart = max(0, retwin[0] - win[0])
-		ostart = max(0, win[0] - retwin[0])
-		iend = min(win[1], retwin[0] + retwin[1] - win[0])
-		oend = min(retwin[1], win[0] + win[1] - retwin[0])
-		# Record the waveforms in the output array
-		outwaves[:,ridx,ostart:oend] = waves[:,istart:iend]
+		# Store each record as a (header, data) tuple
+		self._records = []
 
-	return txidx, elcrd, retwin, outwaves
+		# Use a single Python mmap buffer for backing data
+		buf = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
+		f.seek(0)
+
+		# Parse through the file until the end is reached
+		while True:
+			# If a header cannot be read, processing stops
+			try: hdr = np.fromfile(f, count=1, dtype=self.hdrtype)[0]
+			except IndexError: break
+
+			# Convert transmit index to 0-based
+			hdr['idx'] -= 1
+			# Determine the shape of the waveform
+			waveshape = (ntx, hdr['win'][-1])
+			# Determine the start and end of waveform data block
+			fstart = f.tell()
+			# Return a view of the map
+			wavemap = np.ndarray(waveshape, dtype=dtype,
+					buffer=buf, order='C', offset=fstart)
+			self._records.append((hdr, wavemap))
+			# Skip to the next header
+			f.seek(fstart + ntx * hdr['win'][-1] * dtype().nbytes)
+			
+		# Create a map between transmit index and record number
+		self._rxmap = { int(rec[0]['idx']): i for i, rec in enumerate(self._records) }
+		# A dummy transmit-index map
+		self._txmap = { i: i for i in range(ntx) }
+
+
+	@property
+	def rxidx(self):
+		'''
+		Return a list of receive-channel indices in arbitrary order.
+		'''
+		return self._rxmap.keys()
+
+
+	@property
+	def txidx(self):
+		'''
+		Return a list of transmit-channel indices in arbitrary order.
+		'''
+		return self._txmap.keys()
+
+
+	def tx2row(self, tid):
+		'''
+		Convert a transmit-channel index into a row index in a waveform
+		record array.
+		'''
+		return self._txmap[int(tid)]
+
+
+	def rx2rec(self, rid):
+		'''
+		Convert a receive-channel index into a waveform record index
+		according to file order.
+		'''
+		return self._rxmap[int(rid)]
+
+
+	def getrecord(self, rid, tid=None, window=None, dtype=None):
+		'''
+		Return a (header, waveforms) record for the receive channel
+		with channel index rid. If window is None and dtype is None,
+		the waveforms data array is a reference to the internal
+		copy-on-write memory map.
+
+		If tid is not None, it should be a channel index that specifies
+		a specific transmission to pull from the waveforms. Otherwise,
+		all transmit waveforms are returned.
+
+		If window is not None, it should be a tuple (start, length)
+		that specifies the first sample and length of the temporal
+		window over which the waveforms are interpreted. Even if window
+		matches the internal window in the header, a copy of the
+		waveform array will be made.
+
+		If dtype is not None, the output copy of the waveforms in the
+		record will be cast to this datatype.
+
+		If exactly one of window or dtype is None, the corresponding
+		value from the record will be used.
+
+		To force a copy without knowing or changing the window and
+		dtype, pass dtype=0.
+		'''
+		# Convert the channel indices to file-order indices
+		rcidx = self.rx2rec(rid)
+		if tid is not None: tcidx = self.tx2row(tid)
+
+		# Grab the record according to the transmit ID map
+		header, waveforms = self._records[rcidx]
+		# Make a copy of the header to avoid corruption
+		header = header.copy()
+		# If the data is not changed, just return a view of the waveforms
+		if window is None and dtype is None:
+			if tid is None:
+				return header, waveforms
+			else:
+				return header, waveforms[tcidx,:]
+
+		# Pull an unspecified output window from the header
+		if window is None:
+			window = header['win']
+		# Pull an unspecified data type from the waveforms
+		if dtype is None or dtype == 0:
+			dtype = waveforms.dtype
+
+		if tid is None: oshape = (waveforms.shape[0], window[1])
+		else: oshape = (window[1],)
+
+		# Create the output copy
+		output = np.zeros(oshape, dtype=dtype)
+
+		# Figure out the start and end indices
+		iwin = header['win']
+		istart = max(0, window[0] - iwin[0])
+		ostart = max(0, iwin[0] - window[0])
+		iend = min(iwin[1], window[0] + window[1] - iwin[0])
+		oend = min(window[1], iwin[0] + iwin[1] - window[0])
+
+		# Copy the relevant portions of the waveforms
+		if tid is None: output[:,ostart:oend] = waveforms[:,istart:iend]
+		else: output[ostart:oend] = waveforms[tcidx,istart:iend]
+
+		# Override the window in the header copy
+		header['win'][:] = window
+
+		return header, output
+
+
+	def allrecords(self, tid=None, window=None, dtype=None):
+		'''
+		Return a generator that fetches each record, in channel-index
+		order, using self.getrecord(rid, tid, window, dtype).
+		'''
+		for rid in sorted(self.rxidx):
+			yield self.getrecord(rid, tid, window, dtype)
