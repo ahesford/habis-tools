@@ -257,6 +257,13 @@ class CalibrationSet(object):
 		return self._txmap.keys()
 
 
+	def __len__(self):
+		'''
+		Return the number of records in the data set.
+		'''
+		return len(self._records)
+
+
 	def tx2row(self, tid):
 		'''
 		Convert a transmit-channel index into a row index in a waveform
