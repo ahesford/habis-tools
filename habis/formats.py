@@ -8,6 +8,7 @@ import re, os
 import pandas
 
 from itertools import count as icount
+from pycwp import cutil
 
 def findenumfiles(dir, prefix='.*?', suffix=''):
 	'''
@@ -179,7 +180,7 @@ def readfiresequence(fmt, findx, reducer=None):
 	return np.concatenate(data, axis=0)
 
 
-class CalibrationSet(object):
+class WaveformSet(object):
 	'''
 	A class to encapsulate a (possibly multi-facet) set of pulse-echo
 	measurements from a single target.
@@ -187,16 +188,84 @@ class CalibrationSet(object):
 	# Create a type to describe a receive-channel record
 	hdrtype = np.dtype([('idx', 'f4'), ('crd', '3f4'), ('win', '2i4')])
 
-	def __init__(self, f, ntx=512, dtype=np.int16):
+	@classmethod
+	def makehdr(cls, idx, crd, win):
 		'''
-		Associate the CalibrationSet object with the data in f, a
-		file-like object or string specifying a file name. Each receive
-		channel in the data set is assumed to have records for ntx
-		transmissions. If f is a file-like object, parsing starts from
-		the current file position.
+		From the channel index idx, the 3-element sequence crd, and the
+		2-element sequence win, create a single Numpy record of the
+		class's hdrtype that contains the values.
+		'''
+		# Create an empty record
+		hdr = np.zeros((1,), dtype=cls.hdrtype)[0]
+		hdr['idx'] = idx
+		hdr['crd'][:] = crd
+		hdr['win'][:] = win
+		return hdr
 
-		The datatype of the waveform signals can be overridden with the
-		dtype argument.
+
+	@classmethod
+	def fromfile(cls, f, ntx=512, dtype=np.int16):
+		'''
+		Create a new WaveformSet object and use load() to populate the
+		object with the contents of the specified file (a file-like
+		object or a string naming the file).
+		'''
+		wset = cls(ntx, dtype)
+		wset.load(f)
+		return wset
+
+
+	def __init__(self, ntx=512, dtype=np.int16):
+		'''
+		Create an empty WaveformSet object corresponding to ntx
+		transmissions per receive channel, with waveform arrays stored
+		in the specified Numpy dtype.
+		'''
+		# Record the number of transmissions and waveform datatype
+		self._ntx = ntx
+		self._dtype = dtype
+
+		# Create an empty record array and tx/rx index maps
+		self._records = []
+		self._rxmap = {}
+		# A dummy transmit-index map
+		self._txmap = { i: i for i in range(ntx) }
+
+
+	def store(self, f):
+		'''
+		Write the WaveformSet object to the data file in f (either a
+		name or a file-like object that allows writing).
+
+		** NOTE **
+		Because the WaveformSet may map some input file for waveform
+		arrays after calling load(), calling store() with the same file
+		used to load() may cause unexpected behavior.
+		'''
+		# Open the file if it is not open
+		if isinstance(f, (str, unicode)): f = open(f, mode='wb')
+
+		# Write each record in turn
+		for hdr, waveforms in self._records:
+			# The file uses 1-based indices for channel indices
+			hdrc = hdr.copy()
+			hdrc['idx'] += 1
+			hdrc.tofile(f)
+			waveforms.tofile(f)
+
+
+	def load(self, f, ntx=None, dtype=None):
+		'''
+		Associate the WaveformSet object with the data in f, a
+		file-like object or string specifying a file name. If f is a
+		file-like object, parsing starts from the current file
+		position.
+		
+		Existing waveform records will be eliminated. Each receive
+		channel in the data set is assumed to have records for ntx
+		transmissions, stored with the specified Numpy datatype. If
+		either of ntx or dtype is None, the current value associated
+		with the class instance are used.
 
 		Each block of waveform data is memory-mapped from the source
 		file. This mapping is copy-on-write; changes do not persist.
@@ -206,13 +275,25 @@ class CalibrationSet(object):
 		index. The transmit index is 1-based in the file, but is
 		converted to a 0-based record in this encapsulation.
 		'''
-		# Open the file if it does not exist
+		# Open the file if it is not open
 		if isinstance(f, (str, unicode)): f = open(f, mode='rb')
 
-		# Store each record as a (header, data) tuple
+		# Clear the record array
 		self._records = []
 
+		# Set the data type and number of transmissions
+		if dtype is not None:
+			self._dtype = dtype
+		else:
+			dtype = self._dtype
+
+		if ntx is not None: 
+			self._ntx = ntx
+		else:
+			ntx = self._ntx
+
 		# Use a single Python mmap buffer for backing data
+		# This avoids multiple openings of the file for independent maps
 		buf = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
 		f.seek(0)
 
@@ -257,6 +338,22 @@ class CalibrationSet(object):
 		return self._txmap.keys()
 
 
+	@property
+	def ntx(self):
+		'''
+		Return the number of transmissions per receive channel.
+		'''
+		return self._ntx
+
+
+	@property
+	def dtype(self):
+		'''
+		Return the datatype used to store waveforms.
+		'''
+		return self._dtype
+
+
 	def __len__(self):
 		'''
 		Return the number of records in the data set.
@@ -269,7 +366,10 @@ class CalibrationSet(object):
 		Convert a transmit-channel index into a row index in a waveform
 		record array.
 		'''
-		return self._txmap[int(tid)]
+		try:
+			return self._txmap[int(tid)]
+		except KeyError:
+			raise IndexError('The transmit index does not exist in this set')
 
 
 	def rx2rec(self, rid):
@@ -277,7 +377,10 @@ class CalibrationSet(object):
 		Convert a receive-channel index into a waveform record index
 		according to file order.
 		'''
-		return self._rxmap[int(rid)]
+		try:
+			return self._rxmap[int(rid)]
+		except KeyError:
+			raise IndexError('The receive index does not exist in this set')
 
 
 	def getrecord(self, rid, tid=None, window=None, dtype=None):
@@ -334,21 +437,82 @@ class CalibrationSet(object):
 		# Create the output copy
 		output = np.zeros(oshape, dtype=dtype)
 
-		# Figure out the start and end indices
-		iwin = header['win']
-		istart = max(0, window[0] - iwin[0])
-		ostart = max(0, iwin[0] - window[0])
-		iend = min(iwin[1], window[0] + window[1] - iwin[0])
-		oend = min(window[1], iwin[0] + iwin[1] - window[0])
+		try:
+			# Figure out the overlapping sample window
+			# Raises TypeError if overlap() returns None
+			ostart, istart, wlen = cutil.overlap(window, header['win'])
+			oend, iend = ostart + wlen, istart + wlen
 
-		# Copy the relevant portions of the waveforms
-		if tid is None: output[:,ostart:oend] = waveforms[:,istart:iend]
-		else: output[ostart:oend] = waveforms[tcidx,istart:iend]
+			# Copy the relevant portions of the waveforms
+			if tid is None:
+				output[:,ostart:oend] = waveforms[:,istart:iend]
+			else:
+				output[ostart:oend] = waveforms[tcidx,istart:iend]
+		except TypeError: pass
 
 		# Override the window in the header copy
 		header['win'][:] = window
 
 		return header, output
+
+
+	def setrecord(self, hdr, waveforms):
+		'''
+		Save a waveform record consisting of the provided header and
+		waveform array. If a record for the receive channel specified
+		in the header already exists, it will be overwritten.
+		Otherwise, the record array will be extended.
+
+		The waveform array will be cast to the dtype indicated in this
+		object instance.
+		'''
+		ntx, nsamp = waveforms.shape
+		if ntx != self.ntx:
+			raise ValueError('Waveform array does not match transmission count for set')
+		if nsamp != hdr['win'][1]:
+			raise ValueError('Waveform array does not match sample count specified in header')
+
+		# Make a copy of the waveforms, converting to the right datatype
+		wcrec = np.array(waveforms, dtype=self.dtype)
+		# Pull the receive-channel index from the header
+		rid = hdr['idx']
+
+		try:
+			# Replace an existing record
+			rcidx = self.rx2rec(rid)
+			self._records[rcidx] = (hdr, wcrec)
+		except IndexError:
+			# Add a new rx record
+			self._rxmap[int(rid)] = len(self._records)
+			self._records.append((hdr, wcrec))
+
+
+	def setwaveform(self, rid, tid, waveform, window):
+		'''
+		Replace the waveform at receive index rid and transmit index
+		tid with the provided waveform defined over the sample window
+		as a 2-tuple (start, length) and 0 elsewhere. When replacing
+		the existing waveform, the signal will be padded and clipped as
+		necessary to fit into the window defined for the record.
+		'''
+		rcidx = self.rx2rec(rid)
+		tcidx = self.tx2row(tid)
+
+		# Pull the existing record
+		hdr, wfrec = self._records[rid]
+		# Determine the overlap of the input and output windows
+		overlap = cutil.overlap(hdr['win'], window)
+
+		if overlap is None:
+			# Zero the waveform if there is no overlap
+			wfrec[tcidx,:] = 0.
+		else:
+			# Copy the overlapping region and zero everywhere else
+			ostart, istart, wlen = overlap
+			oend, iend = ostart + wlen, istart + wlen
+			wfrec[tcidx,ostart:oend] = waveform[istart:iend]
+			wfrec[tcidx,:ostart] = 0.
+			wfrec[tcidx,oend:] = 0.
 
 
 	def allrecords(self, tid=None, window=None, dtype=None):
