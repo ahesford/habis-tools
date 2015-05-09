@@ -6,8 +6,8 @@ import mmap
 import numpy as np
 import re, os
 import pandas
+from collections import OrderedDict
 
-from itertools import count as icount
 from pycwp import cutil
 
 def findenumfiles(dir, prefix='.*?', suffix=''):
@@ -225,11 +225,10 @@ class WaveformSet(object):
 		self._ntx = ntx
 		self._dtype = dtype
 
-		# Create an empty record array and tx/rx index maps
-		self._records = []
-		self._rxmap = {}
-		# A dummy transmit-index map
-		self._txmap = { i: i for i in range(ntx) }
+		# Create an empty record dictionary and dummy tx index map
+		# OrderedDict is used so the keys remain in file order
+		self._records = OrderedDict()
+		self._txmap = OrderedDict((i, i) for i in range(ntx))
 
 
 	def store(self, f):
@@ -246,7 +245,7 @@ class WaveformSet(object):
 		if isinstance(f, (str, unicode)): f = open(f, mode='wb')
 
 		# Write each record in turn
-		for hdr, waveforms in self._records:
+		for idx, (hdr, waveforms) in self._records.iteritems():
 			# The file uses 1-based indices for channel indices
 			hdrc = hdr.copy()
 			hdrc['idx'] += 1
@@ -279,7 +278,7 @@ class WaveformSet(object):
 		if isinstance(f, (str, unicode)): f = open(f, mode='rb')
 
 		# Clear the record array
-		self._records = []
+		self._records = OrderedDict()
 
 		# Set the data type and number of transmissions
 		if dtype is not None:
@@ -312,28 +311,26 @@ class WaveformSet(object):
 			# Return a view of the map
 			wavemap = np.ndarray(waveshape, dtype=dtype,
 					buffer=buf, order='C', offset=fstart)
-			self._records.append((hdr, wavemap))
+			self._records[int(hdr['idx'])] = (hdr, wavemap)
 			# Skip to the next header
 			f.seek(fstart + ntx * hdr['win'][-1] * dtype().nbytes)
 			
-		# Create a map between transmit index and record number
-		self._rxmap = { int(rec[0]['idx']): i for i, rec in enumerate(self._records) }
-		# A dummy transmit-index map
-		self._txmap = { i: i for i in range(ntx) }
+		# Create a dummy transmit-index map
+		self._txmap = OrderedDict((i, i) for i in range(ntx))
 
 
 	@property
 	def rxidx(self):
 		'''
-		Return a list of receive-channel indices in arbitrary order.
+		Return a list of receive-channel indices in file order.
 		'''
-		return self._rxmap.keys()
+		return self._records.keys()
 
 
 	@property
 	def txidx(self):
 		'''
-		Return a list of transmit-channel indices in arbitrary order.
+		Return a list of transmit-channel indices in file order.
 		'''
 		return self._txmap.keys()
 
@@ -363,8 +360,7 @@ class WaveformSet(object):
 
 	def tx2row(self, tid):
 		'''
-		Convert a transmit-channel index into a row index in a waveform
-		record array.
+		Convert a transmit-channel index into a waveform-array row index.
 		'''
 		try:
 			return self._txmap[int(tid)]
@@ -372,15 +368,12 @@ class WaveformSet(object):
 			raise IndexError('The transmit index does not exist in this set')
 
 
-	def rx2rec(self, rid):
+	def row2tx(self, row):
 		'''
-		Convert a receive-channel index into a waveform record index
-		according to file order.
+		Convert a waveform-array row index to a transmit-channel index.
 		'''
-		try:
-			return self._rxmap[int(rid)]
-		except KeyError:
-			raise IndexError('The receive index does not exist in this set')
+		# Use the ordered keys in the txmap to pull out the desired row
+		return self._txmap.keys()[int(row)]
 
 
 	def getrecord(self, rid, tid=None, window=None, dtype=None):
@@ -410,23 +403,22 @@ class WaveformSet(object):
 		dtype, pass dtype=0.
 		'''
 		# Convert the channel indices to file-order indices
-		rcidx = self.rx2rec(rid)
 		if tid is not None: tcidx = self.tx2row(tid)
 
-		# Grab the record according to the transmit ID map
-		header, waveforms = self._records[rcidx]
+		# Grab the record for the receive index
+		hdr, waveforms = self._records[int(rid)]
 		# Make a copy of the header to avoid corruption
-		header = header.copy()
+		hdr = hdr.copy()
 		# If the data is not changed, just return a view of the waveforms
 		if window is None and dtype is None:
 			if tid is None:
-				return header, waveforms
+				return hdr, waveforms
 			else:
-				return header, waveforms[tcidx,:]
+				return hdr, waveforms[tcidx,:]
 
 		# Pull an unspecified output window from the header
 		if window is None:
-			window = header['win']
+			window = hdr['win']
 		# Pull an unspecified data type from the waveforms
 		if dtype is None or dtype == 0:
 			dtype = waveforms.dtype
@@ -440,7 +432,7 @@ class WaveformSet(object):
 		try:
 			# Figure out the overlapping sample window
 			# Raises TypeError if overlap() returns None
-			ostart, istart, wlen = cutil.overlap(window, header['win'])
+			ostart, istart, wlen = cutil.overlap(window, hdr['win'])
 			oend, iend = ostart + wlen, istart + wlen
 
 			# Copy the relevant portions of the waveforms
@@ -451,9 +443,9 @@ class WaveformSet(object):
 		except TypeError: pass
 
 		# Override the window in the header copy
-		header['win'][:] = window
+		hdr['win'][:] = window
 
-		return header, output
+		return hdr, output
 
 
 	def setrecord(self, hdr, waveforms):
@@ -477,14 +469,8 @@ class WaveformSet(object):
 		# Pull the receive-channel index from the header
 		rid = hdr['idx']
 
-		try:
-			# Replace an existing record
-			rcidx = self.rx2rec(rid)
-			self._records[rcidx] = (hdr, wcrec)
-		except IndexError:
-			# Add a new rx record
-			self._rxmap[int(rid)] = len(self._records)
-			self._records.append((hdr, wcrec))
+		# Add or replace the record
+		rcidx = self.rx2rec(rid)
 
 
 	def setwaveform(self, rid, tid, waveform, window):
@@ -495,7 +481,6 @@ class WaveformSet(object):
 		the existing waveform, the signal will be padded and clipped as
 		necessary to fit into the window defined for the record.
 		'''
-		rcidx = self.rx2rec(rid)
 		tcidx = self.tx2row(tid)
 
 		# Pull the existing record
