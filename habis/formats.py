@@ -6,6 +6,8 @@ import mmap
 import numpy as np
 import re, os
 import pandas
+import struct
+
 from collections import OrderedDict
 
 from pycwp import cutil
@@ -185,18 +187,20 @@ class WaveformSet(object):
 	A class to encapsulate a (possibly multi-facet) set of pulse-echo
 	measurements from a single target.
 	'''
-	# Create a type to describe a receive-channel record
-	hdrtype = np.dtype([('idx', 'f4'), ('crd', '3f4'), ('win', '2i4')])
+	# Numpy record describing a receive-channel waveform record
+	rechdr = np.dtype([('idx', 'f4'), ('crd', '3f4'), ('win', '2i4')])
+	# struct format string for WaveformSet file header format
+	hdrfmt = '<4s2i2s4i'
 
 	@classmethod
-	def makehdr(cls, idx, crd, win):
+	def makercvhdr(cls, idx, crd, win):
 		'''
 		From the channel index idx, the 3-element sequence crd, and the
 		2-element sequence win, create a single Numpy record of the
-		class's hdrtype that contains the values.
+		class's rechdr that contains the values.
 		'''
 		# Create an empty record
-		hdr = np.zeros((1,), dtype=cls.hdrtype)[0]
+		hdr = np.zeros((1,), dtype=cls.rechdr)[0]
 		hdr['idx'] = idx
 		hdr['crd'][:] = crd
 		hdr['win'][:] = win
@@ -204,37 +208,132 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def fromfile(cls, f, ntx=512, dtype=np.int16):
+	def fromfile(cls, f):
 		'''
 		Create a new WaveformSet object and use load() to populate the
 		object with the contents of the specified file (a file-like
 		object or a string naming the file).
 		'''
-		wset = cls(ntx, dtype)
+		# Create an empty set, then populate from the file
+		wset = cls([])
 		wset.load(f)
 		return wset
 
 
-	def __init__(self, ntx=512, dtype=np.int16):
+	@classmethod
+	def fmt2dtype(cls, fmt):
 		'''
-		Create an empty WaveformSet object corresponding to ntx
-		transmissions per receive channel, with waveform arrays stored
-		in the specified Numpy dtype.
+		Return a Numpy dtype corresponding to a two-character typecode.
+		The case of the typecode is not important.
 		'''
-		# Record the number of transmissions and waveform datatype
-		self._ntx = ntx
-		self._dtype = dtype
+		if len(fmt) != 2:
+			raise ValueError('Format string must be a two-character code')
 
-		# Create an empty record dictionary and dummy tx index map
+		# Grab the typecode and field length
+		typecode = fmt[0].lower()
+		fieldlen = int(fmt[1])
+
+		if   (typecode, fieldlen) == ('i', 2): return np.int16
+		elif (typecode, fieldlen) == ('i', 4): return np.int32
+		elif (typecode, fieldlen) == ('i', 8): return np.int64
+		elif (typecode, fieldlen) == ('f', 2): return np.float16
+		elif (typecode, fieldlen) == ('f', 4): return np.float32
+		elif (typecode, fieldlen) == ('f', 8): return np.float64
+		elif (typecode, fieldlen) == ('c', 4): return np.complex64
+		elif (typecode, fieldlen) == ('c', 8): return np.complex128
+		else: raise ValueError('Format string not recognized')
+
+
+	@classmethod
+	def dtype2fmt(cls, dtype):
+		'''
+		Return a two-character typecode corresponding to a Numpy dtype.
+		'''
+		if   np.issubdtype(dtype, np.int16): return 'I2'
+		elif np.issubdtype(dtype, np.int32): return 'I4'
+		elif np.issubdtype(dtype, np.int64): return 'I8'
+		elif np.issubdtype(dtype, np.float16): return 'F2'
+		elif np.issubdtype(dtype, np.float32): return 'F4'
+		elif np.issubdtype(dtype, np.float64): return 'F8'
+		elif np.issubdtype(dtype, np.complex64):  return 'C4'
+		elif np.issubdtype(dtype, np.complex128): return 'C8'
+		else: raise TypeError('Unrecognized data type for waveform set')
+
+
+	@classmethod
+	def packfilehdr(cls, dtype, nchans, nsamp, f2c=0, ver=(1,0)):
+		'''
+		Pack the Numpy dtype, a channel count nchans = (nrx, ntx), an
+		acquisition sample count nsamp, and a fire-to-capture delay f2c
+		into a header string for a waveform-set file with the specified
+		version number ver = (major, minor).
+		'''
+		major, minor = ver
+		fmtstr = cls.dtype2fmt(dtype)
+		nrx, ntx = nchans
+		return struct.pack(cls.hdrfmt, 'WAVE', major, minor,
+				fmtstr, f2c, nsamp, nrx, ntx)
+
+
+	@classmethod
+	def unpackfilehdr(cls, header):
+		'''
+		Unpack the packed waveform set file header into a return tuple:
+
+			dtype, Numpy dtype of waveform records
+			nchans, tuple defining channel counts (nrx, ntx)
+			f2c, fire-to-capture delay in 20-MHz samples
+			nsamp, total number of 20-MHz samples captured
+			version, tuple indicating file version (major, minor)
+		'''
+		unpacked = struct.unpack(cls.hdrfmt, header)
+
+		if unpacked[0] != 'WAVE':
+			raise ValueError('Header string does not contain waveform set magic number')
+
+		# Copy the version tuple
+		version = unpacked[1:3]
+		# Decode the datatype
+		dtype = cls.fmt2dtype(unpacked[3])
+		# Copy the fire-to-capture delay, sample count, and channel counts
+		f2c, nsamp = unpacked[4:6]
+		nchans = unpacked[6:8]
+
+		return dtype, nchans, f2c, nsamp, version
+
+
+	def __init__(self, txchans, nsamp=4096, f2c=0, dtype=np.int16):
+		'''
+		Create an empty WaveformSet object corresponding acquisitions
+		of a set of waveforms from the (0-based) transmission indices
+		in txchans, acquired with a total of nsamp samples per
+		acquisition after a fire-to-capture delay of f2c samples.
+		Waveform arrays are stored with the specified Numpy dtype.
+		'''
+		# Record the waveform dtype (a read-only property)
+		self._dtype = dtype
+		# Record the total number of acquired samples (setting is OK,
+		# but the new value is checked for consistence with records)
+		self._nsamp = nsamp
+		# The fire-to-capture delay can be set with impunity
+		self.f2c = 0
+
+		# Create an empty record dictionary and tx index map
 		# OrderedDict is used so the keys remain in file order
 		self._records = OrderedDict()
-		self._txmap = OrderedDict((i, i) for i in range(ntx))
+		self.txidx = txchans
 
 
-	def store(self, f):
+	def store(self, f, append=False, ver=(1,0)):
 		'''
 		Write the WaveformSet object to the data file in f (either a
 		name or a file-like object that allows writing).
+
+		If append is True, an unopened file is opened for appends
+		instead of cloberring an existing file. In this case, writing
+		of the file-level header is skipped. It is the caller's
+		responsibility to assure that an existing file header is
+		consistent with records written by this method in append mode.
 
 		** NOTE **
 		Because the WaveformSet may map some input file for waveform
@@ -242,7 +341,19 @@ class WaveformSet(object):
 		used to load() may cause unexpected behavior.
 		'''
 		# Open the file if it is not open
-		if isinstance(f, (str, unicode)): f = open(f, mode='wb')
+		if isinstance(f, (str, unicode)):
+			f = open(f, mode=('wb' if not append else 'ab'))
+
+		if not append:
+			# Write the file-level header
+			nchans = (self.nrx, self.ntx)
+			hdr = self.packfilehdr(self.dtype, nchans,
+					self.nsamp, self.f2c, ver)
+			# Write the header
+			f.write(hdr)
+			# Write transmit channels (convert to 1-based indices)
+			txidx = np.array(self.txidx, dtype=np.int32) + 1
+			txidx.tofile(f)
 
 		# Write each record in turn
 		for idx, (hdr, waveforms) in self._records.iteritems():
@@ -253,18 +364,16 @@ class WaveformSet(object):
 			waveforms.tofile(f)
 
 
-	def load(self, f, ntx=None, dtype=None):
+	def load(self, f):
 		'''
 		Associate the WaveformSet object with the data in f, a
 		file-like object or string specifying a file name. If f is a
 		file-like object, parsing starts from the current file
 		position.
 		
-		Existing waveform records will be eliminated. Each receive
-		channel in the data set is assumed to have records for ntx
-		transmissions, stored with the specified Numpy datatype. If
-		either of ntx or dtype is None, the current value associated
-		with the class instance are used.
+		Existing waveform records will be eliminated. All parameters of
+		the WaveformSet (arguments to the constructor) will be reset to
+		values specified in the file header.
 
 		Each block of waveform data is memory-mapped from the source
 		file. This mapping is copy-on-write; changes do not persist.
@@ -277,30 +386,41 @@ class WaveformSet(object):
 		# Open the file if it is not open
 		if isinstance(f, (str, unicode)): f = open(f, mode='rb')
 
+		# Parse the file header
+		hdrbytes = struct.calcsize(self.hdrfmt)
+		dtype, (nrx, ntx), f2c, nsamp, ver = self.unpackfilehdr(f.read(hdrbytes))
+
 		# Clear the record array
 		self._records = OrderedDict()
 
-		# Set the data type and number of transmissions
-		if dtype is not None:
-			self._dtype = dtype
-		else:
-			dtype = self._dtype
+		# Set the data type sample count, and fire-to-capture delay
+		self._dtype = dtype
+		self._nsamp = nsamp
+		self.f2c = f2c
 
-		if ntx is not None: 
-			self._ntx = ntx
-		else:
-			ntx = self._ntx
+		# Build the tx index map from the transmission indices
+		# Adjust the 1-based indexing in the file to 0-based
+		self.txidx = np.fromfile(f, count=ntx, dtype=np.int32) - 1
+
+		# Record the start of the waveform data records in the file
+		fpos = f.tell()
 
 		# Use a single Python mmap buffer for backing data
 		# This avoids multiple openings of the file for independent maps
 		buf = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
-		f.seek(0)
+		f.seek(fpos)
 
-		# Parse through the file until the end is reached
-		while True:
+		# Parse through the specified number of receive records
+		for ridx in range(nrx):
 			# If a header cannot be read, processing stops
-			try: hdr = np.fromfile(f, count=1, dtype=self.hdrtype)[0]
+			try: hdr = np.fromfile(f, count=1, dtype=self.rechdr)[0]
 			except IndexError: break
+
+			# Check the validity of the sample window
+			if hdr['win'][0] < 0:
+				raise ValueError('Receive channel %d sample window must be nonnegative' % int(hdr['idx']))
+			if hdr['win'][0] + hdr['win'][1] > self.nsamp:
+				raise ValueError('Receive channel %d sample window exceeds acquisition window duration' % int(hdr['idx']))
 
 			# Convert transmit index to 0-based
 			hdr['idx'] -= 1
@@ -314,9 +434,6 @@ class WaveformSet(object):
 			self._records[int(hdr['idx'])] = (hdr, wavemap)
 			# Skip to the next header
 			f.seek(fstart + ntx * hdr['win'][-1] * dtype().nbytes)
-			
-		# Create a dummy transmit-index map
-		self._txmap = OrderedDict((i, i) for i in range(ntx))
 
 
 	@property
@@ -335,12 +452,36 @@ class WaveformSet(object):
 		return self._txmap.keys()
 
 
+	@txidx.setter
+	def txidx(self, txidx):
+		'''
+		Set the mapping between transmit indices and file-order
+		waveform indices.
+		'''
+		# If receive records exist, ensure that the transmit counts
+		# for each record match the count of the provided index list
+		ntx = len(txidx)
+		for hdr, waves in self.allrecords():
+			if waves.shape[0] != ntx:
+				raise ValueError('Count of specified transmit indices does not match existing records')
+
+		self._txmap = OrderedDict((int(tx), i) for i, tx in enumerate(txidx))
+
+
 	@property
 	def ntx(self):
 		'''
 		Return the number of transmissions per receive channel.
 		'''
-		return self._ntx
+		return len(self._txmap)
+
+
+	@property
+	def nrx(self):
+		'''
+		Return the number of receive channels in this waveform set.
+		'''
+		return len(self._records)
 
 
 	@property
@@ -351,11 +492,38 @@ class WaveformSet(object):
 		return self._dtype
 
 
+	@property
+	def nsamp(self):
+		'''
+		Return the total number of samples collected in the acquisitions.
+		'''
+		return self._nsamp
+
+
+	@nsamp.setter
+	def nsamp(self, newval):
+		'''
+		Set the total number of samples in the acquisition window.
+		Ensure existing records don't fall outside of the window.
+		'''
+		# Force the new value to be an integer
+		nsamp = int(newval)
+		# Check all existing records to ensure their windows don't
+		# extend past the new acquisition window
+		for hdr, wforms in self.allrecords():
+			start, length = hdr['win']
+			if start + length > nsamp:
+				raise ValueError('Acquisition window fails to contain stored waveforms')
+
+		# Set the new value
+		self._nsamp = nsamp
+
+
 	def __len__(self):
 		'''
 		Return the number of records in the data set.
 		'''
-		return len(self._records)
+		return self.nrx
 
 
 	def tx2row(self, tid):
