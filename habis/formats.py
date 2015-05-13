@@ -11,6 +11,7 @@ import struct
 from collections import OrderedDict
 
 from pycwp import cutil
+from pycwp.util import bidict
 
 def findenumfiles(dir, prefix='.*?', suffix=''):
 	'''
@@ -191,6 +192,10 @@ class WaveformSet(object):
 	rechdr = np.dtype([('idx', 'f4'), ('crd', '3f4'), ('win', '2i4')])
 	# struct format string for WaveformSet file header format
 	hdrfmt = '<4s2i2s4i'
+	# A bidirectional mapping between typecodes and Numpy dtypes
+	typecodes = bidict(I2 = np.int16, I4 = np.int32, I8 = np.int64,
+			F2 = np.float16, F4 = np.float32, F8 = np.float64,
+			C4 = np.complex64, C8 = np.complex128)
 
 	@classmethod
 	def makercvhdr(cls, idx, crd, win):
@@ -221,46 +226,6 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def fmt2dtype(cls, fmt):
-		'''
-		Return a Numpy dtype corresponding to a two-character typecode.
-		The case of the typecode is not important.
-		'''
-		if len(fmt) != 2:
-			raise ValueError('Format string must be a two-character code')
-
-		# Grab the typecode and field length
-		typecode = fmt[0].lower()
-		fieldlen = int(fmt[1])
-
-		if   (typecode, fieldlen) == ('i', 2): return np.int16
-		elif (typecode, fieldlen) == ('i', 4): return np.int32
-		elif (typecode, fieldlen) == ('i', 8): return np.int64
-		elif (typecode, fieldlen) == ('f', 2): return np.float16
-		elif (typecode, fieldlen) == ('f', 4): return np.float32
-		elif (typecode, fieldlen) == ('f', 8): return np.float64
-		elif (typecode, fieldlen) == ('c', 4): return np.complex64
-		elif (typecode, fieldlen) == ('c', 8): return np.complex128
-		else: raise ValueError('Format string not recognized')
-
-
-	@classmethod
-	def dtype2fmt(cls, dtype):
-		'''
-		Return a two-character typecode corresponding to a Numpy dtype.
-		'''
-		if   np.issubdtype(dtype, np.int16): return 'I2'
-		elif np.issubdtype(dtype, np.int32): return 'I4'
-		elif np.issubdtype(dtype, np.int64): return 'I8'
-		elif np.issubdtype(dtype, np.float16): return 'F2'
-		elif np.issubdtype(dtype, np.float32): return 'F4'
-		elif np.issubdtype(dtype, np.float64): return 'F8'
-		elif np.issubdtype(dtype, np.complex64):  return 'C4'
-		elif np.issubdtype(dtype, np.complex128): return 'C8'
-		else: raise TypeError('Unrecognized data type for waveform set')
-
-
-	@classmethod
 	def packfilehdr(cls, dtype, nchans, nsamp, f2c=0, ver=(1,0)):
 		'''
 		Pack the Numpy dtype, a channel count nchans = (nrx, ntx), an
@@ -269,7 +234,8 @@ class WaveformSet(object):
 		version number ver = (major, minor).
 		'''
 		major, minor = ver
-		fmtstr = cls.dtype2fmt(dtype)
+		# Grab the first typecode matching the datatype
+		fmtstr = cls.typecodes.inverse[dtype][0]
 		nrx, ntx = nchans
 		return struct.pack(cls.hdrfmt, 'WAVE', major, minor,
 				fmtstr, f2c, nsamp, nrx, ntx)
@@ -294,7 +260,7 @@ class WaveformSet(object):
 		# Copy the version tuple
 		version = unpacked[1:3]
 		# Decode the datatype
-		dtype = cls.fmt2dtype(unpacked[3])
+		dtype = cls.typecodes[unpacked[3]]
 		# Copy the fire-to-capture delay, sample count, and channel counts
 		f2c, nsamp = unpacked[4:6]
 		nchans = unpacked[6:8]
