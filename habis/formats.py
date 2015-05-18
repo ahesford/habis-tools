@@ -189,9 +189,9 @@ class WaveformSet(object):
 	measurements from a single target.
 	'''
 	# Numpy record describing a receive-channel waveform record
-	rechdr = np.dtype([('idx', 'f4'), ('crd', '3f4'), ('win', '2i4')])
+	rechdr = np.dtype([('idx', '<u4'), ('crd', '<3f4'), ('win', '<2u4')])
 	# struct format string for WaveformSet file header format
-	hdrfmt = '<4s2i2s4i'
+	hdrfmt = '<4s2I2s4I'
 	# A bidirectional mapping between typecodes and Numpy dtypes
 	typecodes = bidict(I2 = np.int16, I4 = np.int32, I8 = np.int64,
 			F2 = np.float16, F4 = np.float32, F8 = np.float64,
@@ -276,13 +276,18 @@ class WaveformSet(object):
 		acquisition after a fire-to-capture delay of f2c samples.
 		Waveform arrays are stored with the specified Numpy dtype.
 		'''
+		if f2c < 0:
+			raise ValueError('Fire-to-capture delay f2c must be nonnegative')
+		if nsamp < 0:
+			raise ValueError('Number of samples nsamp must be nonnegative')
+
 		# Record the waveform dtype (a read-only property)
 		self._dtype = dtype
 		# Record the total number of acquired samples (setting is OK,
 		# but the new value is checked for consistence with records)
 		self._nsamp = nsamp
 		# The fire-to-capture delay can be set with impunity
-		self.f2c = 0
+		self.f2c = f2c
 
 		# Create an empty record dictionary and tx index map
 		# OrderedDict is used so the keys remain in file order
@@ -307,7 +312,7 @@ class WaveformSet(object):
 		used to load() may cause unexpected behavior.
 		'''
 		# Open the file if it is not open
-		if isinstance(f, (str, unicode)):
+		if isinstance(f, basestring):
 			f = open(f, mode=('wb' if not append else 'ab'))
 
 		if not append:
@@ -318,7 +323,7 @@ class WaveformSet(object):
 			# Write the header
 			f.write(hdr)
 			# Write transmit channels (convert to 1-based indices)
-			txidx = np.array(self.txidx, dtype=np.int32) + 1
+			txidx = np.array(self.txidx, dtype=np.uint32) + 1
 			txidx.tofile(f)
 
 		# Write each record in turn
@@ -350,11 +355,17 @@ class WaveformSet(object):
 		converted to a 0-based record in this encapsulation.
 		'''
 		# Open the file if it is not open
-		if isinstance(f, (str, unicode)): f = open(f, mode='rb')
+		if isinstance(f, basestring):
+			f = open(f, mode='rb')
 
 		# Parse the file header
 		hdrbytes = struct.calcsize(self.hdrfmt)
 		dtype, (nrx, ntx), f2c, nsamp, ver = self.unpackfilehdr(f.read(hdrbytes))
+
+		if nsamp < 0:
+			raise ValueError('Number of samples in acquisition window must be nonnegative')
+		if f2c < 0:
+			raise ValueError('Fire-to-capture delay must be nonnegative')
 
 		# Clear the record array
 		self._records = OrderedDict()
@@ -366,7 +377,7 @@ class WaveformSet(object):
 
 		# Build the tx index map from the transmission indices
 		# Adjust the 1-based indexing in the file to 0-based
-		self.txidx = np.fromfile(f, count=ntx, dtype=np.int32) - 1
+		self.txidx = np.fromfile(f, count=ntx, dtype=np.uint32) - 1
 
 		# Record the start of the waveform data records in the file
 		fpos = f.tell()
@@ -383,8 +394,6 @@ class WaveformSet(object):
 			except IndexError: break
 
 			# Check the validity of the sample window
-			if hdr['win'][0] < 0:
-				raise ValueError('Receive channel %d sample window must be nonnegative' % int(hdr['idx']))
 			if hdr['win'][0] + hdr['win'][1] > self.nsamp:
 				raise ValueError('Receive channel %d sample window exceeds acquisition window duration' % int(hdr['idx']))
 
