@@ -192,10 +192,10 @@ class WaveformSet(object):
 	rechdr = np.dtype([('idx', '<u4'), ('crd', '<3f4'), ('win', '<2u4')])
 	# struct format string for WaveformSet file header format
 	hdrfmt = '<4s2I2s4I'
-	# A bidirectional mapping between typecodes and Numpy dtypes
-	typecodes = bidict(I2 = np.int16, I4 = np.int32, I8 = np.int64,
-			F2 = np.float16, F4 = np.float32, F8 = np.float64,
-			C4 = np.complex64, C8 = np.complex128)
+	# A bidirectional mapping between typecodes and Numpy dtype names
+	typecodes = bidict(I2 = 'int16', I4 = 'int32', I8 = 'int64',
+			F2 = 'float16', F4 = 'float32', F8 = 'float64',
+			C4 = 'complex64', C8 = 'complex128')
 
 	@classmethod
 	def makercvhdr(cls, idx, crd, win):
@@ -228,14 +228,17 @@ class WaveformSet(object):
 	@classmethod
 	def packfilehdr(cls, dtype, nchans, nsamp, f2c=0, ver=(1,0)):
 		'''
-		Pack the Numpy dtype, a channel count nchans = (nrx, ntx), an
-		acquisition sample count nsamp, and a fire-to-capture delay f2c
-		into a header string for a waveform-set file with the specified
-		version number ver = (major, minor).
+		Pack the Numpy dtype, built-in scalar type object, or type
+		name; a channel count nchans = (nrx, ntx); an acquisition
+		sample count nsamp; and a fire-to-capture delay f2c into a
+		header string for a waveform-set file.
+
+		The version number may be specifed as ver = (major, minor).
 		'''
 		major, minor = ver
-		# Grab the first typecode matching the datatype
-		fmtstr = cls.typecodes.inverse[dtype][0]
+		# Grab the name of the Numpy dtype
+		typename = np.dtype(dtype).name
+		fmtstr = cls.typecodes.inverse[typename][0]
 		nrx, ntx = nchans
 		return struct.pack(cls.hdrfmt, 'WAVE', major, minor,
 				fmtstr, f2c, nsamp, nrx, ntx)
@@ -260,7 +263,7 @@ class WaveformSet(object):
 		# Copy the version tuple
 		version = unpacked[1:3]
 		# Decode the datatype
-		dtype = cls.typecodes[unpacked[3]]
+		dtype = np.dtype(cls.typecodes[unpacked[3]])
 		# Copy the fire-to-capture delay, sample count, and channel counts
 		f2c, nsamp = unpacked[4:6]
 		nchans = unpacked[6:8]
@@ -268,7 +271,7 @@ class WaveformSet(object):
 		return dtype, nchans, f2c, nsamp, version
 
 
-	def __init__(self, txchans, nsamp=4096, f2c=0, dtype=np.int16):
+	def __init__(self, txchans, nsamp=4096, f2c=0, dtype=np.dtype('int16')):
 		'''
 		Create an empty WaveformSet object corresponding acquisitions
 		of a set of waveforms from the (0-based) transmission indices
@@ -282,7 +285,7 @@ class WaveformSet(object):
 			raise ValueError('Number of samples nsamp must be nonnegative')
 
 		# Record the waveform dtype (a read-only property)
-		self._dtype = dtype
+		self._dtype = np.dtype(dtype)
 		# Record the total number of acquired samples (setting is OK,
 		# but the new value is checked for consistence with records)
 		self._nsamp = nsamp
@@ -341,7 +344,7 @@ class WaveformSet(object):
 		file-like object or string specifying a file name. If f is a
 		file-like object, parsing starts from the current file
 		position.
-		
+
 		Existing waveform records will be eliminated. All parameters of
 		the WaveformSet (arguments to the constructor) will be reset to
 		values specified in the file header.
@@ -408,7 +411,7 @@ class WaveformSet(object):
 					buffer=buf, order='C', offset=fstart)
 			self._records[int(hdr['idx'])] = (hdr, wavemap)
 			# Skip to the next header
-			f.seek(fstart + ntx * hdr['win'][-1] * dtype().nbytes)
+			f.seek(fstart + ntx * hdr['win'][-1] * dtype.itemsize)
 
 
 	@property

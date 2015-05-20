@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 
-import os, sys, itertools, ConfigParser, numpy as np
+import sys, itertools, ConfigParser, numpy as np
 import multiprocessing, Queue
-import socket
 
 from pycwp import mio, process, cutil
 from habis import sigtools, trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser
+from habis.formats import WaveformSet
 
 
 def usage(progname):
@@ -15,22 +15,26 @@ def usage(progname):
 
 def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 	'''
-	Compute the delay matrix for a T x R x Ns matrix of Ns-sample
-	waveforms, transmitted by T elements and received by R elements. If
-	delayfile is specified and can be read as a T x R matrix, the delays
-	are read from that file. Otherwise, the waveform matrix is read from
-	datafile, a reference waveform is read from reffile, and
-	cross-correlation is used (with an oversampling rate of osamp) in the
-	form of habis.sigtools.delay to determine the T x R delay matrix.
+	Compute the delay matrix for a habis.formats.WaveformSet stored in
+	datafile. If delayfile is specified and can be read as a T x R matrix,
+	where T and R are the "ntx" and "nrx" attributes of the WaveformSet,
+	respectively, the delays are read from that file. Otherwise, the
+	waveform set is read directly from datafile, a reference waveform is
+	read from reffile in 1-D binary matrix form, and cross-correlation is
+	used (with an oversampling rate of osamp) in the form of
+	habis.sigtools.delay to determine the delay matrix.
 
-	If delayfile is specified but computation is required, the computed
-	matrix will be saved to delayfile. Any existing content will be
-	overwritten.
+	If delayfile is specified but computation is still required, the
+	computed matrix will be saved to delayfile. Any existing content will
+	be overwritten.
 
 	Computations are done in parallel using nproc processes.
 	'''
 	# Grab the dimensions of the waveform matrix
-	t, r, ns = mio.getmattype(datafile, dim=3, dtype=np.float32)[0]
+	wset = WaveformSet.fromfile(datafile)
+	t, r = wset.ntx, wset.nrx
+	# No need to keep the WaveformSet around; close the file
+	del wset
 
 	try:
 		# Try to read an existing delay file and check its size
@@ -43,10 +47,6 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 		# IOError if delayfile does not point to an existent file
 		pass
 
-	# Grab the hostname and executable name for pretty process naming
-	hostname = socket.gethostname()
-	execname = os.path.basename(sys.argv[0])
-
 	# Create a result queue and a matrix to store the accumulated results
 	queue = multiprocessing.Queue(nproc)
 	delays = np.zeros((t, r), dtype=np.float32)
@@ -54,8 +54,8 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 	# Spawn the desired processes to perform the cross-correlation
 	with process.ProcessPool() as pool:
 		for i in range(nproc):
-			# Pick a useful hostname
-			procname = '{:s}-{:s}-Rank{:d}'.format(hostname, execname, i)
+			# Pick a useful process name
+			procname = process.procname(i)
 			args = (datafile, reffile, osamp, queue, i, nproc)
 			pool.addtask(target=calcdelays, name=procname, args=args)
 
@@ -85,39 +85,41 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 
 def calcdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
 	'''
-	Given a datafile that contains a T x R x Ns matrix of Ns-sample
-	waveforms transmitted by T elements and received by R elements, and a
-	corresponding Ns-sample reference waveform stored in reffile, perform
+	Given a datafile containing a habis.formats.WaveformSet, perform
 	cross-correlation on every stride-th received waveform, starting at
 	index start, to identify the delay of the received waveform relative to
 	the reference. The waveforms are oversampled by the factor osamp when
-	performing the cross-correlation. The start index and stride span array
-	of T x R waveforms flattened in row-major order.
+	performing the cross-correlation. The start index and stride span an
+	array of T x R waveforms flattened in row-major order.
 
-	The data file must contain a 3-dimensional matrix, while the reference
-	must be a 1-dimensional matrix. Both files must contain 32-bit
-	floating-point values.
+	The reference file must be a 1-dimensional matrix as a float32.
+	Waveforms in the datafile will be cast to float32.
 
-	The return value is a list of 2-tuples, wherein the first element is
-	a flattened waveform index and the second element is the corresponding
+	The return value is a list of 2-tuples, wherein the first element is a
+	flattened waveform index and the second element is the corresponding
 	delay in samples. If queue is not None, the result list is also placed
 	in the queue using queue.put().
 	'''
-	# Read the data and reference files; force proper shapes and dtypes
-	data = mio.readbmat(datafile, dim=3, dtype=np.float32)
+	# Read the data and reference files
+	data = WaveformSet.fromfile(datafile)
+	# Force the proper data type and shape for the reference
 	ref = mio.readbmat(reffile, dim=1, dtype=np.float32)
 
-	t, r, ns = data.shape
+	# Pull the relevant waveform set dimensions
+	t, r, ns = data.ntx, data.nrx, data.nsamp
 
 	if ref.shape[0] != ns:
 		raise TypeError('Number of samples in data and reference waveforms must agree')
 
-
 	# Compute the strided results
 	result = []
 	for idx in range(start, t * r, stride):
-		row, col = np.unravel_index(idx, (t, r), 'C')
-		result.append((idx, sigtools.delay(data[row,col], ref, osamp)))
+		# Find the transmit and receive indices
+		tid, rid = np.unravel_index(idx, (t, r), 'C')
+		# Pull the waveform in the right format and shape (ignore header)
+		sig = data.getrecord(rid, tid, (0, ns), np.float32)[1]
+		# Comput the delay and append to the result
+		result.append((idx, sigtools.delay(sig, ref, osamp)))
 
 	try: queue.put(result)
 	except AttributeError: pass
