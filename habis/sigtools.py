@@ -476,7 +476,7 @@ class Waveform(object):
 		return [(g[0], g[-1] + 1) for g in groups]
 
 
-	def bandpass(self, start, end, tails=None, crop=False):
+	def bandpass(self, start, end, tails=None):
 		'''
 		Perform a bandpass operation that zeros all frequencies below
 		the frequency bin at index start and above (and including) the
@@ -492,11 +492,6 @@ class Waveform(object):
 		where fsig = rfft(sig). If the signal is complex (and,
 		therefore, a C2C DFT is used, negative frequencies are
 		similarly modified.
-
-		If crop is True, the data window of the output filtered
-		waveform will be cropped to the original data window.
-		Otherwise, the entire duration of the filtered waveform will be
-		preserved in the output.
 		'''
 		# Check the window for sanity
 		if start >= end:
@@ -541,11 +536,7 @@ class Waveform(object):
 		ifftfunc = fft.irfft if r2c else fft.ifft
 		bsig = ifftfunc(fsig, n).astype(self.dtype)
 
-		if crop:
-			start, length = self.datawin
-			return Waveform(self.nsamp, bsig[start:start+length], start)
-		else:
-			return Waveform(self.nsamp, bsig, 0)
+		return Waveform(self.nsamp, bsig, 0)
 
 
 def dimcompat(sig, ndim=1):
