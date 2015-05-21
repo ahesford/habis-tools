@@ -13,6 +13,8 @@ from collections import OrderedDict
 from pycwp import cutil
 from pycwp.util import bidict
 
+from .sigtools import Waveform
+
 def findenumfiles(dir, prefix='.*?', suffix=''):
 	'''
 	Find all files in the directory dir with a name matching the regexp
@@ -396,22 +398,19 @@ class WaveformSet(object):
 			try: hdr = np.fromfile(f, count=1, dtype=self.rechdr)[0]
 			except IndexError: break
 
-			# Check the validity of the sample window
-			if hdr['win'][0] + hdr['win'][1] > self.nsamp:
-				raise ValueError('Receive channel %d sample window exceeds acquisition window duration' % int(hdr['idx']))
-
 			# Convert transmit index to 0-based
 			hdr['idx'] -= 1
 			# Determine the shape of the waveform
-			waveshape = (ntx, hdr['win'][-1])
+			waveshape = (ntx, hdr['win'][1])
 			# Determine the start and end of waveform data block
 			fstart = f.tell()
 			# Return a view of the map
 			wavemap = np.ndarray(waveshape, dtype=dtype,
 					buffer=buf, order='C', offset=fstart)
-			self._records[int(hdr['idx'])] = (hdr, wavemap)
+			# Add the record to the set
+			self.setrecord(hdr, wavemap, copy=False)
 			# Skip to the next header
-			f.seek(fstart + ntx * hdr['win'][-1] * dtype.itemsize)
+			f.seek(fstart + wavemap.nbytes)
 
 
 	@property
@@ -530,8 +529,8 @@ class WaveformSet(object):
 		copy-on-write memory map.
 
 		If tid is not None, it should be a channel index that specifies
-		a specific transmission to pull from the waveforms. Otherwise,
-		all transmit waveforms are returned.
+		a specific transmission to pull from the waveform array.
+		Otherwise, all transmit waveforms are returned.
 
 		If window is not None, it should be a tuple (start, length)
 		that specifies the first sample and length of the temporal
@@ -548,7 +547,7 @@ class WaveformSet(object):
 		To force a copy without knowing or changing the window and
 		dtype, pass dtype=0.
 		'''
-		# Convert the channel indices to file-order indices
+		# Convert transmit-channel index to row index
 		if tid is not None: tcidx = self.tx2row(tid)
 
 		# Grab the record for the receive index
@@ -557,10 +556,8 @@ class WaveformSet(object):
 		hdr = hdr.copy()
 		# If the data is not changed, just return a view of the waveforms
 		if window is None and dtype is None:
-			if tid is None:
-				return hdr, waveforms
-			else:
-				return hdr, waveforms[tcidx,:]
+			if tid is None: return hdr, waveforms
+			else: return hdr, waveforms[tcidx,:]
 
 		# Pull an unspecified output window from the header
 		if window is None:
@@ -585,7 +582,7 @@ class WaveformSet(object):
 			if tid is None:
 				output[:,ostart:oend] = waveforms[:,istart:iend]
 			else:
-				output[ostart:oend] = waveforms[tcidx,istart:iend]
+				output[ostart:oend] = waveforms[:,istart:iend]
 		except TypeError: pass
 
 		# Override the window in the header copy
@@ -594,36 +591,64 @@ class WaveformSet(object):
 		return hdr, output
 
 
-	def setrecord(self, hdr, waveforms):
+	def getwaveform(self, rid, tid, *args, **kwargs):
+		'''
+		Return, as a habis.sigtools.Waveform object, the waveform
+		recorded at receive-channel index rid from transmission index
+		tid. Extra args and kwargs are passed through to getrecord().
+		'''
+		# Convert the transmit ID to a record row
+		tcidx = self.tx2row(tid)
+		hdr, waveforms = self.getrecord(rid, tid, *args, **kwargs)
+
+		# Wrap the desired signal in a Waveform object
+		return Waveform(self.nsamp, waveforms[tcidx], hdr['win'][0])
+
+
+	def setrecord(self, hdr, waveforms=None, copy=True):
 		'''
 		Save a waveform record consisting of the provided header and
 		waveform array. If a record for the receive channel specified
 		in the header already exists, it will be overwritten.
-		Otherwise, the record array will be extended.
+		Otherwise, the record will be created.
 
-		The waveform array will be cast to the dtype indicated in this
-		object instance.
+		The waveform array must either be a Numpy ndarray or None. When
+		waveforms takes the special value None, a new, all-zero
+		waveform array is created (regardless of the value of copy).
+
+		If copy is False, a the record will store a reference to the
+		waveform array if the types are compatible. If copy is True, a
+		local copy of the waveform array, cast to this set's dtype,
+		will always be made.
 		'''
-		ntx, nsamp = waveforms.shape
-		if ntx != self.ntx:
-			raise ValueError('Waveform array does not match transmission count for set')
-		if nsamp != hdr['win'][1]:
-			raise ValueError('Waveform array does not match sample count specified in header')
+		# Check that the header bounds make sense
+		if hdr['win'][0] + hdr['win'][1] > self.nsamp:
+			raise ValueError('Waveform sample window exceeds acquisition window duration')
 
-		# Make a copy of the waveforms, converting to the right datatype
-		wcrec = np.array(waveforms, dtype=self.dtype)
-		# Pull the receive-channel index from the header
-		rid = hdr['idx']
+		if waveforms is None:
+			# Create an all-zero waveform array
+			wshape = (self.ntx, hdr['win'][1])
+			waveforms = np.zeros(wshape, dtype=self.dtype)
+		else:
+			# Check the proper shape of the provided array
+			ntx, nsamp = waveforms.shape
+			if ntx != self.ntx:
+				raise ValueError('Waveform array does not match transmission count for set')
+			if nsamp != hdr['win'][1]:
+				raise ValueError('Waveform array does not match sample count specified in header')
+
+			# Make a copy of the array if required or demanded
+			if copy or not waveforms.dtype == self.dtype:
+				waveforms = np.array(waveforms, dtype=self.dtype)
 
 		# Add or replace the record
-		rcidx = self.rx2rec(rid)
+		self._records[int(hdr['idx'])] = (hdr, waveforms)
 
 
-	def setwaveform(self, rid, tid, waveform, window):
+	def setwaveform(self, rid, tid, wave):
 		'''
 		Replace the waveform at receive index rid and transmit index
-		tid with the provided waveform defined over the sample window
-		as a 2-tuple (start, length) and 0 elsewhere. When replacing
+		tid with the provided habis.sigtools.Waveform wave. When replacing
 		the existing waveform, the signal will be padded and clipped as
 		necessary to fit into the window defined for the record.
 		'''
@@ -631,25 +656,15 @@ class WaveformSet(object):
 
 		# Pull the existing record
 		hdr, wfrec = self._records[rid]
-		# Determine the overlap of the input and output windows
-		overlap = cutil.overlap(hdr['win'], window)
 
-		if overlap is None:
-			# Zero the waveform if there is no overlap
-			wfrec[tcidx,:] = 0.
-		else:
-			# Copy the overlapping region and zero everywhere else
-			ostart, istart, wlen = overlap
-			oend, iend = ostart + wlen, istart + wlen
-			wfrec[tcidx,ostart:oend] = waveform[istart:iend]
-			wfrec[tcidx,:ostart] = 0.
-			wfrec[tcidx,oend:] = 0.
+		# Overwrite the transmit row with the input waveform
+		wfrec[tcidx,:] = wave.getsignal(window=hdr['win'], dtype=wfrec.dtype)
 
 
-	def allrecords(self, tid=None, window=None, dtype=None):
+	def allrecords(self, *args, **kwargs):
 		'''
 		Return a generator that fetches each record, in channel-index
-		order, using self.getrecord(rid, tid, window, dtype).
+		order, using self.getrecord(rid, window, dtype).
 		'''
 		for rid in sorted(self.rxidx):
-			yield self.getrecord(rid, tid, window, dtype)
+			yield self.getrecord(rid, *args, **kwargs)

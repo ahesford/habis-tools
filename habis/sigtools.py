@@ -19,25 +19,22 @@ class Waveform(object):
 	overall length in which samples are explicitly stored. Outside of the
 	"data window", the signal is assumed to be zero.
 	'''
-	def __init__(self, nsamp, signal=None, start=0):
+	def __init__(self, nsamp=0, signal=None, start=0):
 		'''
 		Initialize a signal of total length nsamp. If signal is
 		provided, it is a 1-D (or 1-D compatible) Numpy array that
 		specifies the nonzero data window of the waveform.
 
-		If start is provided, it is the first sample of the data
-		window. The window length is inferred from the signal length.
-		The starting sample must be nonnegative and the window length
-		must fit within the range [0, nsamp).
-
-		The signal is copied into the object.
+		If signal is provided, a data window is attached by calling
+		self.setsignal(signal, start) after initialization.
 		'''
 		self._nsamp = nsamp
 		self._datastart = 0
 		self._data = None
 
-		# Copy the data window
-		self.setsignal(signal, start)
+		# Pull in the data signal if appropriate
+		if signal is not None:
+			self.setsignal(signal, start)
 
 
 	@property
@@ -90,26 +87,30 @@ class Waveform(object):
 		'''
 		Return a copy of this waveform.
 		'''
-		return Waveform(self.nsamp, self._data, self._datastart)
+		return Waveform(self._nsamp, self._data.copy(), self._datastart)
 
 
 	def __iter__(self):
 		'''
 		Iterate over all samples in the waveform.
-		'''
-		datawin = self.datawin
 
-		# First, return zeros until the data window is reached
-		for i in range(0, datawin[0]):
-			yield self.dtype.type(0.)
+		*** DO NOT MUTATE THIS INSTANCE WHILE ITERATING ***
+		'''
+		# Create the default value for out-of-window samples
+		zero = self.dtype.type(0.)
+
+		# Figure the number of initial zeros, data samples, and final zeros	
+		ninitzero, ndata = self.datawin
+		nfinzero = self.nsamp - ninitzero - ndata
+
+		# Yield initial zeros, then data, then final zeros
+		for i in range(ninitzero): yield zero
 
 		# Now yield samples in the data window
-		for i in range(datawin[1]):
-			yield self._data[i]
+		for i in range(ndata): yield self._data[i]
 
 		# Now yield zeros until the end of the waveform
-		for i in range(self.nsamp - (datawin[0] + datawin[1])):
-			yield self.dtype.type(0.)
+		for i in range(nfinzero): yield zero
 
 
 	def __len__(self):
@@ -121,26 +122,31 @@ class Waveform(object):
 
 	def __getitem__(self, key):
 		'''
-		Return the specified sample of the waveform, or a Numpy ndarray
-		with samples populated from the provided slice.
-		'''
-		dwin = self.datawin
-		dend = dwin[0] + dwin[1]
-		if isinstance(key, int):
-			if key < 0: raise ValueError('Sample indices must be nonnegative')
-			if key < dwin[0] or key >= dend:
-				return self.dtype.type(0.)
-			else:
-				return self._data[key - dwin[0]]
-		elif isinstance(key, slice):
-			# Build a list of indices
-			idxs = range(*(key.indices(self.nsamp)))
-			output = np.zeros((len(idxs),), dtype=self.dtype)
-			for i, idx in enumerate(idxs):
-				if idx >= dwin[0] and idx < dend:
-					output[i] = self._data[idx - dwin[0]]
+		For an integer index, return the waveform sample at that index.
 
-			return output
+		For a slice, return an ndarray containing the specified samples.
+		'''
+		dstart, dlength = self.datawin
+		nsamp = self.nsamp
+
+		if isinstance(key, int):
+			if key < 0 or key >= nsamp:
+				raise ValueError('Sample indices must be in range [0, self.nsamp)')
+
+			# Shift to the data window
+			key -= dstart
+			if 0 <= key < dlength:
+				# Return data sample inside the window
+				return self._data[key]
+			else: 
+				# Return zero outside of the data window
+				return self.dtype.type(0.)
+		elif isinstance(key, slice):
+			# Generate indices in the data window
+			idxgen = (i - dstart for i in range(*key.indices(nsamp)))
+			return np.array([
+				self._data[idx] if (0 <= idx < dlength) else 0
+				for idx in idxgen], dtype=self.dtype)
 
 		raise IndexError('Only integers and slices are valid indices')
 
@@ -151,6 +157,9 @@ class Waveform(object):
 		The signal must either be a 1-D compatible array or "None" to
 		clear the waveform data window. The value start, if provided,
 		is the first sample.
+
+		If signal is a Numpy ndarray, the retained data window may be a
+		view to the provided signal rather than a copy.
 		'''
 		if signal is None:
 			self._data = None
@@ -160,20 +169,19 @@ class Waveform(object):
 		if start < 0:
 			raise ValueError('First sample of data window must be nonnegative')
 
-		# Ensure signal is 1-D and fits in waveform
-		signal = dimcompat(signal, 1)
-		length = len(signal)
-
-		if start + length > self.nsamp:
-			raise ValueError('Provided signal will not fit within waveform')
-
-		self._data = np.array(signal)
+		# Ensure signal is 1-D
+		self._data = dimcompat(signal, 1)
 		self._datastart = start
+
+		# Increase the length of nsamp if data window is too large
+		length = len(self._data)
+		if start + length > self.nsamp:
+			self.nsamp = start + length
 
 
 	def getsignal(self, window=None, dtype=None):
 		'''
-		Return a 1-D Numpy array populated with the contents of the
+		Return a new 1-D Numpy array populated with the contents of the
 		waveform. If window is provided, it is a tuple of the form
 		(start, length) that specifies the portion of the waveform to
 		return. If window is None, (0, self.nsamp) is assumed.
@@ -202,6 +210,57 @@ class Waveform(object):
 		return signal
 
 
+	def window(self, window=None, tails=None):
+		'''
+		Return a windowed copy of the waveform where, outside the
+		window (start, length), the signal is zero. If tails is
+		provided, it should be a sequence of length 2N, where the first
+		N values will multiply the signal in the range [start:start+N]
+		and the last N values mull multiply the signal in the range
+		[start+length-N:start+length].
+		'''
+		if tails is not None and len(tails) > window[1]:
+			raise ValueError('Length of tails should not exceed length of window')
+
+		if window is None: window = (0, self.nsamp)
+
+		datawin = self.datawin
+		try:
+			# Find overlap between the data and output windows
+			ostart, istart, wlen = cutil.overlap(datawin, window)
+			oend = ostart + wlen
+		except TypeError:
+			# There is no overlap, return an empty signal
+			return Waveform(self.nsamp)
+			return
+
+		# Otherwise, copy the signal and zero regions outside window
+		data = self._data.copy()
+		data[:ostart] = 0.
+		data[oend:] = 0.
+
+		# If there are tails, apply them
+		if tails is not None:
+			def tailer(data, dwin, tail, twin):
+				'''Apply the tail to the data'''
+				try:
+					# Find the overlap and apply the tail
+					ostart, istart, wlen = cutil.overlap(dwin, twin)
+					oend, iend = ostart + wlen, istart + wlen
+					data[ostart:oend] *= tail[istart:iend]
+				except TypeError: return
+
+			ltail = len(tails) / 2
+			# Apply the left and right tails in succession
+			lwin = (window[0], ltail)
+			tailer(data, datawin, tails[:ltail], lwin)
+			rwin = (window[0] + window[1] - ltail, ltail)
+			tailer(data, datawin, tails[ltail:], rwin)
+
+		# Return a copy of the signal
+		return Waveform(self.nsamp, data, datawin[0])
+
+
 	def envelope(self, window=None):
 		'''
 		Return the envelope, as the magnitude of the Hilbert transform,
@@ -210,27 +269,30 @@ class Waveform(object):
 		'''
 		if window is None: window = (0, self.nsamp)
 
+		# The real part of the signal type is the envelope type
+		rtype = self.dtype.type().real.dtype
+
 		try:
 			# Find overlap between the data and output windows
 			ostart, istart, wlen = cutil.overlap(window, self.datawin)
 		except TypeError:
 			# There is no overlap, the signal window and transform are 0
-			# Find the dtype of the real part of the signal
-			return np.zeros((window[1],), dtype=self.dtype.type().real.dtype)
+			return np.zeros((window[1],), dtype=rtype)
 
 		oend, iend = ostart + wlen, istart + wlen
 
 		if ostart < 1:
 			# If the signal window starts before sample 1,
-			# no need exists to pre-pad the Hilbert input
+			# just use built-in Hilbert padding to expand
 			sig = self._data[istart:iend]
+			return np.abs(hilbert(sig, N=window[1]))
 		else:
 			# Otherwise, the signal window starts with some zeros
-			# An intermediate array must be created
-			sig = np.zeros((oend,), dtype=self.dtype)
-			sig[ostart:oend] = self._data[istart:iend]
-
-		return np.abs(hilbert(sig, N=window[1]))
+			# A new array must be created to hold the padding
+			sig = np.zeros((window[1],), dtype=rtype)
+			# Populate the output window with the envelope
+			sig[ostart:oend] = np.abs(hilbert(self._data[istart:iend]))
+			return sig
 
 
 	def fft(self, window=None, real=None, inverse=False):
@@ -414,7 +476,7 @@ class Waveform(object):
 		return [(g[0], g[-1] + 1) for g in groups]
 
 
-	def bandpass(self, start, end, tails=None, crop=True):
+	def bandpass(self, start, end, tails=None, crop=False):
 		'''
 		Perform a bandpass operation that zeros all frequencies below
 		the frequency bin at index start and above (and including) the
@@ -498,9 +560,16 @@ def dimcompat(sig, ndim=1):
 
 	If the signal is incompatible, a TypeError is raised.
 	'''
+	# This will force a non-array into an array
 	sig = np.squeeze(sig)
-	if ndim is not None and sig.ndim != ndim:
-		raise TypeError('Signal is not of dimension %d' % ndim)
+
+	if ndim is not None:
+		if sig.ndim == 0:
+			# Force 0-D squeezes to match dimensionality
+			sig = sig[[np.newaxis]*ndim]
+		elif sig.ndim != ndim:
+			# Ensure squeezed dimensionality matches spec
+			raise TypeError('Signal is not of dimension %d' % ndim)
 	return sig
 
 
