@@ -4,9 +4,10 @@ import sys, itertools, ConfigParser, numpy as np
 import multiprocessing, Queue
 
 from pycwp import mio, process, cutil
-from habis import sigtools, trilateration
+from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser
 from habis.formats import WaveformSet
+from habis.sigtools import Waveform
 
 
 def usage(progname):
@@ -22,7 +23,7 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 	waveform set is read directly from datafile, a reference waveform is
 	read from reffile in 1-D binary matrix form, and cross-correlation is
 	used (with an oversampling rate of osamp) in the form of
-	habis.sigtools.delay to determine the delay matrix.
+	habis.sigtools.Waveform.delay to determine the delay matrix.
 
 	If delayfile is specified but computation is still required, the
 	computed matrix will be saved to delayfile. Any existing content will
@@ -103,23 +104,20 @@ def calcdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
 	# Read the data and reference files
 	data = WaveformSet.fromfile(datafile)
 	# Force the proper data type and shape for the reference
-	ref = mio.readbmat(reffile, dim=1, dtype=np.float32)
+	ref = Waveform(signal=mio.readbmat(reffile, dim=1, dtype=np.float32))
 
 	# Pull the relevant waveform set dimensions
-	t, r, ns = data.ntx, data.nrx, data.nsamp
-
-	if ref.shape[0] != ns:
-		raise TypeError('Number of samples in data and reference waveforms must agree')
+	t, r = data.ntx, data.nrx
 
 	# Compute the strided results
 	result = []
 	for idx in range(start, t * r, stride):
 		# Find the transmit and receive indices
 		tid, rid = np.unravel_index(idx, (t, r), 'C')
-		# Pull the waveform in the right format and shape (ignore header)
-		sig = data.getrecord(rid, tid, (0, ns), np.float32)[1]
+		# Pull the waveform as float32
+		sig = data.getwaveform(rid, tid, dtype=np.float32)
 		# Comput the delay and append to the result
-		result.append((idx, sigtools.delay(sig, ref, osamp)))
+		result.append((idx, sig.delay(ref, osamp)))
 
 	try: queue.put(result)
 	except AttributeError: pass

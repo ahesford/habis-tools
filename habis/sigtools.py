@@ -257,8 +257,8 @@ class Waveform(object):
 			rwin = (window[0] + window[1] - ltail, ltail)
 			tailer(data, datawin, tails[ltail:], rwin)
 
-		# Return a copy of the signal
-		return Waveform(self.nsamp, data, datawin[0])
+		# Return a copy of the signal, cropped to the window
+		return Waveform(self.nsamp, data[ostart:oend], datawin[0] + ostart)
 
 
 	def envelope(self, window=None):
