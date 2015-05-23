@@ -597,11 +597,11 @@ class WaveformSet(object):
 		recorded at receive-channel index rid from transmission index
 		tid. Extra args and kwargs are passed through to getrecord().
 		'''
-		# Convert the transmit ID to a record row
-		tcidx = self.tx2row(tid)
-		hdr, waveforms = self.getrecord(rid, tid, *args, **kwargs)
-
+		# Grab the relevant row of the record
+		hdr, waveform = self.getrecord(rid, tid, *args, **kwargs)
 		# Wrap the desired signal in a Waveform object
+		return Waveform(self.nsamp, waveform, hdr['win'][0])
+
 		return Waveform(self.nsamp, waveforms[tcidx], hdr['win'][0])
 
 

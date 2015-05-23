@@ -3,11 +3,14 @@ Routines for manipulating HABIS signals.
 '''
 
 import numpy as np, math
+import collections
 from numpy import fft, linalg as nla
 from scipy import linalg as la
 from scipy.signal import hilbert
 from operator import itemgetter, add
 from itertools import groupby
+
+from functools import wraps
 
 from pycwp import cutil
 
@@ -19,6 +22,14 @@ class Waveform(object):
 	overall length in which samples are explicitly stored. Outside of the
 	"data window", the signal is assumed to be zero.
 	'''
+	@classmethod
+	def empty_like(cls, wave):
+		'''
+		Return an empty waveform with the same "structure" as the
+		provided waveform.
+		'''
+		return cls(wave.nsamp)
+
 	def __init__(self, nsamp=0, signal=None, start=0):
 		'''
 		Initialize a signal of total length nsamp. If signal is
@@ -33,8 +44,7 @@ class Waveform(object):
 		self._data = None
 
 		# Pull in the data signal if appropriate
-		if signal is not None:
-			self.setsignal(signal, start)
+		self.setsignal(signal, start)
 
 
 	@property
@@ -74,6 +84,16 @@ class Waveform(object):
 		except (TypeError, AttributeError): return (0, 0)
 
 
+	@datawin.setter
+	def datawin(self, value):
+		if value[0] < 0 or value[0] + value[1] > self.nsamp:
+			raise ValueError('Specified window is not contained in Waveform')
+
+		# Replace the data and window with the new segment
+		sig = self.getsignal(value, forcecopy=False)
+		self.setsignal(sig, value[0])
+
+
 	@property
 	def isReal(self):
 		'''
@@ -87,7 +107,9 @@ class Waveform(object):
 		'''
 		Return a copy of this waveform.
 		'''
-		return Waveform(self._nsamp, self._data.copy(), self._datastart)
+		datawin = self.datawin
+		data = self.getsignal(datawin, forcecopy=True)
+		return Waveform(self.nsamp, data, datawin[0])
 
 
 	def __iter__(self):
@@ -99,7 +121,7 @@ class Waveform(object):
 		# Create the default value for out-of-window samples
 		zero = self.dtype.type(0.)
 
-		# Figure the number of initial zeros, data samples, and final zeros	
+		# Figure the number of initial zeros, data samples, and final zeros
 		ninitzero, ndata = self.datawin
 		nfinzero = self.nsamp - ninitzero - ndata
 
@@ -138,7 +160,7 @@ class Waveform(object):
 			if 0 <= key < dlength:
 				# Return data sample inside the window
 				return self._data[key]
-			else: 
+			else:
 				# Return zero outside of the data window
 				return self.dtype.type(0.)
 		elif isinstance(key, slice):
@@ -151,6 +173,147 @@ class Waveform(object):
 		raise IndexError('Only integers and slices are valid indices')
 
 
+	def __pos__(self):
+		return self.copy()
+
+	def __neg__(self):
+		datawin = self.datawin
+		data = -self.getsignal(datawin, forcecopy=True)
+		return Waveform(self.nsamp, data, datawin[0])
+
+	def __abs__(self):
+		datawin = self.datawin
+		data = np.abs(self.getsignal(datawin, forcecopy=True))
+		return Waveform(self.nsamp, data, datawin[0])
+
+
+	def __addsub(self, other, ssign=1, osign=1, inplace=False):
+		'''
+		Compute sgn(ssign) * self + sgn(osign) * other, where other is
+		a waveform and waveform-like object.
+
+		If inplace is True, the operation is done in-place on self.
+		(The data window for self will be expanded if necessary.)
+		Otherwise, a new Waveform will be created and returned.
+		'''
+		# Grab the data window for this signal
+		start, length = self.datawin
+		end = start + length
+
+		try:
+			ostart, olength = other.datawin
+		except AttributeError:
+			# Try convering other to a waveform
+			# This assumes that other starts at sample 0
+			other = type(self)(signal=other)
+			ostart, olength = other.datawin
+
+		# Find the common data window
+		oend = ostart + olength
+		if olength < 1:
+			cstart, cend = start, end
+		elif length < 1:
+			cstart, cend = ostart, oend
+		else:
+			cstart = min(start, ostart)
+			cend = max(end, oend)
+		cwin = (cstart, cend - cstart)
+
+
+		# Grab other signal over common window (avoid copies if possible)
+		osig = other.getsignal(cwin, forcecopy=False)
+
+		if inplace:
+			# Expand the data window for in-place arithmetic
+			self.datawin = cwin
+
+			if ssign >= 0:
+				if osign >= 0: self._data += osig
+				else: self._data -= osig
+			else: self._data = (osig if osign >= 0 else -osig) - self._data
+
+			return self
+
+		# Grab this signal over common window
+		ssig = self.getsignal(cwin, forcecopy=False)
+
+		# Combine signals with consideration to sign
+		if ssign >= 0:
+			data = (ssig + osig) if osign >= 0 else (ssig - osig)
+		else:
+			data = (osig - ssig) if osign >= 0 else (-osig - ssig)
+
+		nsamp = max(self.nsamp, other.nsamp)
+		return type(self)(nsamp, data, cwin[0])
+
+
+	def __add__(self, other): return self.__addsub(other, 1, 1, False)
+	def __radd__(self, other): return self.__addsub(other, 1, 1, False)
+	def __iadd__(self, other): return self.__addsub(other, 1, 1, True)
+	def __sub__(self, other): return self.__addsub(other, 1, -1, False)
+	def __rsub__(self, other): return self.__addsub(other, -1, 1, False)
+	def __isub__(self, other): return self.__addsub(other, 1, -1, True)
+
+
+	def __scale(self, other, mode):
+		'''
+		Apply a scale factor other to the waveform according to mode:
+
+			mode == 'mul': Multiply waveform by other
+			mode == 'div': Classsic divide waveform by other
+			mode == 'floordiv': Floor divide waveform by other
+			mode == 'truediv': True divide waveform by other
+		'''
+		# Ensure that other is a scalar
+		try: complex(other)
+		except TypeError: return NotImplemented
+
+		try:
+			modefunc = dict(mul=np.multiply, floordiv=np.floor_divide,
+					div=np.divide, truediv=np.true_divide)[mode]
+		except KeyError:
+			raise ValueError('Invalid mode argument')
+
+		# Pull the data window and scale
+		datawin = self.datawin
+		data = modefunc(self.getsignal(datawin, forcecopy=False), other)
+		return Waveform(self.nsamp, data, datawin[0])
+
+
+	def __mul__(self, other): return self.__scale(other, 'mul')
+	def __rmul__(self, other): return self.__scale(other, 'mul')
+	def __div__(self, other): return self.__scale(other, 'div')
+	def __truediv__(self, other): return self.__scale(other, 'truediv')
+	def __floordiv__(self, other): return self.__scale(other, 'floordiv')
+
+	def __iscale(self, other, mode):
+		'''
+		In-place version of __scale.
+		'''
+		# Ensure that other is a scalar
+		try: complex(other)
+		except TypeError: return NotImplemented
+
+		# If there is no data window, take no action
+		if self._data is None or len(self._data) < 1: return self
+
+		# Scale the data in-place
+		if mode == 'mul': self._data *= other
+		elif mode == 'div': self._data /= other
+		elif mode == 'truediv': self._data /= other
+		elif mode == 'floordiv': self._data //= other
+		else:
+			raise ValueError('Invalid mode argument')
+
+		return self
+
+
+	def __imul__(self, other): return self.__iscale(other, 'mul')
+	def __idiv(self, other): return self.__iscale(other, 'div')
+	def __itruediv__(self, other): return self.__iscale(other, 'truediv')
+	def __ifloordiv__(self, other): return self.__iscale(other, 'floordiv')
+
+
 	def setsignal(self, signal, start=0):
 		'''
 		Replace the waveform's data window with the provided signal.
@@ -161,7 +324,7 @@ class Waveform(object):
 		If signal is a Numpy ndarray, the retained data window may be a
 		view to the provided signal rather than a copy.
 		'''
-		if signal is None:
+		if signal is None or len(signal) < 1:
 			self._data = None
 			self._datastart = 0
 			return
@@ -179,35 +342,52 @@ class Waveform(object):
 			self.nsamp = start + length
 
 
-	def getsignal(self, window=None, dtype=None):
+	def getsignal(self, window=None, dtype=None, forcecopy=True):
 		'''
-		Return a new 1-D Numpy array populated with the contents of the
-		waveform. If window is provided, it is a tuple of the form
-		(start, length) that specifies the portion of the waveform to
-		return. If window is None, (0, self.nsamp) is assumed.
+		Return, as a Numpy array, the contents of the waveform in the
+		provided (start, length) window. A window of (0, self.nsamp) is
+		assumed when None is specified.
 
-		If dtype is provided, it is a Numpy datatype that will override
-		the type of output array.
+		If dtype is provided, the output will be cast into the
+		specified Numpy dtype. Otherwise, the Waveform dtype is used.
+
+		If forcecopy is False, the returned array will be a view into
+		the Waveform data array whenever the output window is wholly
+		contained within self.datawin and dtype is None or the Waveform
+		datatype. Otherwise, a new copy of the data will always be
+		made. If the output window does not fall within the Waveform
+		data window, or the datatypes are not the same, the output will
+		always be a new copy.
 		'''
 		if window is None: window = (0, self.nsamp)
+
+		datawin = self.datawin
+		ostart, oend = window[0], window[0] + window[1]
+		istart, iend = datawin[0], datawin[0] + datawin[1]
 
 		# Find the datatype if necessary
 		if dtype is None: dtype = self.dtype
 
-		signal = np.zeros((window[1],), dtype=dtype)
+		# Determine if the output is a view or a copy
+		isview = ((not forcecopy) and istart <= ostart
+				and iend >= oend and dtype == self.dtype)
 
 		try:
 			# Find overlap between the data and output windows
-			ostart, istart, wlen = cutil.overlap(window, self.datawin)
+			ostart, istart, wlen = cutil.overlap(window, datawin)
 		except TypeError:
 			# There is no overlap, the signal is 0
-			return signal
+			return np.zeros((window[1],), dtype=dtype)
 
-		# Copy the overlapping portion
 		oend, iend = ostart + wlen, istart + wlen
-		signal[ostart:oend] = self._data[istart:iend]
 
-		return signal
+		if isview:
+			return self._data[istart:iend]
+		else:
+			# Copy the overlapping portion
+			signal = np.zeros((window[1],), dtype=dtype)
+			signal[ostart:oend] = self._data[istart:iend]
+			return signal
 
 
 	def window(self, window=None, tails=None):
@@ -269,15 +449,18 @@ class Waveform(object):
 		'''
 		if window is None: window = (0, self.nsamp)
 
-		# The real part of the signal type is the envelope type
-		rtype = self.dtype.type().real.dtype
+		if not self.checkwin(window):
+			raise ValueError('Specified window is not contained in Waveform')
+
+		if not self.isReal:
+			raise TypeError('Envelope only works for real-valued signals')
 
 		try:
 			# Find overlap between the data and output windows
 			ostart, istart, wlen = cutil.overlap(window, self.datawin)
 		except TypeError:
 			# There is no overlap, the signal window and transform are 0
-			return np.zeros((window[1],), dtype=rtype)
+			return np.zeros((window[1],), dtype=self.dtype)
 
 		oend, iend = ostart + wlen, istart + wlen
 
@@ -289,7 +472,7 @@ class Waveform(object):
 		else:
 			# Otherwise, the signal window starts with some zeros
 			# A new array must be created to hold the padding
-			sig = np.zeros((window[1],), dtype=rtype)
+			sig = np.zeros((window[1],), dtype=self.dtype)
 			# Populate the output window with the envelope
 			sig[ostart:oend] = np.abs(hilbert(self._data[istart:iend]))
 			return sig
@@ -347,21 +530,32 @@ class Waveform(object):
 		return fftfunc(sig, n=window[1])
 
 
-	def aligned(self, ref, osamp=1, allowneg=False):
+	def aligned(self, ref, **kwargs):
 		'''
 		Return a copy of the signal aligned to the reference
 		habis.sigtools.Waveform ref by calling self.shift() with the
-		output of self.delay(ref, osamp, allowneg).
+		output of ref.delay(self).
+
+		The keyword arguments are scanned for extra arguments to
+		shift() and delay(), which are passed as appropriate.
 		'''
-		return self.shift(self.delay(ref, osamp, allowneg))
+		# Build the optional arguments to shift() and delay()
+		shargs = {key: kwargs[key]
+				for key in ['dtype'] if key in kwargs}
+		deargs = {key: kwargs[key]
+				for key in ['osamp', 'allowneg'] if key in kwargs}
+
+		return self.shift(ref.delay(self, **deargs), **shargs)
 
 
-	def shift(self, d):
+	def shift(self, d, dtype=None):
 		'''
 		Return a copy of the waveform cyclically shifted by a number of
 		(optionally fractional) samples d using a spectral multiplier.
 		Positive shifts correspond to delays (i.e., the signal moves
-		right).
+		right). The shifted signal is converted to the specified dtype,
+		if provided; otherwise the shifted signal is of the same type
+		as the original.
 
 		Fourier transforms are always computed over the entire signal.
 		'''
@@ -384,7 +578,8 @@ class Waveform(object):
 		# Correct the Nyquist frequency term for conjugate symmetry
 		if n % 2 == 0: sh[n / 2] = np.real(sh[n / 2])
 
-		ssig = ifftfunc(fsig * sh, n).astype(self.dtype)
+		if dtype is None: dtype = self.dtype
+		ssig = ifftfunc(fsig * sh, n).astype(dtype)
 
 		# Return a copy of the shifted signal
 		return Waveform(self.nsamp, ssig, 0)
@@ -392,8 +587,10 @@ class Waveform(object):
 
 	def delay(self, ref, osamp=1, allowneg=False):
 		'''
-		Find the delay that maximizes the cross-correlation between
-		this instance and another habis.sigtools.Waveform ref.
+		Find the delay of maximum cross-correlation between this
+		instance and another habis.sigtools.Waveform ref. This is
+		interpreted as the delay, in samples, to shift ref to align the
+		signal with self.
 
 		Both signals will be interpolated by at least a factor osamp,
 		if provided, to yield fractional-sample delays.
@@ -476,7 +673,7 @@ class Waveform(object):
 		return [(g[0], g[-1] + 1) for g in groups]
 
 
-	def bandpass(self, start, end, tails=None):
+	def bandpass(self, start, end, tails=None, dtype=None):
 		'''
 		Perform a bandpass operation that zeros all frequencies below
 		the frequency bin at index start and above (and including) the
@@ -492,6 +689,9 @@ class Waveform(object):
 		where fsig = rfft(sig). If the signal is complex (and,
 		therefore, a C2C DFT is used, negative frequencies are
 		similarly modified.
+
+		If dtype is provided, the output is converted to the specified
+		type; otherwise, the output has the same type as the input.
 		'''
 		# Check the window for sanity
 		if start >= end:
@@ -534,7 +734,8 @@ class Waveform(object):
 				fsig[n-end+ltails:n-end:-1] *= tails[-ltails:]
 
 		ifftfunc = fft.irfft if r2c else fft.ifft
-		bsig = ifftfunc(fsig, n).astype(self.dtype)
+		if dtype is None: dtype = self.dtype
+		bsig = ifftfunc(fsig, n).astype(dtype)
 
 		return Waveform(self.nsamp, bsig, 0)
 
