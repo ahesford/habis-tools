@@ -3,8 +3,6 @@
 import sys, itertools, ConfigParser, numpy as np
 import multiprocessing, Queue
 
-from scipy.signal import hilbert
-
 from pycwp import process
 from habis.habiconf import HabisConfigError, HabisConfigParser
 from habis.formats import WaveformSet
@@ -154,9 +152,8 @@ def mpwavefilt(infile, filt, nproc, outfile, nsamp=None):
 
 def filterEngine(config):
 	'''
-	With multiple processes, perform bandpass filtering on a configured
-	habis.formats.WaveformSet stored in a file and then compute average
-	responses for successive groups of contiguous blocks of channels.
+	With multiple processes, perform bandpass filtering on a multiple
+	habis.formats.WaveformSet objects stored in a collection of files.
 	'''
 	try:
 		datafiles = config.getlist('filter', 'datafile')
