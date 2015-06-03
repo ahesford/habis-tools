@@ -412,7 +412,6 @@ class Waveform(object):
 		except TypeError:
 			# There is no overlap, return an empty signal
 			return Waveform(self.nsamp)
-			return
 
 		# Otherwise, copy the signal and zero regions outside window
 		data = self._data.copy()

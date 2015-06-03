@@ -50,9 +50,9 @@ def trilaterationEngine(config):
 
 	try:
 		# Grab the element range
-		elementRange = config.getlist('trilateration', 'elementrange', int)
+		elements = config.getrange('trilateration', 'elements')
 	except:
-		raise HabisConfigError('Configuration must specify elementrange in [trilateration]')
+		raise HabisConfigError('Configuration must specify elements in [trilateration]')
 
 	try:
 		# Grab the number of processes to use (optional)
@@ -69,8 +69,8 @@ def trilaterationEngine(config):
 	except:
 		raise HabisConfigError('Configuration must specify sound-speed c and radius in [trilateration]')
 
-	# Pull the element indices
-	elements = np.loadtxt(facetfile)[range(*elementRange)]
+	# Pull the desired element indices
+	elements = np.loadtxt(facetfile)[elements]
 	# Pull the arrival times and convert surface times to center times
 	times = np.loadtxt(timefile) + ((2. * radius) / c)
 	# Pull the reflector guess
@@ -105,9 +105,8 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	config = HabisConfigParser()
 	try:
-		config.readfp(open(sys.argv[1]))
+		config = HabisConfigParser.fromfile(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])

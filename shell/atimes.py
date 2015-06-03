@@ -14,7 +14,7 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
+def finddelays(datafile, reffile, osamp, nproc, elements=None, delayfile=None):
 	'''
 	Compute the delay matrix for a habis.formats.WaveformSet stored in
 	datafile. If delayfile is specified and can be read as a T x R matrix,
@@ -25,6 +25,10 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 	used (with an oversampling rate of osamp) in the form of
 	habis.sigtools.Waveform.delay to determine the delay matrix.
 
+	If elements is not None, it should be a list of element indices, and
+	entry (i, j) in the delay matrix will correspond to the delay of the
+	waveform for transmit index elements[i] and receive index elements[j].
+
 	If delayfile is specified but computation is still required, the
 	computed matrix will be saved to delayfile. Any existing content will
 	be overwritten.
@@ -33,14 +37,16 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 	'''
 	# Grab the dimensions of the waveform matrix
 	wset = WaveformSet.fromfile(datafile)
-	t, r = wset.ntx, wset.nrx
-	# No need to keep the WaveformSet around; close the file
+	# Determine the shape of the delay matrix
+	try: wshape = len(elements), len(elements)
+	except TypeError: wshape = wset.ntx, wset.nrx
+	# No need to keep the WaveformSet around; kill the memmap
 	del wset
 
 	try:
 		# Try to read an existing delay file and check its size
 		delays = np.loadtxt(delayfile)
-		if delays.shape != (t, r):
+		if delays.shape != wshape:
 			raise ValueError('Delay file has wrong shape; recomputing')
 		return delays
 	except (ValueError, IOError):
@@ -50,14 +56,14 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 
 	# Create a result queue and a matrix to store the accumulated results
 	queue = multiprocessing.Queue(nproc)
-	delays = np.zeros((t, r), dtype=np.float32)
+	delays = np.zeros(wshape, dtype=np.float32)
 
 	# Spawn the desired processes to perform the cross-correlation
 	with process.ProcessPool() as pool:
 		for i in range(nproc):
 			# Pick a useful process name
 			procname = process.procname(i)
-			args = (datafile, reffile, osamp, queue, i, nproc)
+			args = (datafile, reffile, osamp, elements, queue, i, nproc)
 			pool.addtask(target=calcdelays, name=procname, args=args)
 
 		pool.start()
@@ -68,7 +74,7 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 			try:
 				results = queue.get(timeout=0.1)
 				for idx, delay in results:
-					row, col = np.unravel_index(idx, (t, r), 'C')
+					row, col = np.unravel_index(idx, wshape, 'C')
 					delays[row,col] = delay
 				responses += 1
 			except Queue.Empty: pass
@@ -84,7 +90,7 @@ def finddelays(datafile, reffile, osamp, nproc, delayfile=None):
 	return delays
 
 
-def calcdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
+def calcdelays(datafile, reffile, osamp, elements=None, queue=None, start=0, stride=1):
 	'''
 	Given a datafile containing a habis.formats.WaveformSet, perform
 	cross-correlation on every stride-th received waveform, starting at
@@ -96,6 +102,10 @@ def calcdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
 	The reference file must be a 1-dimensional matrix as a float32.
 	Waveforms in the datafile will be cast to float32.
 
+	If elements is not None, it should be a list of element indices, and
+	entry (i, j) in the delay matrix will correspond to the delay of the
+	waveform for transmit index elements[i] and receive index elements[j].
+
 	The return value is a list of 2-tuples, wherein the first element is a
 	flattened waveform index and the second element is the corresponding
 	delay in samples. If queue is not None, the result list is also placed
@@ -106,14 +116,16 @@ def calcdelays(datafile, reffile, osamp, queue=None, start=0, stride=1):
 	# Force the proper data type and shape for the reference
 	ref = Waveform(signal=mio.readbmat(reffile, dim=1, dtype=np.float32))
 
-	# Pull the relevant waveform set dimensions
-	t, r = data.ntx, data.nrx
+	# Determine the shape of the delay matrix
+	try: t, r = len(elements), len(elements)
+	except TypeError: t, r = data.ntx, data.nrx
 
 	# Compute the strided results
 	result = []
 	for idx in range(start, t * r, stride):
 		# Find the transmit and receive indices
-		tid, rid = np.unravel_index(idx, (t, r), 'C')
+		i, j = np.unravel_index(idx, (t, r), 'C')
+		tid, rid = elements[i], elements[j]
 		# Pull the waveform as float32
 		sig = data.getwaveform(rid, tid, dtype=np.float32)
 		# Comput the delay and append to the result
@@ -133,26 +145,27 @@ def atimesEngine(config):
 	cross-correlation with a reference pulse, plus some constant offset.
 	'''
 	try:
-		datafiles = []
-		delayfiles = {}
-		# Loop through all [atimes] records looking for datafiles
-		for key, value in config.items('atimes'):
-			if key.startswith('datafile'):
-				# Add the datafile to the list
-				datafiles.append(value)
-				# A matching delay file can be specified by
-				# swapping 'datafile' with 'delayfile' in key
-				delaykey = key.replace('datafile', 'delayfile', 1)
-				# The delayfile is optional, but if found, the
-				# dictionary is keyed on the data file name
-				try: delayfiles[value] = config.get('atimes', delaykey)
-				except ConfigParser.NoOptionError: pass
-				
+		# Read the list of data files
+		datafiles = config.getlist('atimes', 'datafile')
+		if len(datafiles) < 1:
+			raise ConfigParser.Error('Fall-through to exception handler')
 	except ConfigParser.Error:
-		raise HabisConfigError('Configuration must specify an [atimes] section')
+		raise HabisConfigError('Configuration must specify at least one datafile')
 
-	if len(datafiles) < 1:
-		raise HabisConfigError('Configuration must specify at least one datafile in [atimes]')
+	# Read an optional list of delay files
+	# Default delay files are empty (no files)
+	try:
+		delayfiles = config.getlist('atimes', 'delayfile')
+		if len(delayfiles) < 1:
+			raise ConfigParser.Error('Fall-through to exception handler')
+	except ConfigParser.NoOptionError:
+		delayfiles = [''] * len(datafiles)
+	except:
+		raise HabisConfigError('Invalid specification of delayfile in [atimes]')
+
+	# Make sure the delayfile and datafile counts match
+	if len(datafiles) != len(delayfiles):
+		raise HabisConfigError('Number of delay files must match number of data files')
 
 	try:
 		# Grab the reference and output files
@@ -182,27 +195,39 @@ def atimesEngine(config):
 	except:
 		raise HabisConfigError('Configuration must specify float sampling period and temporal offset in [sampling]')
 
+	# Determine the range of elements to use; default to all (as None)
+	try:
+		elements = config.getrange('atimes', 'elements')
+	except ConfigParser.NoOptionError:
+		elements = None
+	except:
+		raise HabisConfigError('Invalid specification of optional element indices in [atimes]')
+
 	symmetrize = config.getbooldefault('atimes', 'symmetrize', False)
 	usediag = config.getbooldefault('atimes', 'usediag', False)
 	maskoutliers = config.getbooldefault('atimes', 'maskoutliers', False)
 
 	# Determine the shape of the first multipath data
-	t, r, ns = mio.getmattype(datafiles[0], dim=3, dtype=np.float32)[0]
+	wset = WaveformSet.fromfile(datafiles[0])
+	wshape = wset.ntx, wset.nrx
 
 	# Check that all subsequent data files have the same shape
 	for datafile in datafiles[1:]:
-		tp, rp, nsp = mio.getmattype(datafile, dim=3, dtype=np.float32)[0]
-		if (tp, rp, nsp) != (t, r, ns):
+		wset = WaveformSet.fromfile(datafile)
+		if (wset.ntx, wset.nrx) != wshape:
 			raise TypeError('All input waveform data must have same shape')
+
+	# Make sure the WaveformSet is gone to close the memmap
+	del wset
 
 	# Store results for all data files in this list
 	times = []
 
-	for datafile in datafiles:
-		# Try to read or compute the delay matrix for this data set
-		delayfile = delayfiles.get(datafile, None)
+	for datafile, delayfile in zip(datafiles, delayfiles):
+		# If an empty name is specified, use no delayfile
+		if len(delayfile) == 0: delayfile = None
 		print 'Finding delays for data set', datafile
-		delays = finddelays(datafile, reffile, osamp, nproc, delayfile)
+		delays = finddelays(datafile, reffile, osamp, nproc, elements, delayfile)
 
 		# Convert delays to arrival times
 		delays = delays * dt + t0
@@ -231,9 +256,7 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	config = HabisConfigParser()
-	try:
-		config.readfp(open(sys.argv[1]))
+	try: config = HabisConfigParser.fromfile(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])
