@@ -448,9 +448,6 @@ class Waveform(object):
 		'''
 		if window is None: window = (0, self.nsamp)
 
-		if not self.checkwin(window):
-			raise ValueError('Specified window is not contained in Waveform')
-
 		if not self.isReal:
 			raise TypeError('Envelope only works for real-valued signals')
 

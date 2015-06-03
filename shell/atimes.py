@@ -14,7 +14,8 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def finddelays(datafile, reffile, osamp, nproc, elements=None, delayfile=None):
+def finddelays(datafile, reffile, osamp, nproc,
+		window=None, elements=None, delayfile=None):
 	'''
 	Compute the delay matrix for a habis.formats.WaveformSet stored in
 	datafile. If delayfile is specified and can be read as a T x R matrix,
@@ -28,6 +29,9 @@ def finddelays(datafile, reffile, osamp, nproc, elements=None, delayfile=None):
 	If elements is not None, it should be a list of element indices, and
 	entry (i, j) in the delay matrix will correspond to the delay of the
 	waveform for transmit index elements[i] and receive index elements[j].
+
+	If window is not None, it specifies a window passed to calcdelays that
+	is used to window the waveforms before finding delays.
 
 	If delayfile is specified but computation is still required, the
 	computed matrix will be saved to delayfile. Any existing content will
@@ -63,7 +67,7 @@ def finddelays(datafile, reffile, osamp, nproc, elements=None, delayfile=None):
 		for i in range(nproc):
 			# Pick a useful process name
 			procname = process.procname(i)
-			args = (datafile, reffile, osamp, elements, queue, i, nproc)
+			args = (datafile, reffile, osamp, window, elements, queue, i, nproc)
 			pool.addtask(target=calcdelays, name=procname, args=args)
 
 		pool.start()
@@ -90,7 +94,8 @@ def finddelays(datafile, reffile, osamp, nproc, elements=None, delayfile=None):
 	return delays
 
 
-def calcdelays(datafile, reffile, osamp, elements=None, queue=None, start=0, stride=1):
+def calcdelays(datafile, reffile, osamp, window=None,
+		elements=None, queue=None, start=0, stride=1):
 	'''
 	Given a datafile containing a habis.formats.WaveformSet, perform
 	cross-correlation on every stride-th received waveform, starting at
@@ -101,6 +106,12 @@ def calcdelays(datafile, reffile, osamp, elements=None, queue=None, start=0, str
 
 	The reference file must be a 1-dimensional matrix as a float32.
 	Waveforms in the datafile will be cast to float32.
+
+	If window is not None, it should be a tuple of ints of the form
+	(start, length, [tailwidth]) that specifies a window to be applied to
+	each waveform before finding delays. If tailwidth is provided, a Hann
+	window of length (2 * tailwidth) is passed as the tails argument to
+	habis.sigtools.Waveform.window().
 
 	If elements is not None, it should be a list of element indices, and
 	entry (i, j) in the delay matrix will correspond to the delay of the
@@ -120,6 +131,10 @@ def calcdelays(datafile, reffile, osamp, elements=None, queue=None, start=0, str
 	try: t, r = len(elements), len(elements)
 	except TypeError: t, r = data.ntx, data.nrx
 
+	# Pull the tails of an optional window
+	try: tails = np.hanning(2 * window[2])
+	except (TypeError, IndexError): tails = None
+
 	# Compute the strided results
 	result = []
 	for idx in range(start, t * r, stride):
@@ -128,7 +143,9 @@ def calcdelays(datafile, reffile, osamp, elements=None, queue=None, start=0, str
 		tid, rid = elements[i], elements[j]
 		# Pull the waveform as float32
 		sig = data.getwaveform(rid, tid, dtype=np.float32)
-		# Comput the delay and append to the result
+		if window is not None:
+			sig = sig.window(window[:2], tails=tails)
+		# Compute the delay and append to the result
 		result.append((idx, sig.delay(ref, osamp)))
 
 	try: queue.put(result)
@@ -203,6 +220,16 @@ def atimesEngine(config):
 	except:
 		raise HabisConfigError('Invalid specification of optional element indices in [atimes]')
 
+	# Determine a temporal window to apply before finding delays
+	try:
+		window = config.getlist('atimes', 'window', int)
+		if len(window) < 2 or len(window) > 3:
+			raise ValueError('Fall-through to exception handler')
+	except ConfigParser.NoOptionError:
+		window = None
+	except:
+		raise HabisConfigError('Invalid specification of optional temporal window in [atimes]')
+
 	symmetrize = config.getbooldefault('atimes', 'symmetrize', False)
 	usediag = config.getbooldefault('atimes', 'usediag', False)
 	maskoutliers = config.getbooldefault('atimes', 'maskoutliers', False)
@@ -227,7 +254,8 @@ def atimesEngine(config):
 		# If an empty name is specified, use no delayfile
 		if len(delayfile) == 0: delayfile = None
 		print 'Finding delays for data set', datafile
-		delays = finddelays(datafile, reffile, osamp, nproc, elements, delayfile)
+		delays = finddelays(datafile, reffile, osamp,
+				nproc, window, elements, delayfile)
 
 		# Convert delays to arrival times
 		delays = delays * dt + t0
