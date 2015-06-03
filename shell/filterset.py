@@ -15,7 +15,7 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def copyhdr(f, wset, dtype=None, nsamp=None, ver=(1,0)):
+def copyhdr(f, wset, dtype=None, ver=(1,0)):
 	'''
 	Copy the file header and list of transmit channels from the
 	habis.formats.WaveformSet wset to f, a file-like object or the name of
@@ -25,20 +25,16 @@ def copyhdr(f, wset, dtype=None, nsamp=None, ver=(1,0)):
 	If dtype is provided, it specifies a datatype to override the waveform
 	record datatype in wset.
 
-	If nsamp is provided, it specifies a sample count to override the value
-	recorded in wset.
-
 	The header format version can be specified as ver=(major, minor).
 	'''
 	# Open a named file, if necessary
 	if isinstance(f, basestring): f = open(f, 'wb')
 
 	if dtype is None: dtype = wset.dtype
-	if nsamp is None: nsamp = wset.nsamp
 
 	# Copy the relevant header fields and write the header
 	nchans = (wset.nrx, wset.ntx)
-	hdr = wset.packfilehdr(dtype, nchans, nsamp, wset.f2c, wset.txidx, ver)
+	hdr = wset.packfilehdr(dtype, nchans, wset.nsamp, wset.f2c, wset.txidx, ver)
 	f.write(hdr)
 
 
@@ -125,8 +121,18 @@ def mpwavefilt(infile, filt, nproc, outfile, nsamp=None):
 	'''
 	# Copy the input header to output and get receive-channel indices
 	wset = WaveformSet.fromfile(infile)
-	copyhdr(outfile, wset, dtype=np.float32, nsamp=nsamp)
+
+	# Make sure the set can be truncated as desired
+	if nsamp is not None:
+		try:
+			wset.nsamp = nsamp
+		except ValueError:
+			print >> sys.stderr, 'ERROR: could not truncate input waveforms'
+			return
+
+	copyhdr(outfile, wset, dtype=np.float32)
 	rxidx = wset.rxidx
+
 	# Delete the waveform set to close the memory-mapped input file
 	del wset
 
