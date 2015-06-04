@@ -3,6 +3,8 @@
 import os, sys, itertools, ConfigParser, numpy as np
 import multiprocessing
 
+from pycwp import process
+
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser
 
