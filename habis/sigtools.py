@@ -530,7 +530,7 @@ class Waveform(object):
 		'''
 		Return a copy of the signal aligned to the reference
 		habis.sigtools.Waveform ref by calling self.shift() with the
-		output of ref.delay(self).
+		negative of self.delay(ref).
 
 		The keyword arguments are scanned for extra arguments to
 		shift() and delay(), which are passed as appropriate.
@@ -541,7 +541,7 @@ class Waveform(object):
 		deargs = {key: kwargs[key]
 				for key in ['osamp', 'allowneg'] if key in kwargs}
 
-		return self.shift(ref.delay(self, **deargs), **shargs)
+		return self.shift(-self.delay(ref, **deargs), **shargs)
 
 
 	def shift(self, d, dtype=None):
@@ -583,27 +583,43 @@ class Waveform(object):
 
 	def delay(self, ref, osamp=1, allowneg=False):
 		'''
-		Find the delay of maximum cross-correlation between this
-		instance and another habis.sigtools.Waveform ref. This is
-		interpreted as the delay, in samples, to shift ref to align the
-		signal with self.
+		Find the cyclic delay that maximizes the cross-correlation
+		between this instance and a reference waveform ref. The ref may
+		be a Numpy array or another habis.sigtools.Waveform instance.
+		This is interpreted as the delay, in samples, necessary to
+		shift ref to align the signal with self.
 
 		Both signals will be interpolated by at least a factor osamp,
 		if provided, to yield fractional-sample delays.
+
+		The delay, d, is always in the range 0 <= d < self.nsamp.
 
 		If allowneg is True, the return value will be a tuple (d, s),
 		where d is the delay that maximizes the absolute value of the
 		cross-correlation, and s is the sign (-1 or 1, integer) of the
 		cross-correlation at this point.
+
+		*** NOTE ***
+		Both waveforms must have the same length for the cyclic
+		cross-correlation used for delay analysis to make sense.
 		'''
 		if osamp < 1:
 			raise ValueError ('Oversampling factor must be at least unity')
 
 		sstart, slength = self.datawin
-		rstart, rlength = ref.datawin
+		try:
+			rstart, rlength = ref.datawin
+		except AttributeError:
+			# Try convering other to a waveform
+			# This assumes that other starts at sample 0
+			ref = type(self)(signal=ref)
+			rstart, rlength = ref.datawin
 
 		# If one of the signals is explicitly 0, the delay is 0
 		if slength == 0 or rlength == 0: return 0
+
+		if self.nsamp != ref.nsamp:
+			raise ValueError('Signals must have the same length for delay analysis')
 
 		# Use an R2C DFT if both signals are real, otherwise complex
 		r2c = self.isReal and ref.isReal
@@ -627,11 +643,12 @@ class Waveform(object):
 		else: t = np.argmax(csig)
 
 		# Unwrap negative values and scale by the oversampling rate
-		if t >= nint / 2: t = t - nint
 		t *= npad / float(nint)
-
-		# Adjust the delay to account for different data window positions
+		# Adjust delay to account for different data window positions
 		t += (sstart - rstart)
+
+		# Wrap to waveform interval (Python % is always positive)
+		t %= self.nsamp
 
 		return ((t, s) if allowneg else t)
 
