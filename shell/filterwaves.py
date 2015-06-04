@@ -160,26 +160,23 @@ def filterEngine(config):
 		outfiles = config.getlist('filter', 'outfile')
 		if len(datafiles) < 1 or len(datafiles) != len(outfiles):
 			raise ConfigParser.Error('Fall-through to exception handler')
-	except ConfigParser.Error:
+	except:
 		raise HabisConfigError('Configuration must specify datafile and corresponding outfile in [filter]')
 
 	try:
-		nsamp = config.getint('filter', 'nsamp')
-	except ConfigParser.NoOptionError:
-		nsamp = None
+		nsamp = config.getint('filter', 'nsamp', failfunc=lambda: None)
 	except:
 		raise HabisConfigError('Invalid specification of nsamp in [filter]')
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = config.getint('general', 'nproc')
-	except ConfigParser.NoOptionError:
-		nproc = process.preferred_process_count()
+		nproc = config.getint('general', 'nproc',
+				failfunc=process.preferred_process_count)
 	except:
 		raise HabisConfigError('Invalid specification of process count in [general]')
 
 	try:
-		filt = config.getlist('filter', 'filter', int)
+		filt = config.getlist('filter', 'filter', mapper=int)
 		if len(filt) < 2 or len(filt) > 3:
 			raise ValueError('Fall-through to exception handler')
 	except:

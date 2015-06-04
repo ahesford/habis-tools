@@ -7,10 +7,9 @@ import collections
 from numpy import fft, linalg as nla
 from scipy import linalg as la
 from scipy.signal import hilbert
+from scipy.stats import linregress
 from operator import itemgetter, add
 from itertools import groupby
-
-from functools import wraps
 
 from pycwp import cutil, mio
 
@@ -60,7 +59,7 @@ class Waveform(object):
 			tid = wset.txidx[0]
 			return wset.getwaveform(rid, tid)
 		except ValueError: pass
-		
+
 		# As a fallback, try a 1-D binary array
 		return cls(signal=mio.readbmat(f, dim=1))
 
@@ -109,6 +108,13 @@ class Waveform(object):
 		except AttributeError: return np.dtype('float32')
 
 
+	@dtype.setter
+	def dtype(self, value):
+		try: self._data = self._data.astype(value)
+		except AttributeError:
+			raise AttributeError('Cannot set dtype on empty signal')
+
+
 	@property
 	def datawin(self):
 		'''
@@ -142,7 +148,7 @@ class Waveform(object):
 		'''
 		Store the contents of the waveform to f, which may be a file
 		name or a file-like object.
-		
+
 		If waveset is True, the waveform is first wrapped in a
 		habis.formats.WaveformSet object using the fromwaveform()
 		factory and then written using WaveformSet.store(f).  No
@@ -586,7 +592,7 @@ class Waveform(object):
 		'''
 		Return a copy of the signal aligned to the reference
 		habis.sigtools.Waveform ref by calling self.shift() with the
-		negative of self.delay(ref).
+		equivalent of ref.delay(self).
 
 		The keyword arguments are scanned for extra arguments to
 		shift() and delay(), which are passed as appropriate.
@@ -597,7 +603,7 @@ class Waveform(object):
 		deargs = {key: kwargs[key]
 				for key in ['osamp', 'allowneg'] if key in kwargs}
 
-		return self.shift(-self.delay(ref, **deargs), **shargs)
+		return self.shift(self.nsamp-self.delay(ref, **deargs), **shargs)
 
 
 	def shift(self, d, dtype=None):
@@ -635,6 +641,28 @@ class Waveform(object):
 
 		# Return a copy of the shifted signal
 		return Waveform(self.nsamp, ssig, 0)
+
+
+	def zerotime(self, band=None):
+		'''
+		Attempt to find the time origin of this signal by determining,
+		using linear regression, the slope of the phase angle of the
+		signal. Shifting by the negative of this slope should eliminate
+		linear phase variations in the phase angle.
+
+		If specified, band should be of the form (start, end), and
+		specifies the range of *POSITIVE* DFT frequency bin indices
+		over which regression will be performed. If band is not
+		specified, all positive frequencies are used.
+		'''
+		if band is None: band = (0, int(self.nsamp / 2) + 1)
+		# Compute positive DFT frequencies
+		freqs = -2.0 * math.pi * np.arange(band[0], band[1]) / self.nsamp
+		# Compute the unwrapped phase angle in the band of interest
+		ang = np.unwrap(np.angle(self.fft())[band[0]:band[1]])
+		# Perform the regression (ignore all but slope)
+		slope = linregress(freqs, ang)[0]
+		return slope
 
 
 	def delay(self, ref, osamp=1, allowneg=False):
@@ -699,6 +727,7 @@ class Waveform(object):
 		else: t = np.argmax(csig)
 
 		# Unwrap negative values and scale by the oversampling rate
+		if t >= nint / 2: t -= nint
 		t *= npad / float(nint)
 		# Adjust delay to account for different data window positions
 		t += (sstart - rstart)

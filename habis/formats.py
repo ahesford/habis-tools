@@ -618,10 +618,7 @@ class WaveformSet(object):
 		'''
 		Convert a transmit-channel index into a waveform-array row index.
 		'''
-		try:
-			return self._txmap[int(tid)]
-		except KeyError:
-			raise IndexError('The transmit index does not exist in this set')
+		return self._txmap[tid]
 
 
 	def row2tx(self, row):
@@ -629,7 +626,7 @@ class WaveformSet(object):
 		Convert a waveform-array row index to a transmit-channel index.
 		'''
 		# Use the ordered keys in the txmap to pull out the desired row
-		return self._txmap.keys()[int(row)]
+		return self._txmap.keys()[row]
 
 
 	def getrecord(self, rid, tid=None, window=None, dtype=None):
@@ -662,7 +659,7 @@ class WaveformSet(object):
 		if tid is not None: tcidx = self.tx2row(tid)
 
 		# Grab the record for the receive index
-		hdr, waveforms = self._records[int(rid)]
+		hdr, waveforms = self._records[rid]
 		# Make a copy of the header to avoid corruption
 		hdr = hdr.copy()
 		# If the data is not changed, just return a view of the waveforms
@@ -715,11 +712,29 @@ class WaveformSet(object):
 		return Waveform(self.nsamp, waveform, hdr['win'][0])
 
 
+	def __getitem__(self, key):
+		'''
+		A convenience method to call getwaveform(rid, tid) for provided
+		receive and transmit indices. Only a key of the form (rid, tid)
+		is supported.
+		'''
+		try:
+			# Split the indices
+			rid, tid = key
+		except (TypeError, ValueError):
+			raise TypeError('Item key should be a sequence of two integer values')
+
+		if int(rid) != rid or int(tid) != tid:
+			raise TypeError('Waveform indices must be integer-compatible')
+
+		return self.getwaveform(rid, tid)
+
+
 	def delrecord(self, rid):
 		'''
 		Delete the waveform record for the receive-channel index rid.
 		'''
-		del self._records[int(rid)]
+		del self._records[rid]
 
 
 	def clearall(self):
@@ -749,6 +764,10 @@ class WaveformSet(object):
 		# Check that the header bounds make sense
 		if hdr['win'][0] + hdr['win'][1] > self.nsamp:
 			raise ValueError('Waveform sample window exceeds acquisition window duration')
+
+		if int(hdr['idx']) != hdr['idx']:
+			raise TypeError('Channel index must be integer-compatible')
+
 
 		if waveforms is None:
 			# Create an all-zero waveform array

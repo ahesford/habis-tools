@@ -17,7 +17,7 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def groupavg(infile, rxchans, grouplen, queue=None, osamp=16):
+def groupavg(infile, rxchans, grouplen, osamp, queue=None):
 	'''
 	For the habis.formats.WaveformSet object stored in infile, compute the
 	average response for each "group" of transmit-receive pairs. A group of
@@ -71,22 +71,11 @@ def groupavg(infile, rxchans, grouplen, queue=None, osamp=16):
 		# Find the number of transmit channels in this grpu
 		ntx = len(txlist)
 
-		# Store a running average (empty by default)
-		ref = Waveform(wset.nsamp)
-
-		for rxi in rxlist:
-			for txi in txlist:
-				# Grab the signal waveform
-				sig = wset.getwaveform(rxi, txi)
-				# Align the signal to reference and convert
-				sig = sig.aligned(ref, osamp=osamp, dtype=np.float32)
-				# Scale waveform for averaging
-				sig /= np.max(sig.envelope()) * float(ntx)
-				# Add the scaled waveform to the average
-				ref += sig
-
-		# Store the average for this group
-		avgs[rxgrp] = ref
+		# Compute the sum of all waveforms in this group
+		# Scale to average out the transmit count
+		siggen = (wset.getwaveform(rxi, txi)
+				for rxi in rxlist for txi in txlist)
+		avgs[rxgrp] = alignedsum(siggen, osamp) / float(ntx)
 
 	# Put the results on the queue, if desired
 	try: queue.put(avgs)
@@ -95,7 +84,35 @@ def groupavg(infile, rxchans, grouplen, queue=None, osamp=16):
 	return avgs
 
 
-def mpgroupavg(infile, grouplen, nproc, osamp=16, regress=None):
+def alignedsum(signals, osamp, scale=True):
+	'''
+	Align all waveforms in the iterable signals to an arbitrary common
+	point and add to produce an average waveform.
+
+	Alignment is performed with an oversampling factor osamp.
+
+	If scale is True, each waveform is scaled before summation by the
+	inverse of its peak envelope amplitude to produce a unit-amplitude
+	signal.
+	'''
+	sigiter = iter(signals)
+
+	# Copy the first signal to start the sum
+	wsum = sigiter.next().copy()
+	# Convert to float32 and scale if desired
+	wsum.dtype = np.float32()
+	if scale: wsum /= np.max(wsum.envelope())
+
+	for sig in sigiter:
+		# Align the signal to the running sum and scale
+		sig = sig.aligned(wsum, osamp=osamp, dtype=np.float32)
+		if scale: sig /= np.max(sig.envelope())
+		wsum += sig
+
+	return wsum
+
+
+def mpgroupavg(infile, grouplen, nproc, osamp, regress=None):
 	'''
 	Subdivide, along receive channels, the work of groupavg() among
 	nproc processes to compute average responses for every transmit-receive
@@ -124,7 +141,7 @@ def mpgroupavg(infile, grouplen, nproc, osamp=16, regress=None):
 			share, rem = len(rxidx) / nproc, len(rxidx) % nproc
 			start = i * share + min(i, rem)
 			share = share + int(i < rem)
-			args = (infile, rxidx[start:start+share], grouplen, queue, osamp)
+			args = (infile, rxidx[start:start+share], grouplen, osamp, queue)
 			pool.addtask(target=groupavg, name=procname, args=args)
 
 		pool.start()
@@ -144,21 +161,12 @@ def mpgroupavg(infile, grouplen, nproc, osamp=16, regress=None):
 	# Compute the overall group averages
 	averages = {}
 	for gidx, avgs in avglists.iteritems():
-		ref = avgs[0]
-		for avg in avgs[1:]:
-			ref += avg.aligned(ref, osamp=osamp)
-		if regress is None:
-			averages[gidx] = ref
-		else:
-			# Compute the DFT frequencies
-			rstart, rend = regress
-			kidx = np.arange(rstart, rend)
-			freqs = -2.0 * math.pi * kidx / ref.nsamp
-			# Compute the phase angle and regress
-			ang = np.unwrap(np.angle(ref.fft())[rstart:rend])
-			slope = linregress(freqs, ang)[0]
-			# Shift out the slope
-			averages[gidx] = ref.shift(-slope)
+		ref = alignedsum(avgs, osamp, False)
+		ref /= np.max(ref.envelope())
+
+		# Just store average, or shift out the apparent time origin
+		if regress is None: averages[gidx] = ref
+		else: averages[gidx] = ref.shift(-ref.zerotime(regress))
 
 	return averages
 
@@ -171,11 +179,25 @@ def averageEngine(config):
 	'''
 	try:
 		datafiles = config.getlist('average', 'datafile')
-		outformats = config.getlist('average', 'outformat')
-		if len(datafiles) < 1 or len(datafiles) != len(outformats):
+		if len(datafiles) < 1:
 			raise ConfigParser.Error('Fall-through to exception handler')
-	except ConfigParser.Error:
-		raise HabisConfigError('Configuration must specify datafile and corresponding outformat in [average]')
+	except:
+		raise HabisConfigError('Configuration must specify datafile list in [average]')
+
+	try:
+		grpformats = config.getlist('average', 'grpformat',
+				failfunc=lambda: [''] * len(datafiles))
+	except:
+		raise HabisConfigError('Invalid specification of optional grpformat list in [average]')
+
+	try:
+		outfiles = config.getlist('average', 'outfile',
+				failfunc=lambda: [''] * len(datafiles))
+	except:
+		raise HabisConfigError('Invalid specification of optional outfile list in [average]')
+
+	if not (len(outfiles) == len(datafiles) == len(grpformats)):
+		raise HabisConfigError('Datafile,  grpformat, and outfile lists must have same lengths')
 
 	try:
 		osamp = config.getint('average', 'osamp')
@@ -183,18 +205,16 @@ def averageEngine(config):
 		raise HabisConfigError('Invalid specification of osamp in [average]')
 
 	try:
-		nproc = config.getint('general', 'nproc')
-	except ConfigParser.NoOptionError:
-		nproc = process.preferred_process_count()
+		nproc = config.getint('general', 'nproc',
+				failfunc=process.preferred_process_count)
 	except:
 		raise HabisConfigError('Invalid specification of process count in [general]')
 
 	try:
-		regress = config.getlist('average', 'regress', int)
+		regress = config.getlist('average', 'regress',
+				mapper=int, failfunc=lambda: None)
 		if len(regress) != 2:
 			raise ValueError('Fall-through to exception handler')
-	except ConfigParser.NoOptionError:
-		regress = None
 	except:
 		raise HabisConfigError('Specification of optional regress in [average] must contain two ints')
 
@@ -203,11 +223,18 @@ def averageEngine(config):
 	except:
 		raise HabisConfigError('Invalid specification of grouplen in [average]')
 
-	for datafile, outformat in zip(datafiles, outformats):
+	for datafile, grpformat, outfile in zip(datafiles, grpformats, outfiles):
 		print 'Computing average responses for data file', datafile
 		avgs = mpgroupavg(datafile, grouplen, nproc, osamp, regress)
-		for gidx, avg in avgs.iteritems():
-			outfile = outformat.format(gidx)
+		if grpformat:
+			# Save per-group averages if desired
+			for gidx, avg in avgs.iteritems():
+				avg.store(grpformat.format(gidx))
+		if outfile:
+			# Save whole-set averages if desired
+			avg = alignedsum(avgs.itervalues(), osamp, False)
+			avg /= np.max(avg.envelope())
+			if regress: avg = avg.shift(-avg.zerotime(regress))
 			avg.store(outfile)
 
 

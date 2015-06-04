@@ -38,14 +38,14 @@ def trilaterationEngine(config):
 		timefile = config.get('trilateration', 'timefile')
 		guessfile = config.get('trilateration', 'guessfile')
 		facetfile = config.get('trilateration', 'facetfile')
-	except ConfigParser.Error:
+	except:
 		raise HabisConfigError('Configuration must specify timefile, guessfile, and facetfile in [trilateration]')
 
 	try:
 		# Grab the output file locations
 		outreflector = config.get('trilateration', 'outreflector')
 		outelements = config.get('trilateration', 'outelements')
-	except ConfigParser.Error:
+	except:
 		raise HabisConfigError('Configuration must specify outreflector and outfacet in [trilateration]')
 
 	try:
@@ -56,9 +56,8 @@ def trilaterationEngine(config):
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = config.getint('general', 'nproc')
-	except ConfigParser.NoOptionError:
-		nproc = process.preferred_process_count()
+		nproc = config.getint('general', 'nproc',
+				failfunc=process.preferred_process_count)
 	except:
 		raise HabisConfigError('Invalid specification of process count in [general]')
 

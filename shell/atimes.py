@@ -166,17 +166,14 @@ def atimesEngine(config):
 		datafiles = config.getlist('atimes', 'datafile')
 		if len(datafiles) < 1:
 			raise ConfigParser.Error('Fall-through to exception handler')
-	except ConfigParser.Error:
+	except:
 		raise HabisConfigError('Configuration must specify at least one datafile')
 
 	# Read an optional list of delay files
 	# Default delay files are empty (no files)
 	try:
-		delayfiles = config.getlist('atimes', 'delayfile')
-		if len(delayfiles) < 1:
-			raise ConfigParser.Error('Fall-through to exception handler')
-	except ConfigParser.NoOptionError:
-		delayfiles = [''] * len(datafiles)
+		delayfiles = config.getlist('atimes', 'delayfile', 
+				failfunc=lambda: [''] * len(datafiles))
 	except:
 		raise HabisConfigError('Invalid specification of delayfile in [atimes]')
 
@@ -188,20 +185,19 @@ def atimesEngine(config):
 		# Grab the reference and output files
 		reffile = config.get('atimes', 'reffile')
 		outfile = config.get('atimes', 'outfile')
-	except ConfigParser.Error:
+	except:
 		raise HabisConfigError('Configuration must specify reference and output files in [atimes]')
 
 	try:
 		# Grab the oversampling rate
 		osamp = config.getint('atimes', 'osamp')
-	except (ConfigParser.Error, ValueError):
+	except:
 		raise HabisConfigError('Configuration must specify oversampling rate as integer in [atimes]')
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = config.getint('general', 'nproc')
-	except ConfigParser.NoOptionError:
-		nproc = process.preferred_process_count()
+		nproc = config.getint('general', 'nproc',
+				failfunc=process.preferred_process_count)
 	except:
 		raise HabisConfigError('Invalid specification of process count in [general]')
 
@@ -212,27 +208,24 @@ def atimesEngine(config):
 	except:
 		raise HabisConfigError('Configuration must specify float sampling period and temporal offset in [sampling]')
 
-	# Determine the range of elements to use; default to all (as None)
 	try:
-		elements = config.getrange('atimes', 'elements')
-	except ConfigParser.NoOptionError:
-		elements = None
+		# Determine the range of elements to use; default to all (as None)
+		elements = config.getrange('atimes', 'elements', failfunc=lambda: None)
 	except:
 		raise HabisConfigError('Invalid specification of optional element indices in [atimes]')
 
 	# Determine a temporal window to apply before finding delays
 	try:
-		window = config.getlist('atimes', 'window', int)
+		window = config.getlist('atimes', 'window',
+				mapper=int, failfunc=lambda: None)
 		if len(window) < 2 or len(window) > 3:
 			raise ValueError('Fall-through to exception handler')
-	except ConfigParser.NoOptionError:
-		window = None
 	except:
 		raise HabisConfigError('Invalid specification of optional temporal window in [atimes]')
 
-	symmetrize = config.getbooldefault('atimes', 'symmetrize', False)
-	usediag = config.getbooldefault('atimes', 'usediag', False)
-	maskoutliers = config.getbooldefault('atimes', 'maskoutliers', False)
+	symmetrize = config.getboolean('atimes', 'symmetrize', failfunc=lambda: False)
+	usediag = config.getboolean('atimes', 'usediag', failfunc=lambda: False)
+	maskoutliers = config.getboolean('atimes', 'maskoutliers', failfunc=lambda: False)
 
 	# Determine the shape of the first multipath data
 	wset = WaveformSet.fromfile(datafiles[0])

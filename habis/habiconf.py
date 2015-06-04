@@ -39,7 +39,7 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		return config
 
 
-	def procincludes(self, section='general', option='include', **kwargs):
+	def procincludes(self, section='general', option='include', *args, **kwargs):
 		'''
 		Attempt to search the specified section for the named option
 		which contains a list of configuration file names. These names,
@@ -49,22 +49,18 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		Failure to find the section or option is silently ignored.
 		Failure to parse an include file is also silently ignored.
 
-		The kwargs are passed to self.getlist() when pulling the list
-		of names.
+		The args and kwargs are passed to self.getlist() when pulling
+		the list of names.
 		'''
 		try:
-			# Pull the list of includes as a string
-			includes = self.getlist(section, option, None, **kwargs)
+			includes = self.getlist(section, option, *args, **kwargs)
 		except (ConfigParser.NoOptionError, ConfigParser.NoSectionError):
-			# Return an empty list of nothing was found
-			return []
+			return
 
 		# Pull includes in reverse order so later files supersede earlier ones
 		for include in reversed(includes):
-			try:
-				other = self.__class__.fromfile(include)
-			except IOError:
-				continue
+			try: other = self.__class__.fromfile(include)
+			except IOError: continue
 			self.merge(other)
 
 
@@ -89,28 +85,94 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 				self.set(section, option, other.get(section, option))
 
 
-	def getbooldefault(self, section, option, default):
+	def getboolean(self, *args, **kwargs):
 		'''
-		Try to read a Boolean value from the configuration. If the
-		option is unspecified, return a provided default value. The
-		section must still exist.
+		Overrid super.getboolean() to process failfunc argument as in
+		self.get().
+
+		*** NOTE ***
+		The output of failfunc() is not guaranteed to be a Boolean.
 		'''
-		try: return self.getboolean(section, option)
-		except ConfigParser.NoOptionError: return default
+		failfunc = kwargs.pop('failfunc', None)
+		try:
+			return ConfigParser.SafeConfigParser.getboolean(self, *args, **kwargs)
+		except ConfigParser.NoOptionError: 
+			if failfunc is not None: return failfunc()
+			raise
 
 
-	def getlist(self, section, option, mapper=None, **kwargs):
+	def getlist(self, *args, **kwargs):
 		'''
 		Read the string value for the provided section and option, then
-		return map(mapper, shlex.split(value, comments=True)).
+		return map(mapper, shlex.split(value, comments=True)) for
+		mapper=kwargs['mapper'] (or None if the kwarg does not exist).
 
-		The kwargs are passed through to self.get()
+		The args and kwargs are passed through to self.get()
 		'''
-		value = self.get(section, option, **kwargs)
+		mapper = kwargs.pop('mapper', None)
+		# Handle failfunc here to avoid processing failfunc() output
+		failfunc = kwargs.pop('failfunc', None)
+
+		try:
+			value = self.get(*args, **kwargs)
+		except ConfigParser.NoOptionError:
+			if failfunc is not None: return failfunc()
+			raise
+
 		return map(mapper, shlex.split(value, comments=True))
 
 
-	def getrange(self, section, option, **kwargs):
+	def get(self, *args, **kwargs):
+		'''
+		Attempt to return super.get(*args, **kwargs).
+
+		If kwargs contains a 'failfunc' argument, and the get raises
+		ConfigParser.NoOptionError, return the result of failfunc().
+		'''
+		failfunc = kwargs.pop('failfunc', None)
+
+		try:
+			return ConfigParser.SafeConfigParser.get(self, *args, **kwargs)
+		except ConfigParser.NoOptionError:
+			if failfunc is not None: return failfunc()
+			raise
+
+
+	def getint(self, *args, **kwargs):
+		'''
+		Override super.getint() to process a failfunc argument as in
+		self.get(). 
+		
+		*** NOTE ***
+		The output of failfunc() is not guaranteed to be an int.
+		'''
+		failfunc = kwargs.pop('failfunc', None)
+
+		try:
+			return ConfigParser.SafeConfigParser.getint(self, *args, **kwargs)
+		except ConfigParser.NoOptionError:
+			if failfunc is not None: return failfunc()
+			raise
+
+
+	def getfloat(self, *args, **kwargs):
+		'''
+		Override super.getfloat() to process a failfunc argument as in
+		self.get().
+		
+		*** NOTE ***
+		The output of failfunc() is not guaranteed to be a float.
+		'''
+		failfunc = kwargs.pop('failfunc', None)
+
+		try:
+			return ConfigParser.SafeConfigParser.getfloat(self, *args, **kwargs)
+		except ConfigParser.NoOptionError:
+			if failfunc is not None: return failfunc()
+			raise
+
+
+	def getrange(self, *args, **kwargs):
 		'''
 		Parse and return a configured range or explicit list of
 		integers from the provided section and option.
@@ -126,9 +188,16 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		The function shlex.split(value, comments=True) is used to parse
 		the value string.
 
-		The kwargs are passed through to self.get()
+		The args and kwargs are passed through to self.get()
 		'''
-		value = self.get(section, option, **kwargs)
+		# Process failfunc here to avoid parsing its output
+		failfunc = kwargs.pop('failfunc', None)
+		try:
+			value = self.get(*args, **kwargs)
+		except ConfigParser.NoOptionError:
+			if failfunc is not None: return failfunc()
+			raise
+
 		items = shlex.split(value, comments=True)
 
 		if len(items) < 1: return []
