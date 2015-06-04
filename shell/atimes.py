@@ -218,7 +218,7 @@ def atimesEngine(config):
 	try:
 		window = config.getlist('atimes', 'window',
 				mapper=int, failfunc=lambda: None)
-		if len(window) < 2 or len(window) > 3:
+		if window and len(window) < 2 or len(window) > 3:
 			raise ValueError('Fall-through to exception handler')
 	except:
 		raise HabisConfigError('Invalid specification of optional temporal window in [atimes]')
