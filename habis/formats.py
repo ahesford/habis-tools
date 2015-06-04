@@ -13,8 +13,6 @@ from collections import OrderedDict
 from pycwp import cutil
 from pycwp.util import bidict
 
-from .sigtools import Waveform
-
 def findenumfiles(dir, prefix='.*?', suffix=''):
 	'''
 	Find all files in the directory dir with a name matching the regexp
@@ -224,6 +222,30 @@ class WaveformSet(object):
 		# Create an empty set, then populate from the file
 		wset = cls([])
 		wset.load(f)
+		return wset
+
+
+	@classmethod
+	def fromwaveform(cls, wave, copy=False):
+		'''
+		Create a new WaveformSet object with a single transmit index
+		and a single receive index (both 0) with a sample count and
+		data type defined by the provided Waveform wave. The sole
+		waveform record will be populated with wave.
+
+		If copy is False, the record in the WaveformSet will, whenever
+		possible, capture a reference to the waveform data instead of
+		making a copy. If copy is True, a copy will always be made.
+
+		The f2c parameter of the WaveformSet will be 0.
+
+		The 'crd' record of the waveform record will be [0., 0., 0.].
+		'''
+		# Create the set
+		wset = cls([0], wave.nsamp, 0, wave.dtype)
+		# Create the sole record; this grows the 1-D signal to 2-D
+		hdr = cls.makercvhdr(0, [0., 0., 0.], wave.datawin)
+		wset.setrecord(hdr, wave.getsignal(wave.datawin), copy)
 		return wset
 
 
@@ -592,13 +614,6 @@ class WaveformSet(object):
 		self._nsamp = nsamp
 
 
-	def __len__(self):
-		'''
-		Return the number of records in the data set.
-		'''
-		return self.nrx
-
-
 	def tx2row(self, tid):
 		'''
 		Convert a transmit-channel index into a waveform-array row index.
@@ -693,6 +708,7 @@ class WaveformSet(object):
 		recorded at receive-channel index rid from transmission index
 		tid. Extra args and kwargs are passed through to getrecord().
 		'''
+		from .sigtools import Waveform
 		# Grab the relevant row of the record
 		hdr, waveform = self.getrecord(rid, tid, *args, **kwargs)
 		# Wrap the desired signal in a Waveform object
@@ -739,16 +755,23 @@ class WaveformSet(object):
 			wshape = (self.ntx, hdr['win'][1])
 			waveforms = np.zeros(wshape, dtype=self.dtype)
 		else:
+			try:
+				if copy or waveforms.dtype != self.dtype:
+					# Make a copy of the waveform in proper format
+					raise TypeError('Conversion of dtypes required')
+			except (AttributeError, TypeError):
+				waveforms = np.array(waveforms, dtype=self.dtype)
+
+			# Pad 0-d and 1-d waveforms to 2-d
+			if waveforms.ndim < 2:
+				waveforms = waveforms[[None] * (2 - waveforms.ndim)]
+
 			# Check the proper shape of the provided array
 			ntx, nsamp = waveforms.shape
 			if ntx != self.ntx:
 				raise ValueError('Waveform array does not match transmission count for set')
 			if nsamp != hdr['win'][1]:
 				raise ValueError('Waveform array does not match sample count specified in header')
-
-			# Make a copy of the array if required or demanded
-			if copy or not waveforms.dtype == self.dtype:
-				waveforms = np.array(waveforms, dtype=self.dtype)
 
 		# Add or replace the record
 		self._records[int(hdr['idx'])] = (hdr, waveforms)

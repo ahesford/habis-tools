@@ -7,7 +7,7 @@ from scipy.stats import linregress
 
 from collections import defaultdict
 
-from pycwp import process, mio
+from pycwp import process
 from habis.habiconf import HabisConfigError, HabisConfigParser
 from habis.formats import WaveformSet
 from habis.sigtools import Waveform
@@ -208,7 +208,7 @@ def averageEngine(config):
 		avgs = mpgroupavg(datafile, grouplen, nproc, osamp, regress)
 		for gidx, avg in avgs.iteritems():
 			outfile = outformat.format(gidx)
-			mio.writebmat(avg.getsignal(), outfile)
+			avg.store(outfile)
 
 
 if __name__ == '__main__':

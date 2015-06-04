@@ -12,7 +12,7 @@ from itertools import groupby
 
 from functools import wraps
 
-from pycwp import cutil
+from pycwp import cutil, mio
 
 
 class Waveform(object):
@@ -29,6 +29,41 @@ class Waveform(object):
 		provided waveform.
 		'''
 		return cls(wave.nsamp)
+
+
+	@classmethod
+	def fromfile(cls, f):
+		'''
+		Attempt to read a single wavefrom from a file containing either
+		a habis.formats.WaveformSet object or a binary array readable
+		by pycwp.mio.readbmat.
+
+		If the file is a WaveformSet, it must specify exactly one
+		transmit index and one receive index. (The values of these
+		indices are ignored.) The resulting waveform is the output of
+		WaveformSet.getwaveform(rid, tid) for the only valid indices.
+
+		If the file is a binary array, it is read by mio.readbmat()
+		with the argument dim=1 to force 1-D interpretation. The
+		automatic dtype detection rules apply.
+
+		As per each of these dependent I/O functions, f can either be a
+		file name or a file-like object.
+		'''
+		try:
+			from .formats import WaveformSet
+			# First assume the file is a WaveformSet
+			wset = WaveformSet.fromfile(f)
+			if wset.ntx != 1 or wset.nrx != 1:
+				raise TypeError('WaveformSet contains more than one waveform')
+			rid = wset.rxidx[0]
+			tid = wset.txidx[0]
+			return wset.getwaveform(rid, tid)
+		except ValueError: pass
+		
+		# As a fallback, try a 1-D binary array
+		return cls(signal=mio.readbmat(f, dim=1))
+
 
 	def __init__(self, nsamp=0, signal=None, start=0):
 		'''
@@ -101,6 +136,27 @@ class Waveform(object):
 		waveform is a complex type, True otherwise.
 		'''
 		return not np.issubdtype(self.dtype, np.complexfloating)
+
+
+	def store(self, f, waveset=True):
+		'''
+		Store the contents of the waveform to f, which may be a file
+		name or a file-like object.
+		
+		If waveset is True, the waveform is first wrapped in a
+		habis.formats.WaveformSet object using the fromwaveform()
+		factory and then written using WaveformSet.store(f).  No
+		additional arguments to store() are supported.
+
+		If waveset is False, the full waveform is stored in a 1-D
+		binary matrix by calling pycwp.mio.writebmat(s, f), where the
+		signal s is the output of self.getsignal().
+		'''
+		if waveset:
+			from .formats import WaveformSet
+			WaveformSet.fromwaveform(self).store(f)
+		else:
+			pycwp.mio.writebmat(self.getsignal(forcecopy=False), f)
 
 
 	def copy(self):

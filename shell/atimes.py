@@ -3,7 +3,7 @@
 import sys, itertools, ConfigParser, numpy as np
 import multiprocessing, Queue
 
-from pycwp import mio, process, cutil
+from pycwp import process, cutil
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser
 from habis.formats import WaveformSet
@@ -124,8 +124,8 @@ def calcdelays(datafile, reffile, osamp, window=None,
 	'''
 	# Read the data and reference files
 	data = WaveformSet.fromfile(datafile)
-	# Force the proper data type and shape for the reference
-	ref = Waveform(signal=mio.readbmat(reffile, dim=1, dtype=np.float32))
+	# Read the reference waveform
+	ref = Waveform.fromfile(reffile)
 
 	# Determine the shape of the delay matrix
 	try: t, r = len(elements), len(elements)
