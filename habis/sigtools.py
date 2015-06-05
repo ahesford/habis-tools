@@ -144,6 +144,26 @@ class Waveform(object):
 		return not np.issubdtype(self.dtype, np.complexfloating)
 
 
+	@property
+	def real(self):
+		'''
+		Return a new waveform whose data window is a view on the real
+		part of this waveform's data window.
+		'''
+		try: return Waveform(self.nsamp, self._data.real, self._datastart)
+		except AttributeError: return Waveform(self.nsamp)
+
+
+	@property
+	def imag(self):
+		'''
+		Return a new waveform whose data window is a view on the
+		imaginary part of this waveform's data window.
+		'''
+		try: return Waveform(self.nsamp, self._data.imag, self._datastart)
+		except AttributeError: return Waveform(self.nsamp)
+
+
 	def store(self, f, waveset=True):
 		'''
 		Store the contents of the waveform to f, which may be a file
@@ -240,12 +260,12 @@ class Waveform(object):
 
 	def __neg__(self):
 		datawin = self.datawin
-		data = -self.getsignal(datawin, forcecopy=True)
+		data = -self.getsignal(datawin, forcecopy=False)
 		return Waveform(self.nsamp, data, datawin[0])
 
 	def __abs__(self):
 		datawin = self.datawin
-		data = np.abs(self.getsignal(datawin, forcecopy=True))
+		data = abs(self.getsignal(datawin, forcecopy=False))
 		return Waveform(self.nsamp, data, datawin[0])
 
 
@@ -665,73 +685,142 @@ class Waveform(object):
 		return slope
 
 
-	def delay(self, ref, osamp=1, allowneg=False):
+	def xcorr(self, ref, osamp=1):
 		'''
-		Find the cyclic delay that maximizes the cross-correlation
-		between this instance and a reference waveform ref. The ref may
-		be a Numpy array or another habis.sigtools.Waveform instance.
-		This is interpreted as the delay, in samples, necessary to
-		shift ref to align the signal with self.
+		Perform cyclic cross-correlation of self and ref using DFTs. If
+		osamp is provided, it must be a nonnegative power of two that
+		specifies an oversampling rate for the signal. Sample index I
+		at the input sampling rate corresponds to sample index I *
+		osamp at the output sampling rate.
 
-		Both signals will be interpolated by at least a factor osamp,
-		if provided, to yield fractional-sample delays.
+		All transforms are always rounded to a power of two. The
+		cross-correlation signal will be zero-padded to the minimum
+		power-of-two length appropriate for cyclic convolution before
+		oversampling.
 
-		The delay, d, is always in the range 0 <= d < self.nsamp.
-
-		If allowneg is True, the return value will be a tuple (d, s),
-		where d is the delay that maximizes the absolute value of the
-		cross-correlation, and s is the sign (-1 or 1, integer) of the
-		cross-correlation at this point.
-
-		*** NOTE ***
-		Both waveforms must have the same length for the cyclic
-		cross-correlation used for delay analysis to make sense.
+		If ref is complex and self is not, the output dtype will be
+		that of ref. Otherwise, the output dtype will be that of self.
 		'''
 		if osamp < 1:
-			raise ValueError ('Oversampling factor must be at least unity')
+			raise ValueError('Oversampling factor must be at least unity')
+		# Convert oversampling rate to power of 2
+		osamp = cutil.ceilpow2(osamp)
 
+		# Find the data windows that will be convolved
 		sstart, slength = self.datawin
 		try:
 			rstart, rlength = ref.datawin
 		except AttributeError:
-			# Try convering other to a waveform
-			# This assumes that other starts at sample 0
+			# Treat a Numpy array as a signal starting at sample 0
 			ref = type(self)(signal=ref)
-			rstart, rlength = ref.datawin
+			rstart, rlength = ref.datwin
 
-		# If one of the signals is explicitly 0, the delay is 0
-		if slength == 0 or rlength == 0: return 0
+		# Find the necessary padding for convolution
+		npad = cutil.ceilpow2(slength + rlength)
+		# Find the oversampled convolution length
+		nint = osamp * npad
 
-		if self.nsamp != ref.nsamp:
+		# Create an empty waveform to store the oversampled correlation
+		xcwave = Waveform(osamp * cutil.ceilpow2(self.nsamp + ref.nsamp))
+
+		# If one of the signals is 0, the cross-correlation is 0
+		if slength == 0 or rlength == 0: return xcwave
+
+		# Can use R2C DFT if both signals are real
+		r2c = self.isReal and ref.isReal
+
+		# Convolve the data windows spectrally
+		cfsig = (self.fft((sstart, npad), r2c)
+				* np.conj(ref.fft((rstart, npad), r2c)))
+
+		if r2c:
+			# Interpolation and IDFT is simple for real signals
+			csig = fft.irfft(cfsig, nint)
+		elif npad == nint:
+			# Without interpolation, complex IDFT is equally simple
+			csig = fft.ifft(cfsig, nint)
+		else:
+			# Complex interpolation is a bit messier
+			# Padding must be done in middle
+			cpsig = np.zeros((nint, ), dtype=cfsig.dtype)
+			# Find the bounds of the positive and negative frequencies
+			kmax, kmin = int((npad + 1) / 2), -int(npad / 2)
+			# Copy frequencies to padded array and take IDFT
+			cpsig[:kmax] = cfsig[:kmax]
+			cpsig[kmin:] = cfsig[kmin:]
+			csig = fft.ifft(cpsig, nint)
+
+		# Samples correspond to positive shifts up to (oversampled)
+		# length of self; remaining samples are wrapped negative shifts
+		esamp = osamp * slength
+		ssamp = esamp - nint
+
+		# Unwrap the convolution values in natural order
+		csig = np.concatenate([csig[esamp:], csig[:esamp]], axis=0)
+
+		# Shift convolution according to (oversampled) window offsets
+		ssamp += osamp * (sstart - rstart)
+		# Wrap start into the waveform window and compute window end
+		ssamp %= xcwave.nsamp
+		esamp = ssamp + nint
+
+		# Determine the output datatype
+		odtype = self.dtype if (r2c or ref.isReal) else ref.dtype
+
+		if esamp <= xcwave.nsamp:
+			# Bounds inside waveform ==> convolution is data window
+			xcwave.setsignal(csig.astype(odtype), ssamp)
+		else:
+			# Convolution window wraps; manually unwrap
+			xcnsamp = xcwave.nsamp
+			data = np.zeros((xcnsamp,), dtype=odtype)
+			idxmap = [i % xcnsamp for i in range(ssamp, esamp)]
+			data[idxmap] = csig
+			# Data window occupies entire signal
+			xcwave.setsignal(data, 0)
+
+		return xcwave
+
+
+	def delay(self, ref, osamp=1, allowneg=False):
+		'''
+		Find the sample offset that maximizes self.xcorr(ref, osamp).
+		This is interpreted as the delay, in samples, necessary to
+		shift ref to align the signal with self.
+
+		Both signals must have the same length for delay analysis to
+		make sense. The delay is always in the window (0, self.nsamp).
+
+		If allowneg is True, return a tuple (d, s), where d is the
+		sample offset that maximizes the absolute value of the cross-
+		correlation, and s is the sign (-1 or 1, integer) of the
+		cross-correlation at this point.
+		'''
+		try:
+			rnsamp = ref.nsamp
+		except AttributeError:
+			ref = type(self)(signal=ref)
+			rnsamp = ref.nsamp
+
+		if self.nsamp != rnsamp:
 			raise ValueError('Signals must have the same length for delay analysis')
 
-		# Use an R2C DFT if both signals are real, otherwise complex
-		r2c = self.isReal and ref.isReal
-		ifftfunc = (fft.irfft if r2c else fft.ifft)
+		# Compute the cross-correlation
+		xcorr = self.xcorr(ref, osamp).real
 
-		# Find the size of FFT needed to represent the correlation
-		npad = cutil.ceilpow2(slength + rlength)
-		# Find the next power of 2 needed to capture the desired oversampling
-		nint = cutil.ceilpow2(osamp * npad)
-
-		# Compute the interpolated cross-correlation
-		# Always take the real part to look for a maximum
-		csig = ifftfunc(self.fft((sstart, npad), r2c) *
-				np.conj(ref.fft((rstart, npad), r2c)), nint).real
+		# If the correlation is explicitly zero, the delay is 0
+		if xcorr.datawin[1] == 0: return 0
 
 		# Find the point of maximal correlation
 		if allowneg:
-			t = np.argmax(np.abs(csig))
+			t = np.argmax(abs(xcorr))
 			# Determine the sign of the correlation
-			s = int(math.copysign(1., csig[t]))
-		else: t = np.argmax(csig)
+			s = int(math.copysign(1., xcorr[t]))
+		else: t = np.argmax(xcorr)
 
 		# Unwrap negative values and scale by the oversampling rate
-		if t >= nint / 2: t -= nint
-		t *= npad / float(nint)
-		# Adjust delay to account for different data window positions
-		t += (sstart - rstart)
-
+		if t >= xcorr.nsamp / 2: t -= xcorr.nsamp
+		t /= float(osamp)
 		# Wrap to waveform interval (Python % is always positive)
 		t %= self.nsamp
 
