@@ -3,6 +3,8 @@
 import os, sys, itertools, ConfigParser, numpy as np
 import multiprocessing
 
+from itertools import izip
+
 from pycwp import process
 
 from habis import trilateration
@@ -37,24 +39,31 @@ def trilaterationEngine(config):
 	'''
 	try:
 		# Try to grab the input files
-		timefile = config.get('trilateration', 'timefile')
-		guessfile = config.get('trilateration', 'guessfile')
-		facetfile = config.get('trilateration', 'facetfile')
+		timefiles = config.getlist('trilateration', 'timefile')
+		if len(timefiles) < 1:
+			raise ConfigParser.Error('Fall-through to exception handler')
+		inelements = config.getlist('trilateration', 'inelements')
+		if len(inelements) != len(timefiles):
+			raise ConfigParser.Error('Fall-through to exception handler')
 	except:
-		raise HabisConfigError('Configuration must specify timefile, guessfile, and facetfile in [trilateration]')
+		raise HabisConfigError('Configuration must specify timefile and inelements lists of equal length in [trilateration]')
+
+	# Grab the initial guess for reflector positions
+	try: guessfile = config.get('trilateration', 'guessfile')
+	except: raise HabisConfigError('Configuration must specify guessfile in [trilateration]')
+
+	# Grab the reflector output file
+	try: outreflector = config.get('trilateration', 'outreflector')
+	except: raise HabisConfigError('Configuration must specify outreflector in [trilateration]')
 
 	try:
-		# Grab the output file locations
-		outreflector = config.get('trilateration', 'outreflector')
-		outelements = config.get('trilateration', 'outelements')
+		outelements = config.getlist('trilateration', 'outelements',
+				failfunc=lambda: [''] * len(timefiles))
 	except:
-		raise HabisConfigError('Configuration must specify outreflector and outfacet in [trilateration]')
+		raise HabisConfigError('Invalid specification of optional outelements list in [trilateration]')
 
-	try:
-		# Grab the element range
-		elements = config.getrange('trilateration', 'elements')
-	except:
-		raise HabisConfigError('Configuration must specify elements in [trilateration]')
+	if len(outelements) != len(timefiles):
+		raise HabisConfigError('Timefile and outelements lists must have same length')
 
 	try:
 		# Grab the number of processes to use (optional)
@@ -70,20 +79,24 @@ def trilaterationEngine(config):
 	except:
 		raise HabisConfigError('Configuration must specify sound-speed c and radius in [trilateration]')
 
-	# Pull the desired element indices
-	elements = np.loadtxt(facetfile)[elements]
+	# Pull the element indices for each group file
+	elements = [np.loadtxt(efile) for efile in inelements]
 	# Pull the arrival times and convert surface times to center times
-	times = np.loadtxt(timefile) + ((2. * radius) / c)
+	times = [np.loadtxt(tfile) + ((2. * radius) / c) for tfile in timefiles]
 	# Pull the reflector guess
 	guess = np.loadtxt(guessfile)
 
 	# Allocate a multiprocessing pool
 	pool = multiprocessing.Pool(processes=nproc)
 
+	# Concatenate times and element lists for reflector trilateration
+	ctimes = np.concatenate(times, axis=0)
+	celts = np.concatenate(elements, axis=0)
+
 	# Compute the reflector positions in parallel
 	# Use async calls to correctly handle keyboard interrupts
 	result = pool.map_async(getreflpos,
-			((t, elements, g, c) for t, g in zip(times.T, guess)))
+			((t, celts, g, c) for t, g in izip(ctimes.T, guess)))
 	while True:
 		try:
 			reflectors = result.get(5)
@@ -94,10 +107,14 @@ def trilaterationEngine(config):
 	# Save the reflector positions
 	np.savetxt(outreflector, reflectors, fmt='%16.8f')
 
-	# Create and save a refined estimate of the reflector locations
-	pltri = trilateration.PlaneTrilateration(reflectors, c)
-	relements = pltri.newton(times, pos=elements)
-	np.savetxt(outelements, relements, fmt='%16.8f')
+	for ctimes, celts, ofile in izip(times, elements, outelements):
+		# Don't do trilateration if the result will not be saved
+		if not len(ofile): continue
+
+		# Create and save a refined estimate of the reflector locations
+		pltri = trilateration.PlaneTrilateration(reflectors, c)
+		relements = pltri.newton(ctimes, pos=celts)
+		np.savetxt(ofile, relements, fmt='%16.8f')
 
 
 if __name__ == '__main__':
