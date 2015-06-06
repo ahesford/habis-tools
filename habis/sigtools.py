@@ -827,37 +827,16 @@ class Waveform(object):
 		return ((t, s) if allowneg else t)
 
 
-	def envpeaks(self, thresh=3., twin=None):
+	def envpeaks(self, *args, **kwargs):
 		'''
-		Return a (start, length) tuple to specify the window for each
-		peak identified in the envelope() of the waveform. A peak is a
-		region that exceeds the mean envelope value by at least thresh
-		standard deviations.
-
-		If twin is None, the mean envelope value and standard deviation
-		used for thresholding are computed using the full signal.
-		Otherwise, twin should be a (start, length) tuple that
-		specifies the window over which the the mean and standard
-		deviation will be computed.
+		Return the output of pycwp.cutil.findpeaks for self.envelope().
+		The args and kwargs are passed on to findpeaks.
 		'''
-		if thresh < 0:
-			raise ValueError('Argument thresh must be positive')
-
-		if twin is None: twin = (0, self.nsamp)
-
-		# Compute the envelope of the entire signal
-		env = self.envelope()
-		# Compute the threshold parameters
-		estat = env[twin[0]:twin[0] + twin[1]]
-		emu = np.mean(estat)
-		esd = np.std(estat)
-
-		# Find all indices that exceed the threshold
-		peaks = (env > (thresh * esd + emu)).nonzero()[0]
-		# Group continguous indices
-		groups = [map(itemgetter(1), g)
-				for k, g in groupby(enumerate(peaks), lambda(i, x): i - x)]
-		return [(g[0], g[-1] + 1) for g in groups]
+		# Find peaks in the data window
+		start, length = self.datawin
+		peaks = cutil.findpeaks(self.envelope((start, length)), *args, **kwargs)
+		# Map indices to full sample window
+		return [(v[0] + start, v[1], v[2], v[3]) for v in peaks]
 
 
 	def bandpass(self, start, end, tails=None, dtype=None):
