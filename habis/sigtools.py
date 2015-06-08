@@ -234,8 +234,11 @@ class Waveform(object):
 		nsamp = self.nsamp
 
 		if isinstance(key, int):
+			# Wrap negative values
+			if key < 0: key += nsamp
+			# Check if the wrapped value is in range
 			if key < 0 or key >= nsamp:
-				raise ValueError('Sample indices must be in range [0, self.nsamp)')
+				raise ValueError('Sample indices must be in range [0, self.nsamp) or [-self.nsamp, 0)')
 
 			# Shift to the data window
 			key -= dstart
