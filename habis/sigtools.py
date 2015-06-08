@@ -616,6 +616,9 @@ class Waveform(object):
 
 		The keyword arguments are scanned for extra arguments to
 		shift() and delay(), which are passed as appropriate.
+
+		The sign returned by self.shift when allowneg=True is passed is
+		ignored when aligning the waveforms.
 		'''
 		# Build the optional arguments to shift() and delay()
 		shargs = {key: kwargs[key]
@@ -623,7 +626,24 @@ class Waveform(object):
 		deargs = {key: kwargs[key]
 				for key in ['osamp', 'allowneg'] if key in kwargs}
 
-		return self.shift(self.nsamp-self.delay(ref, **deargs), **shargs)
+		# Find the necessary delay
+		try:
+			delay = ref.delay(self, **deargs)
+		except AttributeError:
+			ref = type(self)(signal=ref)
+			delay = ref.delay(self, **deargs)
+
+		# If allowneg is True, the returned value also contains a sign
+		if 'allowneg' in deargs: delay = delay[0]
+
+		if self.nsamp < ref.nsamp:
+			# Pad self for proper shifting when ref is longer
+			datawin = self.datawin
+			signal = self.getsignal(datawin, forcecopy=False)
+			exwave = Waveform(ref.nsamp, signal=signal, start=datawin[0])
+			return exwave.shift(delay, **shargs)
+		else:
+			return self.shift(delay, **shargs)
 
 
 	def shift(self, d, dtype=None):
@@ -703,8 +723,8 @@ class Waveform(object):
 		'''
 		if osamp < 1:
 			raise ValueError('Oversampling factor must be at least unity')
-		# Convert oversampling rate to power of 2
-		osamp = cutil.ceilpow2(osamp)
+		if cutil.ceilpow2(osamp) != osamp:
+			raise ValueError('Oversampling factor must be a power of 2')
 
 		# Find the data windows that will be convolved
 		sstart, slength = self.datawin
@@ -716,7 +736,7 @@ class Waveform(object):
 			rstart, rlength = ref.datwin
 
 		# Find the necessary padding for convolution
-		npad = cutil.ceilpow2(slength + rlength)
+		npad = cutil.ceilpow2(slength + rlength - 1)
 		# Find the oversampled convolution length
 		nint = osamp * npad
 
@@ -782,29 +802,23 @@ class Waveform(object):
 		return xcwave
 
 
-	def delay(self, ref, osamp=1, allowneg=False):
+	def delay(self, ref, osamp=1, allowneg=False, forcepos=False):
 		'''
 		Find the sample offset that maximizes self.xcorr(ref, osamp).
 		This is interpreted as the delay, in samples, necessary to
-		shift ref to align the signal with self.
+		cyclically shift ref to align the signal with self.
 
-		Both signals must have the same length for delay analysis to
-		make sense. The delay is always in the window (0, self.nsamp).
+		The shorter signal is assumed to be zero-padded to a length
+		that matches the longer signal.
 
 		If allowneg is True, return a tuple (d, s), where d is the
 		sample offset that maximizes the absolute value of the cross-
 		correlation, and s is the sign (-1 or 1, integer) of the
 		cross-correlation at this point.
+
+		If forcepos is True, negative delays are cyclically wrapped to
+		positive delays.
 		'''
-		try:
-			rnsamp = ref.nsamp
-		except AttributeError:
-			ref = type(self)(signal=ref)
-			rnsamp = ref.nsamp
-
-		if self.nsamp != rnsamp:
-			raise ValueError('Signals must have the same length for delay analysis')
-
 		# Compute the cross-correlation
 		xcorr = self.xcorr(ref, osamp).real
 
@@ -819,10 +833,10 @@ class Waveform(object):
 		else: t = np.argmax(xcorr)
 
 		# Unwrap negative values and scale by the oversampling rate
-		if t >= xcorr.nsamp / 2: t -= xcorr.nsamp
+		if t >= osamp * self.nsamp: t -= xcorr.nsamp
 		t /= float(osamp)
-		# Wrap to waveform interval (Python % is always positive)
-		t %= self.nsamp
+		# Wrap negative values back if desired
+		if forcepos: t %= max(len(self), len(ref))
 
 		return ((t, s) if allowneg else t)
 

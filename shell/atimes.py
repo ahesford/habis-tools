@@ -145,8 +145,8 @@ def calcdelays(datafile, reffile, osamp, window=None,
 		sig = data.getwaveform(rid, tid, dtype=np.float32)
 		if window is not None:
 			sig = sig.window(window[:2], tails=tails)
-		# Compute the delay and append to the result
-		result.append((idx, sig.delay(ref, osamp)))
+		# Compute the delay; force wrapping of negative delays
+		result.append((idx, sig.delay(ref, osamp, forcepos=True)))
 
 	try: queue.put(result)
 	except AttributeError: pass
