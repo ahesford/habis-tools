@@ -657,8 +657,9 @@ class Waveform(object):
 
 		Fourier transforms are always computed over the entire signal.
 		'''
-		# If this is an integer shift, just use the __intshift
-		if int(d) == d: return self.__intshift(d, dtype)
+		# Try using the faster integer shift if possible
+		try: return self.__intshift(d, dtype)
+		except TypeError: pass
 
 		# Determine whether the FFT will be R2C or C2C
 		r2c = self.isReal
@@ -691,6 +692,7 @@ class Waveform(object):
 		Perform an integer shift without spectral manipulations by
 		rewrapping data windows.
 		'''
+		if int(d) != d: raise TypeError('Shift amount must be an integer')
 		dstart, dlength = self.datawin
 		nsamp = self.nsamp
 
@@ -703,13 +705,13 @@ class Waveform(object):
 		if dtype is None: dtype = self.dtype
 
 		# Wrap the shifted start into the waveform window
-		nstart = (dstart + d) % nsamp
+		nstart = int(dstart + d) % nsamp
 		nend = nstart + dlength
 
 		if nend <= nsamp:
 			# If the shifted data window fits, no need to rewrap
 			# Use astype to force a copy of the data
-			data = self._data.astype(dtype, copy=True)
+			data = self._data.astype(dtype)
 			shwave.setsignal(data, nstart)
 		else:
 			# Shifted window will wrap; manually unwrap
@@ -820,27 +822,9 @@ class Waveform(object):
 
 		# Shift convolution according to (oversampled) window offsets
 		ssamp += osamp * (sstart - rstart)
-		# Wrap start into the waveform window and compute window end
-		ssamp %= xcwave.nsamp
-		esamp = ssamp + len(csig)
-
-		# Determine the output datatype
-		odtype = self.dtype if (r2c or ref.isReal) else ref.dtype
-
-		if esamp <= xcwave.nsamp:
-			# Bounds inside waveform ==> convolution is data window
-			# Don't force a copy if the dtype is unchanged
-			xcwave.setsignal(csig.astype(odtype, copy=False), ssamp)
-		else:
-			# Convolution window wraps; manually unwrap
-			xcnsamp = xcwave.nsamp
-			data = np.zeros((xcnsamp,), dtype=odtype)
-			idxmap = [i % xcnsamp for i in range(ssamp, esamp)]
-			data[idxmap] = csig
-			# Data window occupies entire signal
-			xcwave.setsignal(data, 0)
-
-		return xcwave
+		xcwave.setsignal(csig, 0)
+		# Use the Waveform object to shift the convolution into place
+		return xcwave if ssamp == 0 else xcwave.shift(ssamp)
 
 
 	def delay(self, ref, osamp=1, negcorr=False, wrapneg=False):
