@@ -619,15 +619,15 @@ class Waveform(object):
 
 		The keyword arguments are scanned for extra arguments to
 		shift() and delay(), which are passed as appropriate.
-
-		The sign returned by self.shift when allowneg=True is passed is
-		ignored when aligning the waveforms.
 		'''
 		# Build the optional arguments to shift() and delay()
 		shargs = {key: kwargs[key]
 				for key in ['dtype'] if key in kwargs}
 		deargs = {key: kwargs[key]
-				for key in ['osamp', 'allowneg'] if key in kwargs}
+				for key in ['osamp', 'negcorr', 'wrapneg'] if key in kwargs}
+
+		if deargs.get('negcorr', False):
+			raise ValueError('Convenience alignment not supported for negcorr=True')
 
 		# Find the necessary delay
 		try:
@@ -635,9 +635,6 @@ class Waveform(object):
 		except AttributeError:
 			ref = type(self)(signal=ref)
 			delay = ref.delay(self, **deargs)
-
-		# If allowneg is True, the returned value also contains a sign
-		if 'allowneg' in deargs: delay = delay[0]
 
 		if self.nsamp < ref.nsamp:
 			# Pad self for proper shifting when ref is longer
@@ -660,6 +657,9 @@ class Waveform(object):
 
 		Fourier transforms are always computed over the entire signal.
 		'''
+		# If this is an integer shift, just use the __intshift
+		if int(d) == d: return self.__intshift(d, dtype)
+
 		# Determine whether the FFT will be R2C or C2C
 		r2c = self.isReal
 		ifftfunc = fft.irfft if r2c else fft.ifft
@@ -684,6 +684,41 @@ class Waveform(object):
 
 		# Return a copy of the shifted signal
 		return Waveform(self.nsamp, ssig, 0)
+
+
+	def __intshift(self, d, dtype=None):
+		'''
+		Perform an integer shift without spectral manipulations by
+		rewrapping data windows.
+		'''
+		dstart, dlength = self.datawin
+		nsamp = self.nsamp
+
+		# Prepare a new waveform
+		shwave = Waveform(nsamp)
+
+		# Any shift of a zero waveform is just a zero waveform
+		if dlength == 0: return shwave
+
+		if dtype is None: dtype = self.dtype
+
+		# Wrap the shifted start into the waveform window
+		nstart = (dstart + d) % nsamp
+		nend = nstart + dlength
+
+		if nend <= nsamp:
+			# If the shifted data window fits, no need to rewrap
+			# Use astype to force a copy of the data
+			data = self._data.astype(dtype, copy=True)
+			shwave.setsignal(data, nstart)
+		else:
+			# Shifted window will wrap; manually unwrap
+			data = np.zeros((nsamp,), dtype=dtype)
+			idxmap = [i % nsamp for i in range(nstart, nend)]
+			data[idxmap] = self._data
+			shwave.setsignal(data, 0)
+
+		return shwave
 
 
 	def zerotime(self, band=None):
@@ -713,13 +748,13 @@ class Waveform(object):
 		Perform cyclic cross-correlation of self and ref using DFTs. If
 		osamp is provided, it must be a nonnegative power of two that
 		specifies an oversampling rate for the signal. Sample index I
-		at the input sampling rate corresponds to sample index I *
-		osamp at the output sampling rate.
+		at the input sampling rate corresponds to index I * osamp at
+		the output sampling rate.
 
 		All transforms are always rounded to a power of two. The
-		cross-correlation signal will be zero-padded to the minimum
-		power-of-two length appropriate for cyclic convolution before
-		oversampling.
+		cross-correlation signal will contain only the nonzero portion
+		of the cross-correlation (self.nsamp + ref.nsamp - 1 samples),
+		interpolated according to the oversampling rate.
 
 		If ref is complex and self is not, the output dtype will be
 		that of ref. Otherwise, the output dtype will be that of self.
@@ -744,7 +779,7 @@ class Waveform(object):
 		nint = osamp * npad
 
 		# Create an empty waveform to store the oversampled correlation
-		xcwave = Waveform(osamp * cutil.ceilpow2(self.nsamp + ref.nsamp))
+		xcwave = Waveform(osamp * (self.nsamp + ref.nsamp - 1))
 
 		# If one of the signals is 0, the cross-correlation is 0
 		if slength == 0 or rlength == 0: return xcwave
@@ -776,23 +811,26 @@ class Waveform(object):
 		# Samples correspond to positive shifts up to (oversampled)
 		# length of self; remaining samples are wrapped negative shifts
 		esamp = osamp * slength
-		ssamp = esamp - nint
+		# Ignore zero portions of the cross-correlation
+		ssamp = osamp * (-rlength + 1)
 
 		# Unwrap the convolution values in natural order
-		csig = np.concatenate([csig[esamp:], csig[:esamp]], axis=0)
+		# Also scale values by oversampling rate
+		csig = osamp * np.concatenate([csig[ssamp:], csig[:esamp]], axis=0)
 
 		# Shift convolution according to (oversampled) window offsets
 		ssamp += osamp * (sstart - rstart)
 		# Wrap start into the waveform window and compute window end
 		ssamp %= xcwave.nsamp
-		esamp = ssamp + nint
+		esamp = ssamp + len(csig)
 
 		# Determine the output datatype
 		odtype = self.dtype if (r2c or ref.isReal) else ref.dtype
 
 		if esamp <= xcwave.nsamp:
 			# Bounds inside waveform ==> convolution is data window
-			xcwave.setsignal(csig.astype(odtype), ssamp)
+			# Don't force a copy if the dtype is unchanged
+			xcwave.setsignal(csig.astype(odtype, copy=False), ssamp)
 		else:
 			# Convolution window wraps; manually unwrap
 			xcnsamp = xcwave.nsamp
@@ -805,23 +843,24 @@ class Waveform(object):
 		return xcwave
 
 
-	def delay(self, ref, osamp=1, allowneg=False, forcepos=False):
+	def delay(self, ref, osamp=1, negcorr=False, wrapneg=False):
 		'''
 		Find the sample offset that maximizes self.xcorr(ref, osamp).
 		This is interpreted as the delay, in samples, necessary to
 		cyclically shift ref to align the signal with self.
 
-		The shorter signal is assumed to be zero-padded to a length
-		that matches the longer signal.
-
-		If allowneg is True, return a tuple (d, s), where d is the
+		If negcorr is True, return a tuple (d, s), where d is the
 		sample offset that maximizes the absolute value of the cross-
 		correlation, and s is the sign (-1 or 1, integer) of the
 		cross-correlation at this point.
 
-		If forcepos is True, negative delays are cyclically wrapped to
-		positive delays.
+		If wrapneg is True, negative delays are cyclically wrapped to
+		positive delays within the reference window.
 		'''
+		# Ensure that the reference has a sample length
+		try: _ = ref.nsamp
+		except AttributeError: ref = type(self)(signal=ref)
+
 		# Compute the cross-correlation
 		xcorr = self.xcorr(ref, osamp).real
 
@@ -829,7 +868,7 @@ class Waveform(object):
 		if xcorr.datawin[1] == 0: return 0
 
 		# Find the point of maximal correlation
-		if allowneg:
+		if negcorr:
 			t = np.argmax(abs(xcorr))
 			# Determine the sign of the correlation
 			s = int(math.copysign(1., xcorr[t]))
@@ -837,11 +876,14 @@ class Waveform(object):
 
 		# Unwrap negative values and scale by the oversampling rate
 		if t >= osamp * self.nsamp: t -= xcorr.nsamp
+		# The convolution should be zero outside the minimally padded window
+		if t <= -osamp * ref.nsamp:
+			raise ValueError('Maximum cross-correlation found in region where values are expected to be zero')
 		t /= float(osamp)
 		# Wrap negative values back if desired
-		if forcepos: t %= max(len(self), len(ref))
+		if wrapneg: t %= ref.nsamp
 
-		return ((t, s) if allowneg else t)
+		return ((t, s) if negcorr else t)
 
 
 	def envpeaks(self, *args, **kwargs):

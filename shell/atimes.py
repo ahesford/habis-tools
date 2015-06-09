@@ -146,7 +146,7 @@ def calcdelays(datafile, reffile, osamp, window=None,
 		if window is not None:
 			sig = sig.window(window[:2], tails=tails)
 		# Compute the delay; force wrapping of negative delays
-		result.append((idx, sig.delay(ref, osamp, forcepos=True)))
+		result.append((idx, sig.delay(ref, osamp, wrapneg=True)))
 
 	try: queue.put(result)
 	except AttributeError: pass
