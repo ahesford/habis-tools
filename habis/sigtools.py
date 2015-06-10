@@ -475,6 +475,25 @@ class Waveform(object):
 			return signal
 
 
+	def extremum(self, mx=True):
+		'''
+		Return a pair (v, i) such that v = self[i] is the maximum (when
+		mx is True) or the minimum (when mx is False) value in the
+		Waveform. If there are multiple occurrences of the extremum,
+		the first occurrence is returned.
+		'''
+		try:
+			# Find the maximum index and value
+			i = self._data.argmax() if mx else self._data.argmin()
+			v = self._data[i]
+		except TypeError: 
+			# If there is no data, the maximum is just 0
+			return (0, 0)
+
+		# Offset the index by the start of the data window
+		return v, i + self._datastart
+
+
 	def window(self, window=None, tails=None):
 		'''
 		Return a windowed copy of the waveform where, outside the
@@ -484,7 +503,7 @@ class Waveform(object):
 		and the last N values mull multiply the signal in the range
 		[start+length-N:start+length].
 		'''
-		if tails is not None and len(tails) > window[1]:
+		if tails and len(tails) > window[1]:
 			raise ValueError('Length of tails should not exceed length of window')
 
 		if window is None: window = (0, self.nsamp)
@@ -504,7 +523,7 @@ class Waveform(object):
 		data[oend:] = 0.
 
 		# If there are tails, apply them
-		if tails is not None:
+		if tails:
 			def tailer(data, dwin, tail, twin):
 				'''Apply the tail to the data'''
 				try:
@@ -853,10 +872,10 @@ class Waveform(object):
 
 		# Find the point of maximal correlation
 		if negcorr:
-			t = np.argmax(abs(xcorr))
+			t = abs(xcorr).extremum(mx=True)[1]
 			# Determine the sign of the correlation
 			s = int(math.copysign(1., xcorr[t]))
-		else: t = np.argmax(xcorr)
+		else: t = xcorr.extremum(mx=True)[1]
 
 		# Unwrap negative values and scale by the oversampling rate
 		if t >= osamp * self.nsamp: t -= xcorr.nsamp
@@ -907,7 +926,7 @@ class Waveform(object):
 			raise ValueError('Starting index should be less than ending index')
 
 		# Check the tail for sanity
-		if tails is not None and len(tails) > (end - start):
+		if tails and len(tails) > (end - start):
 			raise ValueError('Single-side tail should not exceed half window width')
 
 		r2c = self.isReal
@@ -932,7 +951,7 @@ class Waveform(object):
 			fsig[n-start+1:] = 0
 
 		# Apply the tails
-		if tails is not None:
+		if tails:
 			ltails = len(tails) / 2
 			fsig[start:start+ltails] *= tails[:ltails]
 			fsig[end-ltails:end] *= tails[-ltails:]
@@ -964,7 +983,7 @@ def dimcompat(sig, ndim=1):
 	# This will force a non-array into an array
 	sig = np.squeeze(sig)
 
-	if ndim is not None:
+	if ndim:
 		if sig.ndim == 0:
 			# Force 0-D squeezes to match dimensionality
 			sig = sig[[np.newaxis]*ndim]

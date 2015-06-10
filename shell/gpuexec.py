@@ -61,8 +61,7 @@ if __name__ == '__main__':
 	ngpus = len(gpus)
 
 	# If a block file was specified, read the blocklist
-	if blockfile is not None:
-		blocklist = np.loadtxt(blockfile).astype(int).tolist()
+	if blockfile: blocklist = np.loadtxt(blockfile).astype(int).tolist()
 
 	# Grab the remaining arguments
 	args = args[1:]

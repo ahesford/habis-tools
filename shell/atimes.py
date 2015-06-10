@@ -15,7 +15,7 @@ def usage(progname):
 
 
 def finddelays(datafile, reffile, osamp, nproc,
-		window=None, elements=None, delayfile=None):
+		window=None, peaks=None, elements=None, delayfile=None):
 	'''
 	Compute the delay matrix for a habis.formats.WaveformSet stored in
 	datafile. If delayfile is specified and can be read as a T x R matrix,
@@ -32,6 +32,13 @@ def finddelays(datafile, reffile, osamp, nproc,
 
 	If window is not None, it specifies a window passed to calcdelays that
 	is used to window the waveforms before finding delays.
+
+	If peaks is not None, it specifies a dictionary of kwargs to be passed
+	to Waveform.envpeaks() for every waveform. The waveform will be
+	windowed around the first peak identified by this method. The width of
+	the window extends to the width of the identified peak in either
+	direction of the peak. No tails are used. Peak windowing is done after
+	overall signal windowing.
 
 	If delayfile is specified but computation is still required, the
 	computed matrix will be saved to delayfile. Any existing content will
@@ -67,7 +74,8 @@ def finddelays(datafile, reffile, osamp, nproc,
 		for i in range(nproc):
 			# Pick a useful process name
 			procname = process.procname(i)
-			args = (datafile, reffile, osamp, window, elements, queue, i, nproc)
+			args = (datafile, reffile, osamp, window, 
+					peaks, elements, queue, i, nproc)
 			pool.addtask(target=calcdelays, name=procname, args=args)
 
 		pool.start()
@@ -95,7 +103,7 @@ def finddelays(datafile, reffile, osamp, nproc,
 
 
 def calcdelays(datafile, reffile, osamp, window=None,
-		elements=None, queue=None, start=0, stride=1):
+		peaks=None, elements=None, queue=None, start=0, stride=1):
 	'''
 	Given a datafile containing a habis.formats.WaveformSet, perform
 	cross-correlation on every stride-th received waveform, starting at
@@ -112,6 +120,13 @@ def calcdelays(datafile, reffile, osamp, window=None,
 	each waveform before finding delays. If tailwidth is provided, a Hann
 	window of length (2 * tailwidth) is passed as the tails argument to
 	habis.sigtools.Waveform.window().
+
+	If peaks is not None, it specifies a dictionary of kwargs to be passed
+	to Waveform.envpeaks() for every waveform. The waveform will be
+	windowed around the first peak identified by this method. The width of
+	the window extends to the width of the identified peak in either
+	direction of the peak. No tails are used. Peak windowing is done after
+	overall signal windowing.
 
 	If elements is not None, it should be a list of element indices, and
 	entry (i, j) in the delay matrix will correspond to the delay of the
@@ -143,10 +158,13 @@ def calcdelays(datafile, reffile, osamp, window=None,
 		tid, rid = elements[i], elements[j]
 		# Pull the waveform as float32
 		sig = data.getwaveform(rid, tid, dtype=np.float32)
-		if window is not None:
-			sig = sig.window(window[:2], tails=tails)
-		# Compute the delay; force wrapping of negative delays
-		result.append((idx, sig.delay(ref, osamp, wrapneg=True)))
+		if window: sig = sig.window(window[:2], tails=tails)
+		if peaks:
+			# Find the earliest peak in the signal
+			ctr, _, width, _ = min(sig.envpeaks(**peaks), key=lambda pk: pk[0])
+			sig = sig.window((ctr - width, 2 * width))
+		# Compute the delay (may be negative)
+		result.append((idx, sig.delay(ref, osamp,)))
 
 	try: queue.put(result)
 	except AttributeError: pass
@@ -214,8 +232,8 @@ def atimesEngine(config):
 	except:
 		raise HabisConfigError('Invalid specification of optional element indices in [atimes]')
 
-	# Determine a temporal window to apply before finding delays
 	try:
+		# Determine a temporal window to apply before finding delays
 		window = config.getlist('atimes', 'window',
 				mapper=int, failfunc=lambda: None)
 		if window and (len(window) < 2 or len(window) > 3):
@@ -223,13 +241,32 @@ def atimesEngine(config):
 	except:
 		raise HabisConfigError('Invalid specification of optional temporal window in [atimes]')
 
+	try:
+		# Determine peak-selection criteria
+		peaks = config.getlist('atimes', 'peak', failfunc=lambda: None)
+		if peaks:
+			if len(peaks) < 2 or len(peaks) > 4:
+				raise ValueError('Fall-through to exception handler')
+			if peaks[0].lower() != 'first':
+				raise ValueError('Fall-through to exception handler')
+			# Build the argument list
+			peakargs = {'minwidth': float(peaks[1]) }
+			if len(peaks) > 2:
+				peakargs['minprom'] = float(peaks[2])
+			if len(peaks) > 3:
+				peakargs['prommode'] = peaks[3]
+			peaks = peakargs
+	except:
+		raise HabisConfigError('Invalid specification of optional peak-selection criteria')
+
 	symmetrize = config.getboolean('atimes', 'symmetrize', failfunc=lambda: False)
 	usediag = config.getboolean('atimes', 'usediag', failfunc=lambda: False)
 	maskoutliers = config.getboolean('atimes', 'maskoutliers', failfunc=lambda: False)
 
-	# Determine the shape of the first multipath data
+	# Determine the shape of the multipath data
 	wset = WaveformSet.fromfile(datafiles[0])
 	wshape = wset.ntx, wset.nrx
+	wnsamp = wset.nsamp
 
 	# Check that all subsequent data files have the same shape
 	for datafile in datafiles[1:]:
@@ -237,7 +274,7 @@ def atimesEngine(config):
 		if (wset.ntx, wset.nrx) != wshape:
 			raise TypeError('All input waveform data must have same shape')
 
-	# Make sure the WaveformSet is gone to close the memmap
+	# Allow the memmap to be closed
 	del wset
 
 	# Store results for all data files in this list
@@ -248,10 +285,15 @@ def atimesEngine(config):
 		if len(delayfile) == 0: delayfile = None
 		print 'Finding delays for data set', datafile
 		delays = finddelays(datafile, reffile, osamp,
-				nproc, window, elements, delayfile)
+				nproc, window, peaks, elements, delayfile)
 
 		# Convert delays to arrival times
 		delays = delays * dt + t0
+		# Negative arrival times should be artifacts of delay analysis
+		# Try wrapping the delays into a positive window
+		delays[delays < 0] += wnsamp * dt
+		if np.any(delays < 0):
+			raise ValueError('Negative delays exist, but are non-phyiscal')
 
 		if usediag:
 			# Skip optimization in favor of matrix diagonal

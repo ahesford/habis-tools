@@ -146,7 +146,7 @@ class PointTrilateration(object):
 
 			dist(i) = sqrt(sum(centers[i,j] - pos[j], j)).
 		'''
-		# Ensure that pos is at least a 2-D row vector
+		# Ensure that pos is at least a 1-D row vector
 		pos = cutil.asarray(pos, 1)
 
 		# Ensure dimensions are compatible
@@ -212,13 +212,13 @@ class PointTrilateration(object):
 		times = cutil.asarray(times, 1)
 		nrows, ndim = self.centers.shape
 		# Ensure that a copy is made if a position guess was specified
-		if pos is not None: pos = np.array(pos)
+		if pos: pos = np.array(pos)
 		else: pos = np.zeros((ndim,), dtype=self.centers.dtype)
 
 		for i in range(maxit):
-			# Build the Jacobian and right-hand side
-			jac = self.jacobian(pos[:ndim])
+			# Build the right-hand side and Jacobian
 			cost = self.cost(pos, times)
+			jac = self.jacobian(pos[:ndim])
 			# Use LSMR to invert the system
 			delt = lsmr(jac, cost, **itargs)[0]
 			# Check for convergence
@@ -370,7 +370,7 @@ class MultiPointTrilateration(PointTrilateration):
 		if times.shape[1] != nrows:
 			raise TypeError('Per-element arrival time counts must match known element count')
 
-		if pos is not None: pos = np.array(pos)
+		if pos: pos = np.array(pos)
 		else: pos = np.zeros((nelts, ndim), dtype=self.centers.dtype)
 
 		if pos.shape[1] != ndim:
