@@ -58,7 +58,7 @@ if __name__ == '__main__':
 
 	# Grab a dictionary of all spectral representations, keyed by index
 	hostname = socket.gethostname()
-	if ifsuffix: hostname += ifsuffix
+	if ifsuffix is not None: hostname += ifsuffix
 	specfiles = dict((s[1], hostname + ":" + s[0]) 
 			for s in formats.findenumfiles(srcdir, prefix=inprefix, suffix='\.dat'))
 
@@ -67,7 +67,8 @@ if __name__ == '__main__':
 	srclists = dict(kv for s in srclists for kv in s.items())
 
 	# If a subvolume list was specified, use it; otheruse use all subvolumes
-	if svolfile: svols = np.loadtxt(svolfile).astype(int).tolist()
+	if svolfile is not None:
+		svols = np.loadtxt(svolfile).astype(int).tolist()
 	else: svols = sorted(srclists.keys())
 
 	# If a receiving nodelist was not specified, use all participating nodes

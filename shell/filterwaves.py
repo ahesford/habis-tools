@@ -68,7 +68,7 @@ def wavefilt(infile, rxchans, filt, outfile, lock=None, nsamp=None):
 	# Open the input WaveformSet, then create a corresponding output set
 	wset = WaveformSet.fromfile(infile)
 	# Attempt to truncate the input signals, if possible
-	if nsamp: wset.nsamp = nsamp
+	if nsamp is not None: wset.nsamp = nsamp
 	# Create an empty waveform set to capture filtered output
 	oset = WaveformSet.empty_like(wset)
 	# The output always uses a float32 datatype
@@ -121,7 +121,7 @@ def mpwavefilt(infile, filt, nproc, outfile, nsamp=None):
 	wset = WaveformSet.fromfile(infile)
 
 	# Make sure the set can be truncated as desired
-	if nsamp:
+	if nsamp is not None:
 		try:
 			wset.nsamp = nsamp
 		except ValueError:

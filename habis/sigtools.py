@@ -503,7 +503,7 @@ class Waveform(object):
 		and the last N values mull multiply the signal in the range
 		[start+length-N:start+length].
 		'''
-		if tails and len(tails) > window[1]:
+		if tails is not None and len(tails) > window[1]:
 			raise ValueError('Length of tails should not exceed length of window')
 
 		if window is None: window = (0, self.nsamp)
@@ -523,7 +523,7 @@ class Waveform(object):
 		data[oend:] = 0.
 
 		# If there are tails, apply them
-		if tails:
+		if tails is not None:
 			def tailer(data, dwin, tail, twin):
 				'''Apply the tail to the data'''
 				try:
@@ -926,7 +926,7 @@ class Waveform(object):
 			raise ValueError('Starting index should be less than ending index')
 
 		# Check the tail for sanity
-		if tails and len(tails) > (end - start):
+		if tails is not None and len(tails) > (end - start):
 			raise ValueError('Single-side tail should not exceed half window width')
 
 		r2c = self.isReal
@@ -951,7 +951,7 @@ class Waveform(object):
 			fsig[n-start+1:] = 0
 
 		# Apply the tails
-		if tails:
+		if tails is not None:
 			ltails = len(tails) / 2
 			fsig[start:start+ltails] *= tails[:ltails]
 			fsig[end-ltails:end] *= tails[-ltails:]
@@ -983,7 +983,7 @@ def dimcompat(sig, ndim=1):
 	# This will force a non-array into an array
 	sig = np.squeeze(sig)
 
-	if ndim:
+	if ndim is not None:
 		if sig.ndim == 0:
 			# Force 0-D squeezes to match dimensionality
 			sig = sig[[np.newaxis]*ndim]

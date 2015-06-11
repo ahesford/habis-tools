@@ -97,7 +97,7 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		try:
 			return ConfigParser.SafeConfigParser.getboolean(self, *args, **kwargs)
 		except ConfigParser.NoOptionError: 
-			if failfunc: return failfunc()
+			if failfunc is not None: return failfunc()
 			raise
 
 
@@ -116,7 +116,7 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		try:
 			value = self.get(*args, **kwargs)
 		except ConfigParser.NoOptionError:
-			if failfunc: return failfunc()
+			if failfunc is not None: return failfunc()
 			raise
 
 		return map(mapper, shlex.split(value, comments=True))
@@ -134,7 +134,7 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		try:
 			return ConfigParser.SafeConfigParser.get(self, *args, **kwargs)
 		except ConfigParser.NoOptionError:
-			if failfunc: return failfunc()
+			if failfunc is not None: return failfunc()
 			raise
 
 
@@ -151,7 +151,7 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		try:
 			return ConfigParser.SafeConfigParser.getint(self, *args, **kwargs)
 		except ConfigParser.NoOptionError:
-			if failfunc: return failfunc()
+			if failfunc is not None: return failfunc()
 			raise
 
 
@@ -168,7 +168,7 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		try:
 			return ConfigParser.SafeConfigParser.getfloat(self, *args, **kwargs)
 		except ConfigParser.NoOptionError:
-			if failfunc: return failfunc()
+			if failfunc is not None: return failfunc()
 			raise
 
 
@@ -195,7 +195,7 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		try:
 			value = self.get(*args, **kwargs)
 		except ConfigParser.NoOptionError:
-			if failfunc: return failfunc()
+			if failfunc is not None: return failfunc()
 			raise
 
 		items = shlex.split(value, comments=True)

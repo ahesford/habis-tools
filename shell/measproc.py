@@ -101,7 +101,8 @@ def specfilename(infile, tmpdir = None):
 	input file with the path to tmpdir.
 	'''
 	outfile = infile + '.spectral'
-	if tmpdir: outfile = os.path.join(tmpdir, os.path.basename(outfile))
+	if tmpdir is not None:
+		outfile = os.path.join(tmpdir, os.path.basename(outfile))
 	return outfile
 
 
