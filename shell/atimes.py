@@ -290,7 +290,7 @@ def atimesEngine(config):
 			# Build the peak-selection options dictionary
 			peakargs = { 'nearfile': peaks[1] }
 			if len(peaks) > 2:
-				peaks['minwidth'] = float(peaks[2])
+				peakargs['minwidth'] = float(peaks[2])
 			if len(peaks) > 3:
 				peakargs['minprom'] = float(peaks[3])
 			if len(peaks) > 4:
