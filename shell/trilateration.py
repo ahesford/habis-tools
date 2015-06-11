@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import os, sys, itertools, ConfigParser, numpy as np
+import os, sys, itertools, numpy as np
 import multiprocessing
 
 from itertools import izip
@@ -41,43 +41,56 @@ def trilaterationEngine(config):
 		# Try to grab the input files
 		timefiles = config.getlist('trilateration', 'timefile')
 		if len(timefiles) < 1:
-			raise ConfigParser.Error('Fall-through to exception handler')
+			err = 'Key timefile must contain at least one entry'
+			raise HabisConfigError(err)
 		inelements = config.getlist('trilateration', 'inelements')
 		if len(inelements) != len(timefiles):
-			raise ConfigParser.Error('Fall-through to exception handler')
-	except:
-		raise HabisConfigError('Configuration must specify timefile and inelements lists of equal length in [trilateration]')
+			err = 'Key inelements must contain as many entries as timefile'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Configuration must specify timefile and inelements in [trilateration]'
+		raise HabisConfigError.fromException(err, e)
 
 	# Grab the initial guess for reflector positions
-	try: guessfile = config.get('trilateration', 'guessfile')
-	except: raise HabisConfigError('Configuration must specify guessfile in [trilateration]')
+	try:
+		guessfile = config.get('trilateration', 'guessfile')
+	except Exception as e:
+		err = 'Configuration must specify guessfile in [trilateration]'
+		raise HabisConfigError.fromException(err, e)
 
 	# Grab the reflector output file
-	try: outreflector = config.get('trilateration', 'outreflector')
-	except: raise HabisConfigError('Configuration must specify outreflector in [trilateration]')
+	try:
+		outreflector = config.get('trilateration', 'outreflector')
+	except Exception as e:
+		err = 'Configuration must specify outreflector in [trilateration]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		outelements = config.getlist('trilateration', 'outelements',
 				failfunc=lambda: [''] * len(timefiles))
-	except:
-		raise HabisConfigError('Invalid specification of optional outelements list in [trilateration]')
+	except Exception as e:
+		err = 'Invalid specification of optional outelements in [trilateration]'
+		raise HabisConfigError.fromException(err, e)
 
 	if len(outelements) != len(timefiles):
-		raise HabisConfigError('Timefile and outelements lists must have same length')
+		err = 'Lists outelements and timefile must have equal length'
+		raise HabisConfigError(err)
 
 	try:
 		# Grab the number of processes to use (optional)
 		nproc = config.getint('general', 'nproc',
 				failfunc=process.preferred_process_count)
-	except:
-		raise HabisConfigError('Invalid specification of process count in [general]')
+	except Exception as e:
+		err = 'Invalid specification of optional nproc in [general]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the sound speed and radius
 		c = config.getfloat('trilateration', 'c')
 		radius = config.getfloat('trilateration', 'radius')
-	except:
-		raise HabisConfigError('Configuration must specify sound-speed c and radius in [trilateration]')
+	except Exception as e:
+		err = 'Configuration must specify c and radius in [trilateration]'
+		raise HabisConfigError.fromException(err, e)
 
 	# Pull the element indices for each group file
 	elements = [np.loadtxt(efile) for efile in inelements]

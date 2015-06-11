@@ -18,20 +18,23 @@ def exdelayEngine(config):
 	'''
 	try:
 		# Try to grab the input and output files
-		eltfile = config.get('exdelays', 'elements')
+		eltfiles = config.getlist('exdelays', 'elements')
 		rflfile = config.get('exdelays', 'reflectors')
 		timefile = config.get('exdelays', 'timefile')
-	except:
-		raise HabisConfigError('Configuration must specify elements, reflectors, and timefile in [exdelays]')
+	except Exception as e:
+		err = 'Configuration must specify elements, reflectors, and timefile in [exdelays]'
+		raise HabisConfigError.fromException(err, e)
 
 	# Grab the sound speed and reflector radius
 	try:
 		c = config.getfloat('trilateration', 'c')
 		r = config.getfloat('trilateration', 'radius')
-	except: raise HabisConfigError('Configuration must specify sound speed (c) and radius in [trilateration]')
+	except Exception as e: 
+		err = 'Configuration must specify sound speed (c) and radius in [trilateration]'
+		raise HabisConfigError.fromException(err, e)
 
 	# Read the element and reflector positions
-	eltspos = np.loadtxt(eltfile)
+	eltspos = np.concatenate([np.loadtxt(efile) for efile in eltfiles], axis=0)
 	reflpos = np.loadtxt(rflfile)
 
 	# Determine the one-way distances between elements and reflector centers

@@ -1,6 +1,6 @@
 #!/opt/python-2.7.9/bin/python
 
-import sys, itertools, ConfigParser, math, numpy as np
+import sys, itertools, math, numpy as np
 import multiprocessing, Queue
 
 from scipy.stats import linregress
@@ -180,48 +180,58 @@ def averageEngine(config):
 	try:
 		datafiles = config.getlist('average', 'datafile')
 		if len(datafiles) < 1:
-			raise ConfigParser.Error('Fall-through to exception handler')
-	except:
-		raise HabisConfigError('Configuration must specify datafile list in [average]')
+			err = 'Key datafile exists but contains no values'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Configuration must specify datafile in [average]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		grpformats = config.getlist('average', 'grpformat',
 				failfunc=lambda: [''] * len(datafiles))
-	except:
-		raise HabisConfigError('Invalid specification of optional grpformat list in [average]')
+	except Exception as e:
+		err = 'Invalid specification of optional grpformat in [average]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		outfiles = config.getlist('average', 'outfile',
 				failfunc=lambda: [''] * len(datafiles))
-	except:
-		raise HabisConfigError('Invalid specification of optional outfile list in [average]')
+	except Exception as e:
+		err = 'Invalid specification of optional outfile in [average]'
+		raise HabisConfigError.fromException(err, e)
 
 	if not (len(outfiles) == len(datafiles) == len(grpformats)):
-		raise HabisConfigError('Datafile,  grpformat, and outfile lists must have same lengths')
+		err = 'Lists outfile, grpform, and datafile must have same length'
+		raise HabisConfigError(err)
 
 	try:
 		osamp = config.getint('average', 'osamp')
-	except:
-		raise HabisConfigError('Invalid specification of osamp in [average]')
+	except Exception as e:
+		err = 'Invalid specification of osamp in [average]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		nproc = config.getint('general', 'nproc',
 				failfunc=process.preferred_process_count)
-	except:
-		raise HabisConfigError('Invalid specification of process count in [general]')
+	except Exception as e:
+		err = 'Invalid specification of optional nproc in [general]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		regress = config.getlist('average', 'regress',
 				mapper=int, failfunc=lambda: None)
 		if len(regress) != 2:
-			raise ValueError('Fall-through to exception handler')
-	except:
-		raise HabisConfigError('Specification of optional regress in [average] must contain two ints')
+			err = 'Key regress does not contain proper parameters'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Invalid specification of optional regress in [average]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		grouplen = config.getint('average', 'grouplen')
-	except:
-		raise HabisConfigError('Invalid specification of grouplen in [average]')
+	except Exception as e:
+		err = 'Invalid specification of grouplen in [average]'
+		raise HabisConfigError.fromException(err, e)
 
 	for datafile, grpformat, outfile in zip(datafiles, grpformats, outfiles):
 		print 'Computing average responses for data file', datafile

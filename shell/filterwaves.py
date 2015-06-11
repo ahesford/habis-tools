@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import sys, itertools, ConfigParser, numpy as np
+import sys, itertools, numpy as np
 import multiprocessing, Queue
 
 from pycwp import process
@@ -159,28 +159,34 @@ def filterEngine(config):
 		datafiles = config.getlist('filter', 'datafile')
 		outfiles = config.getlist('filter', 'outfile')
 		if len(datafiles) < 1 or len(datafiles) != len(outfiles):
-			raise ConfigParser.Error('Fall-through to exception handler')
-	except:
-		raise HabisConfigError('Configuration must specify datafile and corresponding outfile in [filter]')
+			err = 'Keys datafile and outfile must have same length and at least one record'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Configuration must specify datafile and outfile in [filter]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		nsamp = config.getint('filter', 'nsamp', failfunc=lambda: None)
-	except:
-		raise HabisConfigError('Invalid specification of nsamp in [filter]')
+	except Exception as e:
+		err = 'Invalid specification of optional nsamp in [filter]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the number of processes to use (optional)
 		nproc = config.getint('general', 'nproc',
 				failfunc=process.preferred_process_count)
-	except:
-		raise HabisConfigError('Invalid specification of process count in [general]')
+	except Exception as e:
+		err = 'Invalid specification of optional nproc in [general]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		filt = config.getlist('filter', 'filter', mapper=int)
 		if len(filt) < 2 or len(filt) > 3:
-			raise ValueError('Fall-through to exception handler')
-	except:
-		raise HabisConfigError('Specification of filter in [filter] must contain two or three ints')
+			err = 'Specification of filter contains improper parameters'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Configuration must specify filter in [filter]'
+		raise HabisConfigError.fromException(err, e)
 
 	for datafile, outfile in zip(datafiles, outfiles):
 		print 'Filtering data file', datafile
