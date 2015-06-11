@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import sys, itertools, ConfigParser, numpy as np
+import sys, itertools, numpy as np
 import multiprocessing, Queue
 
 from pycwp import process, cutil
@@ -183,81 +183,97 @@ def atimesEngine(config):
 		# Read the list of data files
 		datafiles = config.getlist('atimes', 'datafile')
 		if len(datafiles) < 1:
-			raise ConfigParser.Error('Fall-through to exception handler')
-	except:
-		raise HabisConfigError('Configuration must specify at least one datafile')
+			err = 'Key datafile present, but contains no records'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Configuration must specify a datafile in [atimes]'
+		raise HabisConfigError.fromException(err, e)
 
 	# Read an optional list of delay files
 	# Default delay files are empty (no files)
 	try:
 		delayfiles = config.getlist('atimes', 'delayfile', 
 				failfunc=lambda: [''] * len(datafiles))
-	except:
-		raise HabisConfigError('Invalid specification of delayfile in [atimes]')
+	except Exception as e:
+		err = 'Invalid specification of optional delayfile in [atimes]'
+		raise HabisConfigError.fromException(err, e)
 
 	# Make sure the delayfile and datafile counts match
 	if len(datafiles) != len(delayfiles):
-		raise HabisConfigError('Number of delay files must match number of data files')
+		err = 'Number of delay files must match number of data files'
+		raise HabisConfigError(err)
 
 	try:
 		# Grab the reference and output files
 		reffile = config.get('atimes', 'reffile')
 		outfile = config.get('atimes', 'outfile')
-	except:
-		raise HabisConfigError('Configuration must specify reference and output files in [atimes]')
+	except Exception as e:
+		err = 'Configuration must specify reffile and outfile in [atimes]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the oversampling rate
 		osamp = config.getint('atimes', 'osamp')
-	except:
-		raise HabisConfigError('Configuration must specify oversampling rate as integer in [atimes]')
+	except Exception as e:
+		err = 'Configuration must specify osamp in [atimes]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the number of processes to use (optional)
 		nproc = config.getint('general', 'nproc',
 				failfunc=process.preferred_process_count)
-	except:
-		raise HabisConfigError('Invalid specification of process count in [general]')
+	except Exception as e:
+		err = 'Invalid specification of optional nproc in [general]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine the number of samples and offset, in microsec
 		dt = config.getfloat('sampling', 'period')
 		t0 = config.getfloat('sampling', 'offset')
-	except:
-		raise HabisConfigError('Configuration must specify float sampling period and temporal offset in [sampling]')
+	except Exception as e:
+		err = 'Configuration must specify period and offset in [sampling]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine the range of elements to use; default to all (as None)
 		elements = config.getrange('atimes', 'elements', failfunc=lambda: None)
-	except:
-		raise HabisConfigError('Invalid specification of optional element indices in [atimes]')
+	except Exception as e:
+		err = 'Invalid specification of optional elements in [atimes]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine a temporal window to apply before finding delays
 		window = config.getlist('atimes', 'window',
 				mapper=int, failfunc=lambda: None)
 		if window and (len(window) < 2 or len(window) > 3):
-			raise ValueError('Fall-through to exception handler')
-	except:
-		raise HabisConfigError('Invalid specification of optional temporal window in [atimes]')
+			err = 'Window does not specify appropriate parameters'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Invalid specification of optional window in [atimes]'
+		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine peak-selection criteria
 		peaks = config.getlist('atimes', 'peak', failfunc=lambda: None)
 		if peaks:
-			if len(peaks) < 2 or len(peaks) > 4:
-				raise ValueError('Fall-through to exception handler')
-			if peaks[0].lower() != 'first':
-				raise ValueError('Fall-through to exception handler')
-			# Build the argument list
-			peakargs = {'minwidth': float(peaks[1]) }
+			if len(peaks) < 2 or len(peaks) > 5:
+				err = 'Peak does not specify appropriate parameters'
+				raise HabisConfigError(err)
+			if peaks[0].lower() != 'nearest':
+				err = 'Peak specification must start with "nearest"'
+				raise HabisConfigError(err)
+			# Build the peak-selection options dictionary
+			peakargs = { 'nearfile': peaks[1] }
 			if len(peaks) > 2:
-				peakargs['minprom'] = float(peaks[2])
+				peaks['minwidth'] = float(peaks[2])
 			if len(peaks) > 3:
-				peakargs['prommode'] = peaks[3]
+				peakargs['minprom'] = float(peaks[3])
+			if len(peaks) > 4:
+				peakargs['prommode'] = peaks[4]
 			peaks = peakargs
-	except:
-		raise HabisConfigError('Invalid specification of optional peak-selection criteria')
+	except Exception as e:
+		err = 'Invalid specification of optional peak in [atimes]'
+		raise HabisConfigError.fromException(err, e)
 
 	symmetrize = config.getboolean('atimes', 'symmetrize', failfunc=lambda: False)
 	usediag = config.getboolean('atimes', 'usediag', failfunc=lambda: False)

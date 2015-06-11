@@ -9,7 +9,14 @@ class HabisConfigError(ConfigParser.Error):
 	'''
 	This generic exception is raised to identify improper HABIS configurations.
 	'''
-	pass
+	@classmethod
+	def fromException(cls, msg, e):
+		'''
+		Create a HabisConfigError instance whose message is the
+		provided string msg concatenated with a report of the
+		underlying error represented by str(e).
+		'''
+		return cls(str(msg) + ', underlying error: ' + str(e))
 
 
 class HabisConfigParser(ConfigParser.SafeConfigParser):
