@@ -18,7 +18,7 @@ def exdelayEngine(config):
 	'''
 	try:
 		# Try to grab the input and output files
-		eltfile = config.get('exdelays', 'elements')
+		eltfiles = config.getlist('exdelays', 'elements')
 		rflfile = config.get('exdelays', 'reflectors')
 		timefile = config.get('exdelays', 'timefile')
 	except Exception as e:
@@ -34,7 +34,7 @@ def exdelayEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	# Read the element and reflector positions
-	eltspos = np.loadtxt(eltfile)
+	eltspos = np.concatenate([np.loadtxt(efile) for efile in eltfiles], axis=0)
 	reflpos = np.loadtxt(rflfile)
 
 	# Determine the one-way distances between elements and reflector centers

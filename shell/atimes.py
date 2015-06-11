@@ -3,6 +3,8 @@
 import sys, itertools, numpy as np
 import multiprocessing, Queue
 
+from itertools import izip
+
 from pycwp import process, cutil
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser
@@ -14,43 +16,33 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def finddelays(datafile, reffile, osamp, nproc,
-		window=None, peaks=None, elements=None, delayfile=None):
+def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 	'''
 	Compute the delay matrix for a habis.formats.WaveformSet stored in
 	datafile. If delayfile is specified and can be read as a T x R matrix,
 	where T and R are the "ntx" and "nrx" attributes of the WaveformSet,
 	respectively, the delays are read from that file. Otherwise, the
-	waveform set is read directly from datafile, a reference waveform is
-	read from reffile in 1-D binary matrix form, and cross-correlation is
-	used (with an oversampling rate of osamp) in the form of
-	habis.sigtools.Waveform.delay to determine the delay matrix.
-
-	If elements is not None, it should be a list of element indices, and
-	entry (i, j) in the delay matrix will correspond to the delay of the
-	waveform for transmit index elements[i] and receive index elements[j].
-
-	If window is not None, it specifies a window passed to calcdelays that
-	is used to window the waveforms before finding delays.
-
-	If peaks is not None, it specifies a dictionary of kwargs to be passed
-	to Waveform.envpeaks() for every waveform. The waveform will be
-	windowed around the first peak identified by this method. The width of
-	the window extends to the width of the identified peak in either
-	direction of the peak. No tails are used. Peak windowing is done after
-	overall signal windowing.
+	waveform set is read directly from datafile and delays are determined
+	through delay analysis.
+	
+	Delay analysis for individual waveforms is farmed out to calcdelays()
+	among nproc processes. The datafile argument, along with *args and
+	**kwargs, are passed to calcdelays on each participating process. This
+	function explicitly sets the "queue", "start", and "stride" arguments
+	of calcdelays, so *args and **kwargs should not contain these values.
 
 	If delayfile is specified but computation is still required, the
 	computed matrix will be saved to delayfile. Any existing content will
 	be overwritten.
-
-	Computations are done in parallel using nproc processes.
 	'''
 	# Grab the dimensions of the waveform matrix
 	wset = WaveformSet.fromfile(datafile)
 	# Determine the shape of the delay matrix
-	try: wshape = len(elements), len(elements)
-	except TypeError: wshape = wset.ntx, wset.nrx
+	try: tlen = len(kwargs['txelts'])
+	except (KeyError, TypeError): tlen = wset.ntx
+	try: rlen = len(kwargs['rxelts'])
+	except (KeyError, TypeError): rlen = wset.nrx
+	wshape = (tlen, rlen)
 	# No need to keep the WaveformSet around; kill the memmap
 	del wset
 
@@ -69,14 +61,22 @@ def finddelays(datafile, reffile, osamp, nproc,
 	queue = multiprocessing.Queue(nproc)
 	delays = np.zeros(wshape, dtype=np.float32)
 
+	# Extend the kwargs to include the result queue
+	kwargs['queue'] = queue
+	# Extend the kwargs to include the stride
+	kwargs['stride'] = nproc
+	# Insert the datafile at the beginning of the args
+	args = tuple([datafile] + list(args))
+
 	# Spawn the desired processes to perform the cross-correlation
 	with process.ProcessPool() as pool:
 		for i in range(nproc):
 			# Pick a useful process name
 			procname = process.procname(i)
-			args = (datafile, reffile, osamp, window, 
-					peaks, elements, queue, i, nproc)
-			pool.addtask(target=calcdelays, name=procname, args=args)
+			# Add the start index to the kwargs
+			kwargs['start'] = i
+			# Extend kwargs to contain the queue (copies kwargs)
+			pool.addtask(target=calcdelays, name=procname, args=args, kwargs=kwargs)
 
 		pool.start()
 
@@ -102,72 +102,96 @@ def finddelays(datafile, reffile, osamp, nproc,
 	return delays
 
 
-def calcdelays(datafile, reffile, osamp, window=None,
-		peaks=None, elements=None, queue=None, start=0, stride=1):
+def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	'''
 	Given a datafile containing a habis.formats.WaveformSet, perform
-	cross-correlation on every stride-th received waveform, starting at
-	index start, to identify the delay of the received waveform relative to
-	the reference. The waveforms are oversampled by the factor osamp when
-	performing the cross-correlation. The start index and stride span an
-	array of T x R waveforms flattened in row-major order.
+	cross-correlation on every stride-th waveform, starting at index start,
+	to identify the delay of the received waveform relative to a reference
+	as the output of datafile[i,j].delay(reference, osamp=osamp). The index
+	(i,j) of the WaveformSet is determined by un-flattening the strided
+	index, k, into a 2-D index (j,i) into the T x R delay matrix in
+	row-major order.
 
-	The reference file must be a 1-dimensional matrix as a float32.
-	Waveforms in the datafile will be cast to float32.
-
-	If window is not None, it should be a tuple of ints of the form
-	(start, length, [tailwidth]) that specifies a window to be applied to
-	each waveform before finding delays. If tailwidth is provided, a Hann
-	window of length (2 * tailwidth) is passed as the tails argument to
-	habis.sigtools.Waveform.window().
-
-	If peaks is not None, it specifies a dictionary of kwargs to be passed
-	to Waveform.envpeaks() for every waveform. The waveform will be
-	windowed around the first peak identified by this method. The width of
-	the window extends to the width of the identified peak in either
-	direction of the peak. No tails are used. Peak windowing is done after
-	overall signal windowing.
-
-	If elements is not None, it should be a list of element indices, and
-	entry (i, j) in the delay matrix will correspond to the delay of the
-	waveform for transmit index elements[i] and receive index elements[j].
+	The reference waveform is read from reffile using
+	habis.sigtools.Waveform.fromfile.
 
 	The return value is a list of 2-tuples, wherein the first element is a
 	flattened waveform index and the second element is the corresponding
-	delay in samples. If queue is not None, the result list is also placed
-	in the queue using queue.put().
+	delay in samples.
+
+	The optional kwargs are parsed for the following keys:
+
+	* window: If not None, should be a (start, length, [tailwidth]) tuple
+	  of ints that specifies a temporal window applied to each waveform
+	  before delay analysis. Optional tailwidth specifies the half-width of
+	  a Hann window passed as the tails argument to Waveform.window.
+
+	* peaks: If not None, should be a dictionary of kwargs to be passed to
+	  Waveform.envpeaks for every waveform. Additionally, a 'nearmap' key
+	  must be included to specify a list of expected round-trip delays for
+	  each element. The waveform (i,j) will be windowed about the peak
+	  closest to delay 0.5 * (nearmap[i] + nearmap[j]) to a width twice the
+	  peak width, with no tails. Note: peak windowing is done after overall
+	  windowing.
+
+	* rxelts and txelts: If not None, should be a lists of element indices
+	  such that entry (i,j) in the delay matrix corresponds to the waveform
+	  datafile[rxelts[j],txelts[i]]. When rxelts or txelts are None or
+	  unspecified, they are populated by sorted(datafile.rxidx) and
+	  sorted(datafile.txidx), respectively.
+
+	* queue: If not none, the return list is passed as an argument to
+	  queue.put().
 	'''
-	# Read the data and reference files
+	# Read the data and reference
 	data = WaveformSet.fromfile(datafile)
-	# Read the reference waveform
 	ref = Waveform.fromfile(reffile)
 
-	# Determine the shape of the delay matrix
-	try: t, r = len(elements), len(elements)
-	except TypeError: t, r = data.ntx, data.nrx
+	# Determine the elements to include in the delay matrix
+	rxelts = kwargs.get('rxelts', None)
+	if rxelts is None: rxelts = sorted(data.rxidx)
+	txelts = kwargs.get('txelts', None)
+	if txelts is None: txelts = sorted(data.txidx)
 
-	# Pull the tails of an optional window
+	t, r = len(txelts), len(rxelts)
+
+	# Pull the window and compute optional tails
+	window = kwargs.get('window', None)
 	try: tails = np.hanning(2 * window[2])
 	except (TypeError, IndexError): tails = None
+
+	# Pull the optional peak search criteria
+	peaks = kwargs.get('peaks', None)
+	try:
+		nearmap = peaks.get('nearmap', None)
+		peaks = dict(kp for kp in peaks.iteritems() if kp[0] != 'nearmap')
+	except AttributeError: nearmap = None
+
+	if peaks and nearmap is None:
+		raise KeyError('kwarg "peaks" must be a dictionary with a "nearmap" key')
 
 	# Compute the strided results
 	result = []
 	for idx in range(start, t * r, stride):
 		# Find the transmit and receive indices
 		i, j = np.unravel_index(idx, (t, r), 'C')
-		tid, rid = elements[i], elements[j]
+		tid, rid = txelts[i], rxelts[j]
 		# Pull the waveform as float32
 		sig = data.getwaveform(rid, tid, dtype=np.float32)
 		if window: sig = sig.window(window[:2], tails=tails)
 		if peaks:
-			# Find the earliest peak in the signal
-			ctr, _, width, _ = min(sig.envpeaks(**peaks), key=lambda pk: pk[0])
-			sig = sig.window((ctr - width, 2 * width))
+			# Find any signal peaks
+			pks = sig.envpeaks(**peaks)
+			if len(pks) > 1:
+				# Choose the peak closest to nearmap prediction
+				exd = 0.5 * (nearmap[tid] + nearmap[rid])
+				ctr, _, width, _ = min(pks, key=lambda pk: abs(pk[0] - exd))
+				sig = sig.window((ctr - width, 2 * width))
 		# Compute the delay (may be negative)
-		result.append((idx, sig.delay(ref, osamp,)))
+		result.append((idx, sig.delay(ref, osamp)))
 
-	try: queue.put(result)
-	except AttributeError: pass
+	try: kwargs['queue'].put(result)
+	except (KeyError, AttributeError): pass
 
 	return result
 
@@ -192,7 +216,7 @@ def atimesEngine(config):
 	# Read an optional list of delay files
 	# Default delay files are empty (no files)
 	try:
-		delayfiles = config.getlist('atimes', 'delayfile', 
+		delayfiles = config.getlist('atimes', 'delayfile',
 				failfunc=lambda: [''] * len(datafiles))
 	except Exception as e:
 		err = 'Invalid specification of optional delayfile in [atimes]'
@@ -236,9 +260,10 @@ def atimesEngine(config):
 
 	try:
 		# Determine the range of elements to use; default to all (as None)
-		elements = config.getrange('atimes', 'elements', failfunc=lambda: None)
+		txelts = config.getrange('atimes', 'txelts', failfunc=lambda: None)
+		rxelts = config.getrange('atimes', 'rxelts', failfunc=lambda: None)
 	except Exception as e:
-		err = 'Invalid specification of optional elements in [atimes]'
+		err = 'Invalid specification of optional txelts, rxelts in [atimes]'
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -296,12 +321,27 @@ def atimesEngine(config):
 	# Store results for all data files in this list
 	times = []
 
-	for datafile, delayfile in zip(datafiles, delayfiles):
+	try:
+		# If a delay guess was specified, read the delay matrix
+		guesses = np.loadtxt(peaks['nearfile'])
+		# Convert from times to samples
+		guesses = (guesses - t0) / dt
+		# Remove the "nearfile" key
+		del peaks['nearfile']
+	except (KeyError, TypeError, IOError, AttributeError):
+		guesses = None
+
+	for i, (dfile, dlayfile) in enumerate(izip(datafiles, delayfiles)):
 		# If an empty name is specified, use no delayfile
-		if len(delayfile) == 0: delayfile = None
-		print 'Finding delays for data set', datafile
-		delays = finddelays(datafile, reffile, osamp,
-				nproc, window, peaks, elements, delayfile)
+		if len(dlayfile) == 0: dlayfile = None
+		print 'Finding delays for data set', dfile
+
+		# Set the peaks nearmap to the appropriate guess column
+		try: peaks['nearmap'] = guesses[:,i]
+		except TypeError: pass
+
+		delays = finddelays(dfile, dlayfile, nproc, reffile, osamp,
+				window=window, peaks=peaks, rxelts=rxelts, txelts=txelts)
 
 		# Convert delays to arrival times
 		delays = delays * dt + t0
