@@ -18,20 +18,21 @@ def getreflpos(args):
 	'''
 	For args = (times, elocs, guess, c), with a list of N round-trip
 	arrival times and an N-by-3 matrix elocs of reference element
-	locatations, use habis.trilateration.PointTrilateration to determine,
-	starting with the provided 3-dimensional guess position, the position
-	of a zero-radius reflector in a medium with sound speed c.
+	locatations, use habis.trilateration.MultiPointTrilateration to
+	determine, starting with the provided 3-dimensional guess position, the
+	position of a zero-radius reflector in a medium with sound speed c.
 
 	The return value is the 3-dimensional position of the reflector.
 	'''
 	times, elemlocs, guess, c = args
-	t = trilateration.PointTrilateration(elemlocs, c)
-	return t.newton(times, pos=guess)
+	t = trilateration.MultiPointTrilateration(elemlocs, c)
+	pos = t.newton(times, pos=guess)
+	return pos.squeeze()
 
 
 def trilaterationEngine(config):
 	'''
-	Use the PointTrilateration and PlaneTrilateration classes in
+	Use the MultiPointTrilateration and PlaneTrilateration classes in
 	habis.trilateration to determine, iteratively from a set of
 	measurements of round-trip arrival times, the unknown positions of
 	a set of reflectors followed by estimates of the positions of the
