@@ -37,8 +37,14 @@ def exdelayEngine(config):
 	eltspos = np.concatenate([np.loadtxt(efile) for efile in eltfiles], axis=0)
 	reflpos = np.loadtxt(rflfile)
 
+	_, nedim = eltspos.shape
+	_, nrdim = reflpos.shape
+	if nedim != nrdim != nedim + 1:
+		raise ValueError('Reflector and element dimensionalities are incompatible')
+
 	# Determine the one-way distances between elements and reflector centers
-	dx = norm(eltspos[:,np.newaxis,:] - reflpos[np.newaxis,:,:], axis=-1)
+	# Ignore an extra dimension (wave speed) in reflector coordinates
+	dx = norm(eltspos[:,np.newaxis,:] - reflpos[np.newaxis,:,:nedim], axis=-1)
 	# Convert distances to round-trip arrival times
 	times = 2 * (dx - r) / c
 
