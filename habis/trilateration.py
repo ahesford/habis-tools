@@ -110,19 +110,22 @@ class MultiPointTrilateration(object):
 
 	Optionally, the sound speed can be recovered along with the positions.
 	'''
-	def __init__(self, centers, c=1.507):
+	def __init__(self, centers, rad=0., c=1.507):
 		'''
 		Create a trilateration object using a collection of elements
-		whose positions are specified along rows of the rank-2 array
-		centers. The wave speed c is used to relate round-trip arrival
-		times to distances.
+		whose center positions are specified along rows of the rank-2
+		array centers. Each element has a radius rad such that
+		reflections are assumed to come from a point that is a distance
+		rad from the center position. The wave speed c is used to
+		relate round-trip arrival times to distances.
 		'''
 		# Make a copy of the centers array, ensure it is rank 2
 		self.centers = np.array(centers)
 		if np.ndim(centers) != 2:
 			raise TypeError('Element centers must be a rank-2 array')
-		# Copy the wave speed
+		# Copy the wave speed and radius
 		self.c = c
+		self.rad = rad
 
 
 	def cost(self, pos, times, c=None):
@@ -143,8 +146,8 @@ class MultiPointTrilateration(object):
 		for independent, per-element trilateration problems. A block k
 		of the cost function takes the form
 
-			F[k,i] = c * times[k,i] / 2 -
-				sqrt(sum((centers[i] - pos[k])**2)).
+			F[k,i] = self.rad + c * times[k,i] / 2 -
+					sqrt(sum((centers[i] - pos[k])**2)).
 		'''
 		# Treat the positions and times as a rank-2 array
 		pos = cutil.asarray(pos, 2, False)
@@ -170,7 +173,7 @@ class MultiPointTrilateration(object):
 		dist = np.sqrt(np.sum((cenpad - pospad)**2, axis=-1))
 
 		# Flatten in proper order and include time term
-		return c * times.ravel('C') / 2 - dist.ravel('C')
+		return self.rad + c * times.ravel('C') / 2 - dist.ravel('C')
 
 
 	def jacobian(self, pos, times=None):

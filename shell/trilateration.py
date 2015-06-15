@@ -5,7 +5,7 @@ import multiprocessing
 
 from itertools import izip
 
-from pycwp import process
+from pycwp import process, cutil
 
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser
@@ -16,17 +16,27 @@ def usage(progname):
 
 def getreflpos(args):
 	'''
-	For args = (times, elocs, guess, c), with a list of N round-trip
-	arrival times and an N-by-3 matrix elocs of reference element
-	locatations, use habis.trilateration.MultiPointTrilateration to
+	For args = (times, elocs, guess, rad, c, varc), with a list of N
+	round-trip arrival times and an N-by-3 matrix elocs of reference
+	element locatations, use habis.trilateration.MultiPointTrilateration to
 	determine, starting with the provided 3-dimensional guess position, the
-	position of a zero-radius reflector in a medium with sound speed c.
+	position of a reflector with radius rad in a medium with sound speed c.
 
-	The return value is the 3-dimensional position of the reflector.
+	If varc is True, the MultiPointTrilateration is allowed to recover
+	variable sound speed in addition to element position.
+
+	The return value is a 4-dimensional vector in which the first three
+	dimensions are the element position and the last dimension is the
+	recovered sound speed. If varc is False, the fourth dimension just
+	copies the input parameter c.
 	'''
-	times, elemlocs, guess, c = args
-	t = trilateration.MultiPointTrilateration(elemlocs, c)
-	pos = t.newton(times, pos=guess)
+	times, elemlocs, guess, rad, c, varc = args
+	t = trilateration.MultiPointTrilateration(elemlocs, rad, c)
+	rval = t.newton(times, pos=guess, varc=varc)
+	# Unpack the recovered solution
+	pos, c = rval if varc else (rval, c)
+	# Expand the position to include sound speed
+	pos = np.concatenate([pos, [[c]] * pos.shape[0]], axis=1)
 	return pos.squeeze()
 
 
@@ -38,39 +48,40 @@ def trilaterationEngine(config):
 	a set of reflectors followed by estimates of the positions of the
 	hemisphere elements.
 	'''
+	tsection = 'trilateration'
 	try:
 		# Try to grab the input files
-		timefiles = config.getlist('trilateration', 'timefile')
+		timefiles = config.getlist(tsection, 'timefile')
 		if len(timefiles) < 1:
 			err = 'Key timefile must contain at least one entry'
 			raise HabisConfigError(err)
-		inelements = config.getlist('trilateration', 'inelements')
+		inelements = config.getlist(tsection, 'inelements')
 		if len(inelements) != len(timefiles):
 			err = 'Key inelements must contain as many entries as timefile'
 			raise HabisConfigError(err)
 	except Exception as e:
-		err = 'Configuration must specify timefile and inelements in [trilateration]'
+		err = 'Configuration must specify timefile and inelements in [%s]' % tsection
 		raise HabisConfigError.fromException(err, e)
 
 	# Grab the initial guess for reflector positions
 	try:
-		guessfile = config.get('trilateration', 'guessfile')
+		guessfile = config.get(tsection, 'guessfile')
 	except Exception as e:
-		err = 'Configuration must specify guessfile in [trilateration]'
+		err = 'Configuration must specify guessfile in [%s]' % tsection
 		raise HabisConfigError.fromException(err, e)
 
 	# Grab the reflector output file
 	try:
-		outreflector = config.get('trilateration', 'outreflector')
+		outreflector = config.get(tsection, 'outreflector')
 	except Exception as e:
-		err = 'Configuration must specify outreflector in [trilateration]'
+		err = 'Configuration must specify outreflector in [%s]' % tsection
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		outelements = config.getlist('trilateration', 'outelements',
+		outelements = config.getlist(tsection, 'outelements',
 				failfunc=lambda: [''] * len(timefiles))
 	except Exception as e:
-		err = 'Invalid specification of optional outelements in [trilateration]'
+		err = 'Invalid specification of optional outelements in [%s]' % tsection
 		raise HabisConfigError.fromException(err, e)
 
 	if len(outelements) != len(timefiles):
@@ -87,18 +98,29 @@ def trilaterationEngine(config):
 
 	try:
 		# Grab the sound speed and radius
-		c = config.getfloat('trilateration', 'c')
-		radius = config.getfloat('trilateration', 'radius')
+		c = config.getfloat(tsection, 'c')
+		radius = config.getfloat(tsection, 'radius')
 	except Exception as e:
-		err = 'Configuration must specify c and radius in [trilateration]'
+		err = 'Configuration must specify c and radius in [%s]' % tsection
 		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine whether variable sound speeds are allowed
+		varc = config.getboolean(tsection, 'varc', failfunc=lambda: False)
+	except Exception as e:
+		err = 'Invalid specification of optional varc in [%s]' % tsection
+		raise HabisConfigError.fromException(err, e)
+
 
 	# Pull the element indices for each group file
 	elements = [np.loadtxt(efile) for efile in inelements]
 	# Pull the arrival times and convert surface times to center times
-	times = [np.loadtxt(tfile) + ((2. * radius) / c) for tfile in timefiles]
-	# Pull the reflector guess
-	guess = np.loadtxt(guessfile)
+	times = [np.loadtxt(tfile) for tfile in timefiles]
+	# Pull the reflector guess as a 2-D matrix
+	guess = cutil.asarray(np.loadtxt(guessfile), 2, False)
+	# Ensure that the reflector has a sound-speed guess
+	if guess.shape[1] != 4:
+		guess = np.concatenate([guess, [[c]] * guess.shape[0]], axis=1)
 
 	# Allocate a multiprocessing pool
 	pool = multiprocessing.Pool(processes=nproc)
@@ -110,10 +132,11 @@ def trilaterationEngine(config):
 	# Compute the reflector positions in parallel
 	# Use async calls to correctly handle keyboard interrupts
 	result = pool.map_async(getreflpos,
-			((t, celts, g, c) for t, g in izip(ctimes.T, guess)))
+			((t, celts, g[:-1], radius, g[-1], varc) 
+				for t, g in izip(ctimes.T, guess)))
 	while True:
 		try:
-			reflectors = result.get(5)
+			reflectors = np.array(result.get(5))
 			break
 		except multiprocessing.TimeoutError:
 			pass
@@ -125,8 +148,13 @@ def trilaterationEngine(config):
 		# Don't do trilateration if the result will not be saved
 		if not len(ofile): continue
 
+		# Convert arrival times to uniform sound speed
+		for pos, ctime in izip(reflectors, ctimes.T):
+			ctime[:] *= (pos[-1] / c)
+
 		# Create and save a refined estimate of the reflector locations
-		pltri = trilateration.PlaneTrilateration(reflectors, c)
+		# Strip out the sound-speed guess from the reflector position
+		pltri = trilateration.PlaneTrilateration(reflectors[:,:-1], radius, c)
 		relements = pltri.newton(ctimes, pos=celts)
 		np.savetxt(ofile, relements, fmt='%16.8f')
 
