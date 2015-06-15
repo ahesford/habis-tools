@@ -149,8 +149,7 @@ def trilaterationEngine(config):
 		if not len(ofile): continue
 
 		# Convert arrival times to uniform sound speed
-		for pos, ctime in izip(reflectors, ctimes.T):
-			ctime[:] *= (pos[-1] / c)
+		ctimes *= (reflectors[:,-1] / c)[np.newaxis,:]
 
 		# Create and save a refined estimate of the reflector locations
 		# Strip out the sound-speed guess from the reflector position
