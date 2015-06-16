@@ -4,7 +4,7 @@ Routines for performing acoustic trilateration.
 
 import numpy as np, math
 from itertools import izip
-from numpy import fft, linalg as la
+from numpy import ma, fft, linalg as la
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsmr, LinearOperator
 from scipy.optimize import fmin_bfgs
@@ -39,18 +39,15 @@ class ArrivalTimeFinder(object):
 
 	@atmap.setter
 	def atmap(self, atmap):
-		# Ensure the map has the right shape
-		try: shape = atmap.shape
-		except AttributeError:
-			atmap = np.array(atmap)
-			shape = atmap.shape
-		if len(shape) != 2:
+		# Copy the arrival-time map (this preserves masks)
+		atmap = ma.array(atmap, copy=True)
+		if atmap.ndim != 2:
 			raise TypeError('Arrival time map must be of rank 2')
-		if shape[0] != shape[1]:
+		if atmap.shape[0] != atmap.shape[1]:
 			raise TypeError('Arrival time map must be square')
 
 		# Capture a copy to the arrival-time map
-		self._atmap = atmap.copy()
+		self._atmap = atmap
 
 	@atmap.deleter
 	def atmap(self): del self._atmap
@@ -93,8 +90,7 @@ class ArrivalTimeFinder(object):
 		# Flatten the map
 		atmap = self.atmap.ravel()
 		# Try to determine a mask of values to keep
-		try: mask = np.logical_not(atmap.mask)
-		except AttributeError: mask = np.ones(atmap.shape, dtype=bool)
+		mask = np.logical_not(ma.getmaskarray(atmap))
 
 		# Solve the system
 		times = lsmr(matrix[mask], atmap[mask], **itargs)[0]
