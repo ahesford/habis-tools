@@ -3,6 +3,8 @@
 import sys, itertools, numpy as np
 import multiprocessing, Queue
 
+from numpy import ma
+
 from itertools import izip
 
 from pycwp import process, cutil
@@ -351,18 +353,27 @@ def atimesEngine(config):
 		if np.any(delays < 0):
 			raise ValueError('Negative delays exist, but are non-phyiscal')
 
-		if usediag:
-			# Skip optimization in favor of matrix diagonal
-			times.append(np.diag(delays))
-			continue
-
 		if maskoutliers: delays = cutil.mask_outliers(delays)
 		if symmetrize: delays = 0.5 * (delays + delays.T)
 
 		# Prepare the arrival-time finder
 		atf = trilateration.ArrivalTimeFinder(delays)
-		# Compute the times for this data file and add to the result list
-		times.append(atf.lsmr())
+		if not usediag:
+			# Compute the optimized times for this data file
+			optimes = atf.lsmr()
+		elif maskoutliers:
+			# Preserve any masked entries
+			optimes = ma.diag(delays)
+			# Replace masked diagonals with optimized times
+			mask = ma.getmaskarray(optimes)
+			if np.any(mask):
+				rtimes = atf.lsmr()
+				optimes = np.where(mask, rtimes, optimes)
+		else:
+			# Just take the diagonal if values are not masked
+			optimes = np.diag(delays)
+
+		times.append(optimes)
 
 	# Save the output as a text file
 	# Each data file gets a column
