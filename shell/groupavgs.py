@@ -169,10 +169,13 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0):
 		ref = alignedsum(avgs, osamp, False)
 		ref /= np.max(ref.envelope())
 
-		# Just store average, or shift out the apparent time origin
-		if regress is None:
-			averages[gidx] = ref if not offset else ref.shift(offset)
-		else: averages[gidx] = ref.shift(offset-ref.zerotime(regress))
+		# Shift the reference according to preferences
+		if regress:
+			ref = ref.shift(offset - ref.zerotime(regress))
+		elif offset:
+			ref = ref.shift(offset)
+
+		averages[gidx] = ref
 
 	return averages
 
@@ -259,7 +262,7 @@ def averageEngine(config):
 			avg /= np.max(avg.envelope())
 			if regress:
 				avg = avg.shift(offset-avg.zerotime(regress))
-			else if offset:
+			elif offset:
 				avg = avg.shift(offset)
 			avg.store(outfile)
 
