@@ -112,7 +112,7 @@ def alignedsum(signals, osamp, scale=True):
 	return wsum
 
 
-def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0):
+def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0, window=None):
 	'''
 	Subdivide, along receive channels, the work of groupavg() among
 	nproc processes to compute average responses for every transmit-receive
@@ -128,6 +128,9 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0):
 	the average. If regress is None, the waveform will simply be shifted by
 	the offset. If regress specifies regression parameters, the
 	regression-shifted waveform will be shifted by offset.
+
+	If window is not None, it should be the second argument to cropper()
+	and will be used to window the shifted averages.
 	'''
 	# Grab the receive channels to be distributed
 	rxidx = WaveformSet.fromfile(infile).rxidx
@@ -175,9 +178,24 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0):
 		elif offset:
 			ref = ref.shift(offset)
 
-		averages[gidx] = ref
+		averages[gidx] = cropper(ref, window)
 
 	return averages
+
+
+def cropper(sig, window):
+	'''
+	Window the provided signal by the (start, length, [tailwidth]) window.
+	The optional parameter tailwidth specifies the half-width of a Hann
+	window used to roll off the edges inside the hard-crop window.
+
+	If window is None, just return the signal.
+	'''
+	if window is None: return sig
+
+	try: tails = np.hanning(2 * window[2])
+	except IndexError: tails = None
+	return sig.window(window[:2], tails)
 
 
 def averageEngine(config):
@@ -244,6 +262,16 @@ def averageEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
+		window = config.getlist(avgsect, 'window',
+				mapper=int, failfunc=lambda:None)
+		if 3 < len(window) < 2:
+			err = 'Key window does not contain proper parameters'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Invalid specification of optional window in [%s]' % avgsect
+		raise HabisConfigError.fromException(err, e)
+
+	try:
 		grouplen = config.getint(avgsect, 'grouplen')
 	except Exception as e:
 		err = 'Invalid specification of grouplen in [%s]' % avgsect
@@ -251,7 +279,7 @@ def averageEngine(config):
 
 	for datafile, grpformat, outfile in zip(datafiles, grpformats, outfiles):
 		print 'Computing average responses for data file', datafile
-		avgs = mpgroupavg(datafile, grouplen, nproc, osamp, regress, offset)
+		avgs = mpgroupavg(datafile, grouplen, nproc, osamp, regress, offset, window)
 		if grpformat:
 			# Save per-group averages if desired
 			for gidx, avg in avgs.iteritems():
@@ -264,7 +292,7 @@ def averageEngine(config):
 				avg = avg.shift(offset-avg.zerotime(regress))
 			elif offset:
 				avg = avg.shift(offset)
-			avg.store(outfile)
+			cropper(avg, window).store(outfile)
 
 
 if __name__ == '__main__':
