@@ -112,7 +112,7 @@ def alignedsum(signals, osamp, scale=True):
 	return wsum
 
 
-def mpgroupavg(infile, grouplen, nproc, osamp, regress=None):
+def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0):
 	'''
 	Subdivide, along receive channels, the work of groupavg() among
 	nproc processes to compute average responses for every transmit-receive
@@ -123,6 +123,11 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None):
 	be used to determine the phase-angle slope. The waveform will be
 	shifted so the slope is near zero. If regress is None, do not shift
 	averages waveforms from their arbitrary positions.
+
+	The offset parameter specifies an additional shift to be imparted to
+	the average. If regress is None, the waveform will simply be shifted by
+	the offset. If regress specifies regression parameters, the
+	regression-shifted waveform will be shifted by offset.
 	'''
 	# Grab the receive channels to be distributed
 	rxidx = WaveformSet.fromfile(infile).rxidx
@@ -165,8 +170,9 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None):
 		ref /= np.max(ref.envelope())
 
 		# Just store average, or shift out the apparent time origin
-		if regress is None: averages[gidx] = ref
-		else: averages[gidx] = ref.shift(-ref.zerotime(regress))
+		if regress is None:
+			averages[gidx] = ref if not offset else ref.shift(offset)
+		else: averages[gidx] = ref.shift(offset-ref.zerotime(regress))
 
 	return averages
 
@@ -177,27 +183,28 @@ def averageEngine(config):
 	habis.formats.WaveformSet stored in a file and then compute average
 	responses for successive groups of contiguous blocks of channels.
 	'''
+	avgsect = 'average'
 	try:
-		datafiles = config.getlist('average', 'datafile')
+		datafiles = config.getlist(avgsect, 'datafile')
 		if len(datafiles) < 1:
 			err = 'Key datafile exists but contains no values'
 			raise HabisConfigError(err)
 	except Exception as e:
-		err = 'Configuration must specify datafile in [average]'
+		err = 'Configuration must specify datafile in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		grpformats = config.getlist('average', 'grpformat',
+		grpformats = config.getlist(avgsect, 'grpformat',
 				failfunc=lambda: [''] * len(datafiles))
 	except Exception as e:
-		err = 'Invalid specification of optional grpformat in [average]'
+		err = 'Invalid specification of optional grpformat in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		outfiles = config.getlist('average', 'outfile',
+		outfiles = config.getlist(avgsect, 'outfile',
 				failfunc=lambda: [''] * len(datafiles))
 	except Exception as e:
-		err = 'Invalid specification of optional outfile in [average]'
+		err = 'Invalid specification of optional outfile in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	if not (len(outfiles) == len(datafiles) == len(grpformats)):
@@ -205,9 +212,9 @@ def averageEngine(config):
 		raise HabisConfigError(err)
 
 	try:
-		osamp = config.getint('average', 'osamp')
+		osamp = config.getint(avgsect, 'osamp')
 	except Exception as e:
-		err = 'Invalid specification of osamp in [average]'
+		err = 'Invalid specification of osamp in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -218,19 +225,25 @@ def averageEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		regress = config.getlist('average', 'regress',
+		regress = config.getlist(avgsect, 'regress',
 				mapper=int, failfunc=lambda: None)
 		if len(regress) != 2:
 			err = 'Key regress does not contain proper parameters'
 			raise HabisConfigError(err)
 	except Exception as e:
-		err = 'Invalid specification of optional regress in [average]'
+		err = 'Invalid specification of optional regress in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		grouplen = config.getint('average', 'grouplen')
+		offset = config.getint(avgsect, 'offset', failfunc=lambda: 0)
 	except Exception as e:
-		err = 'Invalid specification of grouplen in [average]'
+		err = 'Invalid specification of optional offset in [%s]' % avgsect
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		grouplen = config.getint(avgsect, 'grouplen')
+	except Exception as e:
+		err = 'Invalid specification of grouplen in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	for datafile, grpformat, outfile in zip(datafiles, grpformats, outfiles):
@@ -244,7 +257,10 @@ def averageEngine(config):
 			# Save whole-set averages if desired
 			avg = alignedsum(avgs.itervalues(), osamp, False)
 			avg /= np.max(avg.envelope())
-			if regress: avg = avg.shift(-avg.zerotime(regress))
+			if regress:
+				avg = avg.shift(offset-avg.zerotime(regress))
+			else if offset:
+				avg = avg.shift(offset)
 			avg.store(outfile)
 
 
