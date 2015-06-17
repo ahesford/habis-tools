@@ -235,7 +235,7 @@ def averageEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		offset = config.getint(avgsect, 'offset', failfunc=lambda: 0)
+		offset = config.getfloat(avgsect, 'offset', failfunc=lambda: 0)
 	except Exception as e:
 		err = 'Invalid specification of optional offset in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
@@ -248,7 +248,7 @@ def averageEngine(config):
 
 	for datafile, grpformat, outfile in zip(datafiles, grpformats, outfiles):
 		print 'Computing average responses for data file', datafile
-		avgs = mpgroupavg(datafile, grouplen, nproc, osamp, regress)
+		avgs = mpgroupavg(datafile, grouplen, nproc, osamp, regress, offset)
 		if grpformat:
 			# Save per-group averages if desired
 			for gidx, avg in avgs.iteritems():
