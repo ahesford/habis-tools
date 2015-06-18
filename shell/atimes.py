@@ -142,6 +142,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  unspecified, they are populated by sorted(datafile.rxidx) and
 	  sorted(datafile.txidx), respectively.
 
+	* compenv: If True, delay analysis will proceed on signal and reference
+	  envelopes. If false, delay analysis uses the original signals.
+
 	* queue: If not none, the return list is passed as an argument to
 	  queue.put().
 	'''
@@ -154,6 +157,10 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	if rxelts is None: rxelts = sorted(data.rxidx)
 	txelts = kwargs.get('txelts', None)
 	if txelts is None: txelts = sorted(data.txidx)
+
+	# Use envelopes for delay analysis if desired
+	compenv = kwargs.get('compenv', False)
+	if compenv: ref = ref.envelope()
 
 	t, r = len(txelts), len(rxelts)
 
@@ -189,6 +196,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 				exd = 0.5 * (nearmap[tid] + nearmap[rid])
 				ctr, _, width, _ = min(pks, key=lambda pk: abs(pk[0] - exd))
 				sig = sig.window((ctr - width, 2 * width))
+		if compenv: sig = sig.envelope()
 		# Compute the delay (may be negative)
 		result.append((idx, sig.delay(ref, osamp)))
 
@@ -205,23 +213,24 @@ def atimesEngine(config):
 	times. Multipath arrival times are computed as the maximum of
 	cross-correlation with a reference pulse, plus some constant offset.
 	'''
+	asec = 'atimes' 
 	try:
 		# Read the list of data files
-		datafiles = config.getlist('atimes', 'datafile')
+		datafiles = config.getlist(asec, 'datafile')
 		if len(datafiles) < 1:
 			err = 'Key datafile present, but contains no records'
 			raise HabisConfigError(err)
 	except Exception as e:
-		err = 'Configuration must specify a datafile in [atimes]'
+		err = 'Configuration must specify a datafile in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	# Read an optional list of delay files
 	# Default delay files are empty (no files)
 	try:
-		delayfiles = config.getlist('atimes', 'delayfile',
+		delayfiles = config.getlist(asec, 'delayfile',
 				failfunc=lambda: [''] * len(datafiles))
 	except Exception as e:
-		err = 'Invalid specification of optional delayfile in [atimes]'
+		err = 'Invalid specification of optional delayfile in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	# Make sure the delayfile and datafile counts match
@@ -231,17 +240,17 @@ def atimesEngine(config):
 
 	try:
 		# Grab the reference and output files
-		reffile = config.get('atimes', 'reffile')
-		outfile = config.get('atimes', 'outfile')
+		reffile = config.get(asec, 'reffile')
+		outfile = config.get(asec, 'outfile')
 	except Exception as e:
-		err = 'Configuration must specify reffile and outfile in [atimes]'
+		err = 'Configuration must specify reffile and outfile in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the oversampling rate
-		osamp = config.getint('atimes', 'osamp')
+		osamp = config.getint(asec, 'osamp')
 	except Exception as e:
-		err = 'Configuration must specify osamp in [atimes]'
+		err = 'Configuration must specify osamp in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -262,26 +271,26 @@ def atimesEngine(config):
 
 	try:
 		# Determine the range of elements to use; default to all (as None)
-		txelts = config.getrange('atimes', 'txelts', failfunc=lambda: None)
-		rxelts = config.getrange('atimes', 'rxelts', failfunc=lambda: None)
+		txelts = config.getrange(asec, 'txelts', failfunc=lambda: None)
+		rxelts = config.getrange(asec, 'rxelts', failfunc=lambda: None)
 	except Exception as e:
-		err = 'Invalid specification of optional txelts, rxelts in [atimes]'
+		err = 'Invalid specification of optional txelts, rxelts in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine a temporal window to apply before finding delays
-		window = config.getlist('atimes', 'window',
+		window = config.getlist(asec, 'window',
 				mapper=int, failfunc=lambda: None)
 		if window and (len(window) < 2 or len(window) > 3):
 			err = 'Window does not specify appropriate parameters'
 			raise HabisConfigError(err)
 	except Exception as e:
-		err = 'Invalid specification of optional window in [atimes]'
+		err = 'Invalid specification of optional window in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine peak-selection criteria
-		peaks = config.getlist('atimes', 'peak', failfunc=lambda: None)
+		peaks = config.getlist(asec, 'peak', failfunc=lambda: None)
 		if peaks:
 			if len(peaks) < 2 or len(peaks) > 5:
 				err = 'Peak does not specify appropriate parameters'
@@ -299,12 +308,13 @@ def atimesEngine(config):
 				peakargs['prommode'] = peaks[4]
 			peaks = peakargs
 	except Exception as e:
-		err = 'Invalid specification of optional peak in [atimes]'
+		err = 'Invalid specification of optional peak in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
-	symmetrize = config.getboolean('atimes', 'symmetrize', failfunc=lambda: False)
-	usediag = config.getboolean('atimes', 'usediag', failfunc=lambda: False)
-	maskoutliers = config.getboolean('atimes', 'maskoutliers', failfunc=lambda: False)
+	symmetrize = config.getboolean(asec, 'symmetrize', failfunc=lambda: False)
+	usediag = config.getboolean(asec, 'usediag', failfunc=lambda: False)
+	maskoutliers = config.getboolean(asec, 'maskoutliers', failfunc=lambda: False)
+	compenv = config.getboolean(asec, 'compenv', failfunc=lambda: False)
 
 	# Determine the shape of the multipath data
 	wset = WaveformSet.fromfile(datafiles[0])
@@ -343,7 +353,8 @@ def atimesEngine(config):
 		except TypeError: pass
 
 		delays = finddelays(dfile, dlayfile, nproc, reffile, osamp,
-				window=window, peaks=peaks, rxelts=rxelts, txelts=txelts)
+				compenv=compenv, window=window, 
+				peaks=peaks, rxelts=rxelts, txelts=txelts)
 
 		# Convert delays to arrival times
 		delays = delays * dt + t0
