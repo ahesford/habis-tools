@@ -624,8 +624,8 @@ class Waveform(object):
 			csig = fft.irfft(ssig, n * l2)[:n*l]
 		else:
 			nex = n * l2
-			isig = np.zeros((nex,), dtype=csig.dtype)
-			kmax, kmin = int((nex + 1) / 2), -int(nex / 2)
+			isig = np.zeros((nex,), dtype=ssig.dtype)
+			kmax, kmin = int((l2 + 1) / 2), -int(l2 / 2)
 			isig[:kmax] = ssig[:kmax]
 			isig[kmin:] = ssig[kmin:]
 			csig = fft.ifft(isig, nex)[:n*l]
