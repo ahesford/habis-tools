@@ -609,6 +609,30 @@ class Waveform(object):
 		return Waveform(signal=fftfunc(sig, n=window[1]))
 
 
+	def oversample(self, n):
+		'''
+		Oversample the waveform by an (integer) factor n.
+		'''
+		s, l = self.datawin
+		l2 = cutil.ceilpow2(l)
+
+		# Compute the FFT of the (padded) data window
+		ssig = self.fft((s, l2)).getsignal()
+
+		if self.isReal:
+			# R2C IDFT handles padding automatically
+			csig = fft.irfft(ssig, n * l2)[:n*l]
+		else:
+			nex = n * l2
+			isig = np.zeros((nex,), dtype=csig.dtype)
+			kmax, kmin = int((nex + 1) / 2), -int(nex / 2)
+			isig[:kmax] = ssig[:kmax]
+			isig[kmin:] = ssig[kmin:]
+			csig = fft.ifft(isig, nex)[:n*l]
+
+		return Waveform(n * self.nsamp, n * csig, n * s)
+
+
 	def aligned(self, ref, **kwargs):
 		'''
 		Return a copy of the signal aligned to the reference
