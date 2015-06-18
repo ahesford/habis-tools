@@ -544,76 +544,55 @@ class Waveform(object):
 		return Waveform(self.nsamp, data[ostart:oend], datawin[0] + ostart)
 
 
-	def envelope(self, window=None):
+	def envelope(self):
 		'''
-		Return the envelope, as the magnitude of the Hilbert transform,
-		of the waveform over the (start, length) signal window. If
-		window is None, (0, self.nsamp) is assumed.
+		Return the envelope (the magnitude of the Hilbert transform) of
+		the waveform as a new Waveform object.
 		'''
-		if window is None: window = (0, self.nsamp)
-
 		if not self.isReal:
 			raise TypeError('Envelope only works for real-valued signals')
 
-		try:
-			# Find overlap between the data and output windows
-			ostart, istart, wlen = cutil.overlap(window, self.datawin)
-		except TypeError:
-			# There is no overlap, the signal window and transform are 0
-			return np.zeros((window[1],), dtype=self.dtype)
-
-		oend, iend = ostart + wlen, istart + wlen
-
-		if ostart < 1:
-			# If the signal window starts before sample 1,
-			# just use built-in Hilbert padding to expand
-			sig = self._data[istart:iend]
-			return np.abs(hilbert(sig, N=window[1]))
-		else:
-			# Otherwise, the signal window starts with some zeros
-			# A new array must be created to hold the padding
-			sig = np.zeros((window[1],), dtype=self.dtype)
-			# Populate the output window with the envelope
-			sig[ostart:oend] = np.abs(hilbert(self._data[istart:iend]))
-			return sig
+		# Find the envelope in the data window
+		env = np.abs(hilbert(self._data))
+		# Encapsulate in a new Waveform object
+		return Waveform(self.nsamp, env, self._datastart)
 
 
-	def fft(self, window=None, real=None, inverse=False):
+	def ifft(self, n=None, real=False):
+		'''
+		Returns the inverse FFT of the waveform. If real is True, the
+		function numpy.fft.irfft is used; otherwise, numpy.fft.ifft is
+		used. The value n has the same meaning as in these functions.
+		'''
+		fftfunc = fft.irfft if real else fft.ifft
+		sig = fftfunc(self.getsignal(forcecopy=False), n)
+		return Waveform(signal=sig)
+
+
+	def fft(self, window=None, real=None):
 		'''
 		Returns the FFT of a portion of the waveform defined by the
 		2-tuple window = (start, length). If window is not provided,
 		(0, self.nsamp) is assumed.
 
-		If real is True, an R2C DFT is used. (Performing an R2C DFT on a
-		complex-valued signal discards the imaginary part of the signal
-		before transforming.) If real is False, a C2C DFT is used. If
-		real is None, it is assumed False if the signal is of a complex
-		type and True otherwise.
-
-		If inverse is True, an inverse transform is computed. In this
-		case, when real is True, a C2R inverse DFT is used. For all
-		other values, a C2C inverse DFT is used.
+		If real is True, an R2C DFT is used. (Performing an R2C DFT on
+		a complex-valued signal discards the imaginary part of the
+		signal before transforming.) If real is False, a C2C DFT is
+		used. If real is None, it is assumed False if the signal is of
+		a complex type and True otherwise.
 		'''
 		if window is None: window = (0, self.nsamp)
-
-		# If real is not specified, determine from the waveform data type
 		if real is None: real = self.isReal
 
 		# Choose the right function
-		fftfunc = {
-				(True, False): fft.rfft,
-				(True, True): fft.irfft,
-				(False, False): fft.fft,
-				(False, True): fft.ifft
-			}[(real, inverse)]
+		fftfunc = fft.rfft if real else fft.fft
 
 		try:
 			# Find overlap between the data and output windows
 			ostart, istart, wlen = cutil.overlap(window, self.datawin)
 		except TypeError:
 			# There is no overlap, the signal window and its FFT are 0
-			# Take an empty transform to get the right output form
-			return fftfunc(np.array([], dtype=self.dtype), n=window[1])
+			return Waveform(window[1])
 
 		oend, iend = ostart + wlen, istart + wlen
 
@@ -623,11 +602,11 @@ class Waveform(object):
 			sig = self._data[istart:iend]
 		else:
 			# Otherwise, the signal window starts with some zeros
-			# An intermediate array must be created
+			# An intermediate copy must be created
 			sig = np.zeros((oend,), dtype=self.dtype)
 			sig[ostart:oend] = self._data[istart:iend]
 
-		return fftfunc(sig, n=window[1])
+		return Waveform(signal=fftfunc(sig, n=window[1]))
 
 
 	def aligned(self, ref, **kwargs):
@@ -686,7 +665,7 @@ class Waveform(object):
 
 		n = self.nsamp
 
-		fsig = self.fft(window=(0, n), real=r2c)
+		fsig = self.fft().getsignal(forcecopy=False)
 		nsig = len(fsig)
 
 		# Build the spectral indices
@@ -758,7 +737,8 @@ class Waveform(object):
 		# Compute positive DFT frequencies
 		freqs = -2.0 * math.pi * np.arange(band[0], band[1]) / self.nsamp
 		# Compute the unwrapped phase angle in the band of interest
-		ang = np.unwrap(np.angle(self.fft())[band[0]:band[1]])
+		sft = self.fft().getsignal((band[0], band[1] - band[0]), forcecopy=False)
+		ang = np.unwrap(np.angle(sft))
 		# Perform the regression (ignore all but slope)
 		slope = linregress(freqs, ang)[0]
 		return slope
@@ -809,8 +789,9 @@ class Waveform(object):
 		r2c = self.isReal and ref.isReal
 
 		# Convolve the data windows spectrally
-		cfsig = (self.fft((sstart, npad), r2c)
-				* np.conj(ref.fft((rstart, npad), r2c)))
+		sft = self.fft((sstart, npad), r2c).getsignal(forcecopy=False)
+		rft = ref.fft((rstart, npad), r2c).getsignal(forcecopy=False)
+		cfsig = (sft * np.conj(rft))
 
 		if r2c:
 			# Interpolation and IDFT is simple for real signals
@@ -896,7 +877,8 @@ class Waveform(object):
 		'''
 		# Find peaks in the data window
 		start, length = self.datawin
-		peaks = cutil.findpeaks(self.envelope((start, length)), *args, **kwargs)
+		envelope = self.envelope().getsignal((start, length), forcecopy=False)
+		peaks = cutil.findpeaks(envelope, *args, **kwargs)
 		# Map indices to full sample window
 		return [(v[0] + start, v[1], v[2], v[3]) for v in peaks]
 
@@ -933,7 +915,7 @@ class Waveform(object):
 		n = self.nsamp
 
 		# Transform the signal and apply the frequency window
-		fsig = self.fft(window=(0, n), real=r2c)
+		fsig = self.fft().getsignal(forcecopy=False)
 
 		if r2c:
 			fmax = len(fsig)
