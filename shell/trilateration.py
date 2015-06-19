@@ -16,7 +16,7 @@ def usage(progname):
 
 def getreflpos(args):
 	'''
-	For args = (times, elocs, guess, rad, c, varc), with a list of N
+	For args = (times, elocs, guess, rad, c, varc, tol), with a list of N
 	round-trip arrival times and an N-by-3 matrix elocs of reference
 	element locatations, use habis.trilateration.MultiPointTrilateration to
 	determine, starting with the provided 3-dimensional guess position, the
@@ -25,14 +25,17 @@ def getreflpos(args):
 	If varc is True, the MultiPointTrilateration is allowed to recover
 	variable sound speed in addition to element position.
 
+	The argument tol specifies the convergence tolerance passed to
+	MultiPointTrilateration.newton.
+
 	The return value is a 4-dimensional vector in which the first three
 	dimensions are the element position and the last dimension is the
 	recovered sound speed. If varc is False, the fourth dimension just
 	copies the input parameter c.
 	'''
-	times, elemlocs, guess, rad, c, varc = args
+	times, elemlocs, guess, rad, c, varc, tol = args
 	t = trilateration.MultiPointTrilateration(elemlocs, rad, c)
-	rval = t.newton(times, pos=guess, varc=varc)
+	rval = t.newton(times, pos=guess, varc=varc, tol=tol)
 	# Unpack the recovered solution
 	pos, c = rval if varc else (rval, c)
 	# Expand the position to include sound speed
@@ -105,6 +108,13 @@ def trilaterationEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
+		# Grab the convergence tolerance
+		tol = config.getfloat(tsection, 'tolerance', failfunc=lambda: 1e-6)
+	except Exception as e:
+		err = 'Invalid specification of optional tolerance in [%s]' % tsection
+		raise HabisConfigError.fromException(err, e)
+
+	try:
 		# Determine whether variable sound speeds are allowed
 		varc = config.getboolean(tsection, 'varc', failfunc=lambda: False)
 	except Exception as e:
@@ -132,7 +142,7 @@ def trilaterationEngine(config):
 	# Compute the reflector positions in parallel
 	# Use async calls to correctly handle keyboard interrupts
 	result = pool.map_async(getreflpos,
-			((t, celts, g[:-1], radius, g[-1], varc) 
+			((t, celts, g[:-1], radius, g[-1], varc, tol) 
 				for t, g in izip(ctimes.T, guess)))
 	while True:
 		try:
@@ -154,7 +164,7 @@ def trilaterationEngine(config):
 		# Create and save a refined estimate of the reflector locations
 		# Strip out the sound-speed guess from the reflector position
 		pltri = trilateration.PlaneTrilateration(reflectors[:,:-1], radius, c)
-		relements = pltri.newton(ctimes, pos=celts)
+		relements = pltri.newton(ctimes, pos=celts, tol=tol)
 		np.savetxt(ofile, relements, fmt='%16.8f')
 
 

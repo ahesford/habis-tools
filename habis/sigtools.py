@@ -587,24 +587,18 @@ class Waveform(object):
 		# Choose the right function
 		fftfunc = fft.rfft if real else fft.fft
 
-		try:
-			# Find overlap between the data and output windows
-			ostart, istart, wlen = cutil.overlap(window, self.datawin)
-		except TypeError:
-			# There is no overlap, the signal window and its FFT are 0
+		dstart, dlength = self.datawin
+		dend = dstart + dlength
+
+		# Short-circuit FFT if data and FFT windows don't overlap
+		if (dstart >= window[0] + window[1]) or (dend <= window[0]):
 			return Waveform(window[1])
 
-		oend, iend = ostart + wlen, istart + wlen
-
-		if ostart < 1:
-			# If the signal window starts before sample 1,
-			# no need exists to pre-pad the FFT input
-			sig = self._data[istart:iend]
-		else:
-			# Otherwise, the signal window starts with some zeros
-			# An intermediate copy must be created
-			sig = np.zeros((oend,), dtype=self.dtype)
-			sig[ostart:oend] = self._data[istart:iend]
+		# Because FFT can pad the end, no need to read past data window
+		acqlen = max(0, min(dend - window[0], window[1]))
+		acqwin = (window[0], acqlen)
+		# Grab the signal without copying of possible
+		sig = self.getsignal(acqwin, forcecopy=False)
 
 		return Waveform(signal=fftfunc(sig, n=window[1]))
 
