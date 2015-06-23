@@ -143,7 +143,7 @@ def mpwavefilt(infile, filt, nproc, outfile, nsamp=None):
 			# Assign a meaningful process name
 			procname = process.procname(i)
 			# Stride the recieve channels
-			args = (infile, rxidx[i::nproc], filt, outfile, lock)
+			args = (infile, rxidx[i::nproc], filt, outfile, lock, nsamp)
 			pool.addtask(target=wavefilt, name=procname, args=args)
 
 		pool.start()
