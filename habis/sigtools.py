@@ -936,7 +936,7 @@ class Waveform(object):
 		fsig = self.fft().getsignal(forcecopy=False)
 
 		if r2c:
-			fmax = len(fsig)
+			fmax = len(fsig) + 1
 		else:
 			fmax =  int(n + 1) / 2
 			fmin = -int(n / 2)
