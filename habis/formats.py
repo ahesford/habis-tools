@@ -326,7 +326,7 @@ class WaveformSet(object):
 
 
 	@staticmethod
-	def packtxlist(txlist):
+	def packtxlist(txidx):
 		'''
 		Encode the provided transmit-index list into bytes suitable for
 		writing after a global file header in WAVE version (1,0) files.
