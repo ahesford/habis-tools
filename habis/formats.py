@@ -197,6 +197,19 @@ class WaveformSet(object):
 			F2 = 'float16', F4 = 'float32', F8 = 'float64',
 			C4 = 'complex64', C8 = 'complex128')
 
+	@staticmethod
+	def _verify_file_version(version):
+		'''
+		Ensure that the provided version matches one supported by the
+		class. If not, raise a ValueError. If so, just return the
+		version tuple.
+		'''
+		major, minor = version
+		if major != 1: raise ValueError('Major version must be 1')
+		if 0 != minor != 1: raise ValueError('Minor version must be 0 or 1')
+		return major, minor
+
+
 	@classmethod
 	def makercvhdr(cls, idx, crd, win):
 		'''
@@ -213,15 +226,17 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def fromfile(cls, f):
+	def fromfile(cls, f, *args, **kwargs):
 		'''
 		Create a new WaveformSet object and use load() to populate the
 		object with the contents of the specified file (a file-like
 		object or a string naming the file).
+
+		Extra args and kwargs are passed to the load() method.
 		'''
 		# Create an empty set, then populate from the file
 		wset = cls([])
-		wset.load(f)
+		wset.load(f, *args, **kwargs)
 		return wset
 
 
@@ -250,17 +265,12 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def packfilehdr(cls, dtype, nchans, nsamp, f2c=0, txidx=None, ver=(1,0)):
+	def packfilehdr(cls, dtype, nchans, nsamp, f2c=0, ver=(1,0)):
 		'''
 		Pack the Numpy dtype, built-in scalar type object, or type
 		name; a channel count nchans = (nrx, ntx); an acquisition
 		sample count nsamp; and a fire-to-capture delay f2c into a
 		header string for a waveform-set file.
-
-		If txidx is not None, it should be a sequence of length ntx
-		that provides the 0-based integer indices of transmit channels.
-		The indices will be converted to 1-based uint32 indices and
-		appended to the header string to form the complete header.
 
 		The version number may be specifed as ver = (major, minor).
 		'''
@@ -272,23 +282,7 @@ class WaveformSet(object):
 		# Encode the header information
 		hdr = struct.pack(cls.hdrfmt, 'WAVE', major, minor, 
 				fmtstr, f2c, nsamp, nrx, ntx)
-		# Without a transmit index list, return the header
-		if txidx is None: return hdr
-
-		try:
-			if txidx.dtype != np.dtype('uint32'):
-				raise TypeError('Transmit-index list must be a uint32 ndarray')
-		except (TypeError, AttributeError):
-			txidx = np.array(txidx, dtype=np.uint32)
-
-		if txidx.ndim != 1 or len(txidx) != ntx:
-			raise ValueError('Transmit-index list must be of shape (ntx,)')
-
-		# Encode the transmit-index list in 1-based form
-		txhdr = (txidx + np.array(1, dtype=np.uint32)).tobytes()
-
-		# Concatenate the header and transmit index
-		return hdr + txhdr
+		return hdr
 
 
 	@classmethod
@@ -301,39 +295,24 @@ class WaveformSet(object):
 			f2c, fire-to-capture delay in 20-MHz samples
 			nsamp, total number of 20-MHz samples captured
 			version, tuple indicating file version (major, minor)
-			txidx, 0-based transmit-index list (Numpy ndarray, optional)
 
-		The provided header may be a file-like object or a string.
-
-		If header is a string, its length must be exactly one of:
-
-		1. struct.calcsize(cls.hdrfmt)
-		2. Case (1) + ntx * np.dtype('uint32').itemsize
-
-		In case (1), the returned txidx will be None. In case (2), the
-		transmit-index list will be populated.
-
-		If header is a file-like object, struct.calcsize(cls.hdrfmt)
-		bytes will be read() from the current position to parse the
-		header fields. Next, ntx * np.dtype('uint32').itemsize bytes
-		will be read to populate the txidx. Bytes after the
-		transmit-index list will be ignored.
-
-		A file-like object must allow reading of either exactly as many
-		bytes as required to encode cls.hdrfmt (in which case txidx
-		will be None), or at least as many bytes as required to encode
-		cls.hdrfmt and the txidx list. Partial reads of txidx are not
-		supported.
+		The provided header may be a file-like object or a string. If
+		header is a string, it must have a length exactly equal to
+		struct.calcsize(cls.hdrfmt). If header is a file-like object,
+		enough bytes will by read() from the current position to parse
+		the header fields. Bytes after the header will be ignored.
 		'''
 		# Try to read the bytes, or pull them from the provided string
 		hdrbytes = struct.calcsize(cls.hdrfmt)
 		try: hstr = header.read(hdrbytes)
-		except AttributeError: hstr = header[:hdrbytes]
+		except AttributeError: hstr = header
+
+		if len(hstr) != hdrbytes: raise ValueError('Inappropriate header length')
 
 		unpacked = struct.unpack(cls.hdrfmt, hstr)
 
 		if unpacked[0] != 'WAVE':
-			raise ValueError('Header string does not contain waveform set magic number')
+			raise ValueError('Header string does not contain WAVE magic number')
 
 		# Copy the version tuple
 		version = unpacked[1:3]
@@ -343,24 +322,54 @@ class WaveformSet(object):
 		f2c, nsamp = unpacked[4:6]
 		nchans = unpacked[6:8]
 
-		txidx = None
+		return dtype, nchans, f2c, nsamp, version
 
-		# Try to read the txidx bytes, or pull them from the provided string
-		txbytes = nchans[1] * np.dtype('uint32').itemsize
-		try: txstr = header.read(txbytes)
-		except AttributeError: txstr = header[hdrbytes:]
 
-		if len(txstr) != 0:
-			if len(txstr) != txbytes:
-				raise ValueError('Header string contains incomplete transmit-index list')
-			
-			txidx = (np.fromstring(txstr, dtype=np.uint32) 
-					- np.array(1, dtype=np.uint32))
-			
-			if len(txidx) != nchans[1]:
-				raise ValueError('Parsed transmit-index list is missing elements')
+	@staticmethod
+	def packtxlist(txlist):
+		'''
+		Encode the provided transmit-index list into bytes suitable for
+		writing after a global file header in WAVE version (1,0) files.
+		'''
+		try:
+			if txidx.dtype != np.dtype('uint32'):
+				raise TypeError('Transmit-index list must be uint32 ndarray')
+		except (TypeError, AttributeError):
+			txidx = np.array(txidx, dtype=np.uint32)
 
-		return dtype, nchans, f2c, nsamp, version, txidx
+		if txidx.ndim != 1:
+			raise ValueError('Transmit-index list must be a 1-D list')
+
+		# In the header, indices are one-based
+		txhdr = (txidx + np.array(1, dtype=np.uint32)).tobytes()
+		return txhdr
+
+
+	@staticmethod
+	def unpacktxlist(f, ntx):
+		'''
+		Decode a list of ntx transmit indices from the object f, which
+		is either a file-like object or a string. If f is a file-like
+		object, the number of bytes necessary to encode the list is
+		read() from the current position of f. Otherwise, f must be a
+		string of exactly the number of bytes necessary to store the
+		list.
+		'''
+		txbytes = ntx * np.dtype('uint32').itemsize
+		try: txstr = f.read(txbytes)
+		except AttributeError: txtr = f
+
+		if len(txstr) != txbytes:
+			raise ValueError('Could not read encoded transmit-index list')
+
+		# In the header, indices are one-based
+		txidx = (np.fromstring(txstr, dtype=np.uint32)
+				- np.array(1, dtype=np.uint32))
+
+		if len(txidx) != ntx:
+			raise ValueError('Parsed transmit-index list is not the proper size')
+
+		return txidx
 
 
 	@classmethod
@@ -424,6 +433,8 @@ class WaveformSet(object):
 		if append and hdronly:
 			raise ValueError('At most one of hdronly and append may be True')
 
+		major, minor = self._verify_file_version(ver)
+
 		# Open the file if it is not open
 		if isinstance(f, basestring):
 			f = open(f, mode=('wb' if not append else 'ab'))
@@ -431,10 +442,12 @@ class WaveformSet(object):
 		if not append:
 			# Write the file-level header
 			nchans = (self.nrx, self.ntx)
-			hdr = type(self).packfilehdr(self.dtype, nchans,
-					self.nsamp, self.f2c, self.txidx, ver)
+			hdr = type(self).packfilehdr(self.dtype,
+					nchans, self.nsamp, self.f2c, ver)
 			# Write the header
 			f.write(hdr)
+			# If the version number is (1, 0), write the transmit indices
+			if minor == 0: f.write(type(self).packtxlist(self.txidx))
 
 			# Skip writing waveform records if hdronly is set
 			if hdronly: return
@@ -448,7 +461,7 @@ class WaveformSet(object):
 			waveforms.tofile(f)
 
 
-	def load(self, f):
+	def load(self, f, ver=None):
 		'''
 		Associate the WaveformSet object with the data in f, a
 		file-like object or string specifying a file name. If f is a
@@ -462,6 +475,9 @@ class WaveformSet(object):
 		Each block of waveform data is memory-mapped from the source
 		file. This mapping is copy-on-write; changes do not persist.
 
+		If ver is not None, it must be a (major, minor) that will
+		override the version number stored in the file header.
+
 		** NOTE **
 		In the file, each receive channel has an associated transmit
 		index. The transmit index is 1-based in the file, but is
@@ -472,18 +488,24 @@ class WaveformSet(object):
 			f = open(f, mode='rb')
 
 		# Parse the file header
-		dtype, (nrx, ntx), f2c, nsamp, ver, txidx = type(self).unpackfilehdr(f)
+		dtype, (nrx, ntx), f2c, nsamp, fver = type(self).unpackfilehdr(f)
 
-		if ver != (1, 0):
-			print ver
-			raise ValueError('Loads are only supported on WAVE 1.0 files')
+		# Override the file version if necessary
+		if ver is None: ver = fver
+
+		major, minor = self._verify_file_version(ver)
+
 		if nsamp < 0:
 			raise ValueError('Number of samples in acquisition window must be nonnegative')
 		if f2c < 0:
 			raise ValueError('Fire-to-capture delay must be nonnegative')
-		if txidx is None:
-			if ntx == 0: txidx = []
-			else: raise ValueError('No transmit indices read, but ntx is not zero')
+
+		if minor == 0:
+			# Read the transmit list from the file
+			self.txidx = type(self).unpacktxlist(f, ntx)
+		elif minor == 1:
+			# The transmit list is implicit
+			self.txidx = range(ntx)
 
 		# Clear the record array
 		self.clearall()
@@ -491,9 +513,6 @@ class WaveformSet(object):
 		self.dtype = dtype
 		self.nsamp = nsamp
 		self.f2c = f2c
-
-		# Set the transmit-index map
-		self.txidx = txidx
 
 		# Record the start of the waveform data records in the file
 		fpos = f.tell()

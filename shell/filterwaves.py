@@ -32,8 +32,9 @@ def copyhdr(f, wset, dtype=None, ver=(1,0)):
 
 	# Copy the relevant header fields and write the header
 	nchans = (wset.nrx, wset.ntx)
-	hdr = wset.packfilehdr(dtype, nchans, wset.nsamp, wset.f2c, wset.txidx, ver)
+	hdr = wset.packfilehdr(dtype, nchans, wset.nsamp, wset.f2c, ver)
 	f.write(hdr)
+	if ver[1] == 0: f.write(wset.packtxlist(wset.txidx))
 
 
 def wavefilt(infile, rxchans, filt, outfile, lock=None, nsamp=None):
