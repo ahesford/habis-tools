@@ -414,12 +414,12 @@ class Waveform(object):
 			self._datastart = 0
 			return
 
-		if start < 0:
-			raise ValueError('First sample of data window must be nonnegative')
+		if start < 0 or int(start) != start:
+			raise ValueError('First sample of data window must be a nonnegative integer')
 
 		# Ensure signal is 1-D
 		self._data = dimcompat(signal, 1)
-		self._datastart = start
+		self._datastart = int(start)
 
 		# Increase the length of nsamp if data window is too large
 		length = len(self._data)
