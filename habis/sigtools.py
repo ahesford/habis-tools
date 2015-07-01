@@ -486,7 +486,7 @@ class Waveform(object):
 			# Find the maximum index and value
 			i = self._data.argmax() if mx else self._data.argmin()
 			v = self._data[i]
-		except TypeError: 
+		except TypeError:
 			# If there is no data, the maximum is just 0
 			return (0, 0)
 
@@ -556,6 +556,30 @@ class Waveform(object):
 		env = np.abs(hilbert(self._data))
 		# Encapsulate in a new Waveform object
 		return Waveform(self.nsamp, env, self._datastart)
+
+
+	def specidx(self, n=None, real=None):
+		'''
+		Return the spectral indices, in FFT order, that correspond to
+		the samples of self.fft().
+
+		The parameter n determines the length of the transform window.
+		If n is None, self.nsamp is assumed.
+
+		When the parameter real is True, only positive indices are
+		returned; otherwise, both positive and negative indices are
+		returned. If real is None, self.isReal is assumed.
+		'''
+		if real is None: real = self.isReal
+		if n is None:
+			n = self.nsamp if not real else (int(self.nsamp // 2) + 1)
+
+		# Build the spectral indices
+		kidx = np.arange(n)
+		# Correct negative indices in a C2C transform
+		if not real: kidx[int((n + 1) / 2):] -= n
+
+		return kidx
 
 
 	def ifft(self, n=None, real=False):
@@ -687,9 +711,7 @@ class Waveform(object):
 		nsig = len(fsig)
 
 		# Build the spectral indices
-		kidx = np.arange(nsig)
-		# Correct negative frequencies in a C2C transform
-		if not r2c: kidx[(nsig + 1) / 2:] -= nsig
+		kidx = self.specidx(nsig, r2c)
 
 		# Build the shift operator
 		sh = np.exp(-2j * math.pi * d * kidx / n)
@@ -966,6 +988,23 @@ class Waveform(object):
 		bsig = ifftfunc(fsig, n).astype(dtype)
 
 		return Waveform(self.nsamp, bsig, 0)
+
+
+	def directivity(self, width, theta, fmax):
+		'''
+		Return, as a new waveform, the result of applying to self a
+		spectral directivity factor
+
+			C(w) = exp(-2 * width * sin(theta) * w**2),
+
+		where w = dw * i is the radial frequency for DFT bin i and the
+		bin step size is given by dw = (2 * pi * fmax / self.nsamp).
+		'''
+		# Build the frequencies and correction factor
+		w = (2 * math.pi * fmax / self.nsamp) * self.specidx()
+		corr = np.exp(-2 * width * np.sin(theta) * w**2)
+		sigft = Waveform(signal=self.fft() * corr)
+		return sigft.ifft(real=self.isReal)
 
 
 def dimcompat(sig, ndim=1):
