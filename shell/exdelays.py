@@ -16,21 +16,23 @@ def exdelayEngine(config):
 	estimate the round-trip arrival times from every element to the
 	reflector and back.
 	'''
+	msection = 'measurement'
+	esection = 'exdelays'
 	try:
 		# Try to grab the input and output files
-		eltfiles = config.getlist('exdelays', 'elements')
-		rflfile = config.get('exdelays', 'reflectors')
-		timefile = config.get('exdelays', 'timefile')
+		eltfiles = config.getlist(esection, 'elements')
+		rflfile = config.get(esection, 'reflectors')
+		timefile = config.get(esection, 'timefile')
 	except Exception as e:
-		err = 'Configuration must specify elements, reflectors, and timefile in [exdelays]'
+		err = 'Configuration must specify elements, reflectors and timefile in [%s]' % esection
 		raise HabisConfigError.fromException(err, e)
 
 	# Grab the sound speed and reflector radius
 	try:
-		c = config.getfloat('trilateration', 'c')
-		r = config.getfloat('trilateration', 'radius')
+		c = config.getfloat(msection, 'c')
+		r = config.getfloat(msection, 'radius')
 	except Exception as e: 
-		err = 'Configuration must specify sound speed (c) and radius in [trilateration]'
+		err = 'Configuration must specify c and radius in [%s]' % msection
 		raise HabisConfigError.fromException(err, e)
 
 	# Read the element and reflector positions

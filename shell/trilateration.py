@@ -51,40 +51,47 @@ def trilaterationEngine(config):
 	a set of reflectors followed by estimates of the positions of the
 	hemisphere elements.
 	'''
-	tsection = 'trilateration'
+	tsec = 'trilateration'
+	msec = 'measurement'
 	try:
-		# Try to grab the input files
-		timefiles = config.getlist(tsection, 'timefile')
+		# Try to grab the input time files
+		timefiles = config.getlist(tsec, 'timefile')
 		if len(timefiles) < 1:
 			err = 'Key timefile must contain at least one entry'
 			raise HabisConfigError(err)
-		inelements = config.getlist(tsection, 'inelements')
+	except Exception as e:
+		err = 'Configuration must specify timefile in [%s]' % tsec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Try to grab the nominal element files
+		inelements = config.getlist(tsec, 'inelements')
 		if len(inelements) != len(timefiles):
-			err = 'Key inelements must contain as many entries as timefile'
+			err = 'Key inelements must contain as many entries as timefile list'
 			raise HabisConfigError(err)
 	except Exception as e:
-		err = 'Configuration must specify timefile and inelements in [%s]' % tsection
+		err = 'Configuration must specify inelements in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	# Grab the initial guess for reflector positions
 	try:
-		guessfile = config.get(tsection, 'guessfile')
+		guessfile = config.get(tsec, 'guessfile')
 	except Exception as e:
-		err = 'Configuration must specify guessfile in [%s]' % tsection
+		err = 'Configuration must specify guessfile in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	# Grab the reflector output file
 	try:
-		outreflector = config.get(tsection, 'outreflector')
+		outreflector = config.get(tsec, 'outreflector')
 	except Exception as e:
-		err = 'Configuration must specify outreflector in [%s]' % tsection
+		err = 'Configuration must specify outreflector in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		outelements = config.getlist(tsection, 'outelements',
+		outelements = config.getlist(tsec, 'outelements',
 				failfunc=lambda: [''] * len(timefiles))
 	except Exception as e:
-		err = 'Invalid specification of optional outelements in [%s]' % tsection
+		err = 'Invalid specification of optional outelements in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	if len(outelements) != len(timefiles):
@@ -101,24 +108,24 @@ def trilaterationEngine(config):
 
 	try:
 		# Grab the sound speed and radius
-		c = config.getfloat(tsection, 'c')
-		radius = config.getfloat(tsection, 'radius')
+		c = config.getfloat(msec, 'c')
+		radius = config.getfloat(msec, 'radius')
 	except Exception as e:
-		err = 'Configuration must specify c and radius in [%s]' % tsection
+		err = 'Configuration must specify c and radius in [%s]' % msec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the convergence tolerance
-		tol = config.getfloat(tsection, 'tolerance', failfunc=lambda: 1e-6)
+		tol = config.getfloat(tsec, 'tolerance', failfunc=lambda: 1e-6)
 	except Exception as e:
-		err = 'Invalid specification of optional tolerance in [%s]' % tsection
+		err = 'Invalid specification of optional tolerance in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine whether variable sound speeds are allowed
-		varc = config.getboolean(tsection, 'varc', failfunc=lambda: False)
+		varc = config.getboolean(tsec, 'varc', failfunc=lambda: False)
 	except Exception as e:
-		err = 'Invalid specification of optional varc in [%s]' % tsection
+		err = 'Invalid specification of optional varc in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 

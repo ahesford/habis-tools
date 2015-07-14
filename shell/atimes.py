@@ -214,14 +214,16 @@ def atimesEngine(config):
 	cross-correlation with a reference pulse, plus some constant offset.
 	'''
 	asec = 'atimes' 
+	msec = 'measurement'
+	ssec = 'sampling'
 	try:
 		# Read the list of data files
-		datafiles = config.getlist(asec, 'datafile')
+		datafiles = config.getlist(asec, 'waveset')
 		if len(datafiles) < 1:
-			err = 'Key datafile present, but contains no records'
+			err = 'Key waveset present, but specifies no files'
 			raise HabisConfigError(err)
 	except Exception as e:
-		err = 'Configuration must specify a datafile in [%s]' % asec
+		err = 'Configuration must specify waveset in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	# Read an optional list of delay files
@@ -239,18 +241,17 @@ def atimesEngine(config):
 		raise HabisConfigError(err)
 
 	try:
-		# Grab the reference and output files
-		reffile = config.get(asec, 'reffile')
-		outfile = config.get(asec, 'outfile')
+		# Grab the reference file
+		reffile = config.get(msec, 'reference')
 	except Exception as e:
-		err = 'Configuration must specify reffile and outfile in [%s]' % asec
+		err = 'Configuration must specify reference in [%s]' % msec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		# Grab the oversampling rate
-		osamp = config.getint(asec, 'osamp')
+		# Grab the output file
+		outfile = config.get(asec, 'outfile')
 	except Exception as e:
-		err = 'Configuration must specify osamp in [%s]' % asec
+		err = 'Configuration must specify outfile in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -262,11 +263,17 @@ def atimesEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		# Determine the number of samples and offset, in microsec
-		dt = config.getfloat('sampling', 'period')
-		t0 = config.getfloat('sampling', 'offset')
+		# Determine the number of samples and time offset
+		dt = config.getfloat(ssec, 'period')
+		t0 = config.getfloat(ssec, 'offset')
 	except Exception as e:
-		err = 'Configuration must specify period and offset in [sampling]'
+		err = 'Configuration must specify period and offset in [%s]' % ssec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		osamp = config.getint(ssec, 'osamp', failfunc=lambda: 1)
+	except Exception as e:
+		err = 'Invalid specification of optional osamp in [%s]' % ssec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
