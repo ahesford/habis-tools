@@ -316,7 +316,7 @@ def equalizerEngine(config):
 		while responses < nproc:
 			try:
 				widths.extend(queue.get(timeout=0.1))
-				responses++
+				responses += 1
 			except Queue.Empty: pass
 
 		pool.wait()
