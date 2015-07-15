@@ -65,7 +65,7 @@ def sigwidths(datfiles, chans, reffile, fs, thetas, dists, freqs, queue=None, **
 	return.
 	'''
 	sfts, df = sigffts(datfiles, chans, reffile, fs, **kwargs)
-	widths = dirwidths(sfts, thetas[chans,:], dists[chans,:], freqs, df)
+	widths = dirwidths(sfts, thetas, dists, freqs, df)
 	widthpairs = zip(chans, widths)
 
 	# Try to put the result on the queue
@@ -278,6 +278,13 @@ def equalizerEngine(config):
 		err = 'Invalid specification of optional window in [%s]' % esec
 		raise HabisConfigError.fromException(err, e)
 
+	try:
+		# Grab the channels on which to pull waveforms
+		channels = config.getrange(esec, 'channels', failfunc=lambda: None)
+	except Exception as e:
+		err = 'Invalid specification of optional channels in [%s]' % esec
+		raise HabisConfigError.fromException(err, e)
+
 	# Load the element and reflector positions, then compute distances and angles
 	elements = [np.loadtxt(efile) for efile in eltfiles]
 	nedim = elements[0].shape[1]
@@ -293,7 +300,12 @@ def equalizerEngine(config):
 	distances = np.concatenate(distances, axis=0)
 	thetas = np.concatenate(thetas, axis=0)
 
+	# Build the channel list of the default is not provided
 	nchan = elements.shape[0]
+	if channels is None:
+		channels = range(nchan)
+	elif len(channels) != nchan:
+		raise ValueError('Number of element coordinates must match configured channel list')
 
 	# Create a result queue
 	queue = multiprocessing.Queue(nproc)
@@ -302,9 +314,8 @@ def equalizerEngine(config):
 		kwargs = dict(refwin=refwin, osamp=osamp, nsamp=nsamp, queue=queue)
 		for i in range(nproc):
 			# Build the argument list with unique channel indices
-			chans = range(i, nchan,nproc)
-			args = (datafiles, chans, reffile, fs, 
-					thetas, distances, freqs)
+			args = (datafiles, channels[i::nproc], reffile, fs, 
+					thetas[i::nproc,:], distances[i::nproc,:], freqs)
 			procname = process.procname(i)
 			pool.addtask(target=sigwidths, name=procname, args=args, kwargs=kwargs)
 
