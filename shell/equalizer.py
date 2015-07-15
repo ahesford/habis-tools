@@ -297,7 +297,7 @@ def equalizerEngine(config):
 
 	# Concatenate the element, distance, and angle lists
 	elements = np.concatenate(elements, axis=0)
-	distances = np.concatenate(distances, axis=0)
+	distances = np.concatenate(distances, axis=0) - radius
 	thetas = np.concatenate(thetas, axis=0)
 
 	# Build the channel list of the default is not provided
