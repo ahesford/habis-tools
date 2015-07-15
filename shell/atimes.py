@@ -193,7 +193,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			pks = sig.envpeaks(**peaks)
 			if len(pks) > 1:
 				# Choose the peak closest to nearmap prediction
-				exd = 0.5 * (nearmap[tid] + nearmap[rid])
+				exd = 0.5 * (nearmap[i] + nearmap[j])
 				ctr, _, width, _ = min(pks, key=lambda pk: abs(pk[0] - exd))
 				sig = sig.window((ctr - width, 2 * width))
 		if compenv: sig = sig.envelope()
