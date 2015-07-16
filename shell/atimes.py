@@ -189,13 +189,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		sig = data.getwaveform(rid, tid, dtype=np.float32)
 		if window: sig = sig.window(window[:2], tails=tails)
 		if peaks:
-			# Find any signal peaks
-			pks = sig.envpeaks(**peaks)
-			if len(pks) > 1:
-				# Choose the peak closest to nearmap prediction
-				exd = 0.5 * (nearmap[i] + nearmap[j])
-				ctr, _, width, _ = min(pks, key=lambda pk: abs(pk[0] - exd))
-				sig = sig.window((ctr - width, 2 * width))
+			# Isolate the peak nearest the expected location
+			exd = 0.5 * (nearmap[i] + nearmap[j])
+			sig = sig.isolatepeak(exd, **peaks)
 		if compenv: sig = sig.envelope()
 		# Compute the delay (may be negative)
 		result.append((idx, sig.delay(ref, osamp)))

@@ -923,6 +923,44 @@ class Waveform(object):
 		return [(v[0] + start, v[1], v[2], v[3]) for v in peaks]
 
 
+	def isolatepeak(self, index, **kwargs):
+		'''
+		Use self.envpeaks() to identify the peak nearest the provided
+		index value that also matches any filtering criteria specified
+		in the arguments. A copy of the signal, which is windowed to
+		+/- 1 peak width around the identified peak, is returned.
+
+		If kwargs contains "tails" or "window" arguments, they are
+		stripped from the arguments and passed to self.window when
+		windowing the peak. The window is relative to the position of
+		the isolated peak; its starting index is added to the peak
+		index to determine a true starting index.
+
+		If kwargs contains no "window" argument, a default relative
+		window of (-width, 2 * width) is assumed, where width is the
+		width of the isolated peak.
+
+		Any remaining **kwargs are passed to envpeaks.
+		'''
+		# Pull the tails and window arguments for the window function
+		tails = kwargs.pop('tails', None)
+		window = kwargs.pop('window', None)
+
+		# Find the peak nearest the index
+		peaks = self.envpeaks(**kwargs)
+		ctr, _, width, _ = min(peaks, key=lambda pk: abs(pk[0] - index))
+
+		# The default window is +/- 1 peak width
+		if window is None: window = (-width, 2 * width)
+
+		# Find the first and last samples of the absolute window
+		fs = max(0, window[0] + ctr)
+		ls = min(fs + window[1], self.nsamp)
+
+		# Window the signal around the identified peak
+		return self.window((fs, ls - fs), tails=tails)
+
+
 	def bandpass(self, start, end, tails=None, dtype=None):
 		'''
 		Perform a bandpass operation that zeros all frequencies below
