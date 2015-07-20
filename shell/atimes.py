@@ -338,11 +338,10 @@ def atimesEngine(config):
 
 	try:
 		# If a delay guess was specified, read the delay matrix
-		guesses = np.loadtxt(peaks['nearfile'])
+		# Also remove the 'nearfile' key
+		guesses = np.loadtxt(peaks.pop('nearfile'))
 		# Convert from times to samples
 		guesses = (guesses - t0) / dt
-		# Remove the "nearfile" key
-		del peaks['nearfile']
 	except (KeyError, TypeError, IOError, AttributeError):
 		guesses = None
 

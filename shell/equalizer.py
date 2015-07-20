@@ -54,7 +54,7 @@ def wavepaths(elements, reflectors, nargs={}):
 	return distances, thetas
 
 
-def sigwidths(datfiles, chans, reffile, fs, thetas, dists, freqs, queue=None, **kwargs):
+def sigwidths(datfiles, chans, fs, thetas, dists, freqs, queue=None, **kwargs):
 	'''
 	Call sigffts() followed by dirwidths() on the output. Arguments are
 	passed to their respective routines. The kwargs are passed to sigffts()
@@ -64,7 +64,7 @@ def sigwidths(datfiles, chans, reffile, fs, thetas, dists, freqs, queue=None, **
 	queue is not None, the result will be passed to queue.put() before
 	return.
 	'''
-	sfts, df = sigffts(datfiles, chans, reffile, fs, **kwargs)
+	sfts, df = sigffts(datfiles, chans, fs, **kwargs)
 	widths = dirwidths(sfts, thetas, dists, freqs, df)
 	widthpairs = zip(chans, widths)
 
@@ -75,37 +75,41 @@ def sigwidths(datfiles, chans, reffile, fs, thetas, dists, freqs, queue=None, **
 	return widthpairs
 
 
-def sigffts(datfiles, chans, reffile, fs, refwin=None, osamp=1, nsamp=None):
+def sigffts(datfiles, chans, fs, peakwin={}, osamp=1, nsamp=None):
 	'''
 	For each habis.formats.WaveformSet file in the iterable datfiles, pull
-	round-trip Waveform objects for all channels in the sequence chans,
-	align the waveform with the Waveform object stored in reffile,
-	optionally window the resulting waveform with a window characterized by
-	the (start, length, [tailwidth]) sequence refwin (if refwin is None,
-	windowing is skipped), and compute the DFT with Waveform.fft().
-	
+	round-trip Waveform objects for all channels in the sequence chans and
+	compute the DFT with Waveform.fft().
+
+	If peakwin is nonempty, it should contain a 'window' or 'nearmap'
+	entry. A 'window' must specify (start, length, [tailwidth]) parameters
+	that define a relative window to isolate signals in the neighborhood of
+	their most prominent peaks. If peakwin includes a 'nearmap' entry, the
+	peak isolated will instead be that closest to peakwin['nearmap'][i,j]
+	in the signal for channel chans[i] in the WaveformSet of datfiles[j].
+	Additional entries in peakwin will be passed as kwargs to
+	Waveform.isolatepeak().
+
 	The optional osamp will be passed to Waveform.aligned() when aligning
 	waveforms to the reference. If nsamp is not None, all waveforms are
 	truncated or zero-padded to a length nsamp. Otherwise, nsamp is assumed
 	to be the largest of the nsamp parameters for all WaveformSet objects
 	in datfiles.
 
-	The window parameters (start, length) are passed directly to
-	Waveform.window, while the optional tailwidth will be used to construct
-	a Hann window as np.hanning(2 * tailwidth) to be passed as the tails
-	argument.
-
 	Returned is an ndarray of shape (len(chans), len(datfiles), nfsamp),
 	where nfsamp is the number of samples necessary to store the output of
 	the above-described Waveform.fft() operation; along with the common bin
 	width, df = fs / nsamp, for the DFTs.
 	'''
-	# Open the data and reference files
+	# Open the data files
 	wsets = [WaveformSet.fromfile(dfile) for dfile in datfiles]
-	ref = Waveform.fromfile(reffile)
+
+	# Try to pull out the nearmap and window for peak isolation
+	nearmap = peakwin.pop('nearmap', None)
+	window = peakwin.pop('window', None)
 
 	# Build window tails, if appropriate
-	try: tails = np.hanning(2 * refwin[2])
+	try: tails = np.hanning(2 * window[2])
 	except (TypeError, IndexError): tails = None
 
 	# Figure the output shape and transform type
@@ -119,11 +123,12 @@ def sigffts(datfiles, chans, reffile, fs, refwin=None, osamp=1, nsamp=None):
 
 	for i, ch in enumerate(chans):
 		for j, wset in enumerate(wsets):
-			# Align each waveform with the reference
-			sig = wset[ch,ch].aligned(ref, osamp=osamp)
-			# Window the waveform if desired
-			if refwin is not None:
-				sig = sig.window(refwin[:2], tails=tails)
+			sig = wset[ch,ch]
+			if window is not None or nearmap is not None:
+				# Window the waveform if desired
+				index = nearmap[i,j] if nearmap is not None else None
+				sig = sig.isolatepeak(index,
+						window=window, tails=tails, **peakwin)
 			# Compute and store the DFT
 			sdat[i,j,:] = sig.fft((0, nsamp), isReal)
 
@@ -199,13 +204,6 @@ def equalizerEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		# Grab the reference waveform
-		reffile = config.get(msec, 'reference')
-	except Exception as e:
-		err = 'Configuration must specify reference in [%s]' % msec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
 		# Grab the reflector positions
 		rflfile = config.get(esec, 'reflectors')
 	except Exception as e:
@@ -268,14 +266,47 @@ def equalizerEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		# Grab the reference window (optional)
-		refwin = config.getlist(esec, 'refwin',
+		# Grab the peak window (optional)
+		window = config.getlist(esec, 'window',
 				mapper=int, failfunc=lambda: None)
-		if refwin and (len(refwin) < 2 or len(refwin) > 3):
+		if window and (len(window) < 2 or len(window) > 3):
 			err = 'Window does not specify appropriate parameters'
 			raise HabisConfigError(err)
 	except Exception as e:
 		err = 'Invalid specification of optional window in [%s]' % esec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine peak-selection criteria
+		peaks = config.getlist(esec, 'peak', failfunc=lambda: None)
+		if peaks:
+			if len(peaks) < 2 or len(peaks) > 5:
+				err = 'Peak does not specify appropriate parameters'
+				raise HabisConfigError(err)
+			if peaks[0].lower() != 'nearest':
+				err = 'Peak specification must start with "nearest"'
+				raise HabisConfigError(err)
+			# Sampling period and offset are necessary here
+			try:
+				samper = config.getfloat(ssec, 'period')
+				samoff = config.getfloat(ssec, 'offset')
+			except Exception as e:
+				err = 'Peak selection requires period, offset in [%s]' % ssec
+				raise HabisConfigError.fromException(err, e)
+			# Build the peak-selection options dictionary
+			peakargs = { }
+			# Load the nearmap and convert from times to samples
+			peakargs['nearmap'] = (np.loadtxt(peaks[1]) - samoff) / samper
+			if len(peaks) > 2:
+				peakargs['minwidth'] = float(peaks[2])
+			if len(peaks) > 3:
+				peakargs['minprom'] = float(peaks[3])
+			if len(peaks) > 4:
+				peakargs['prommode'] = peaks[4]
+			peaks = peakargs
+		else: peaks = {}
+	except Exception as e:
+		err = 'Invalid specification of optional peak in [%s]' % esec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -284,6 +315,8 @@ def equalizerEngine(config):
 	except Exception as e:
 		err = 'Invalid specification of optional channels in [%s]' % esec
 		raise HabisConfigError.fromException(err, e)
+
+	if window: peaks['window'] = window
 
 	# Load the element and reflector positions, then compute distances and angles
 	elements = [np.loadtxt(efile) for efile in eltfiles]
@@ -311,10 +344,10 @@ def equalizerEngine(config):
 	queue = multiprocessing.Queue(nproc)
 
 	with process.ProcessPool() as pool:
-		kwargs = dict(refwin=refwin, osamp=osamp, nsamp=nsamp, queue=queue)
+		kwargs = dict(peakwin=peaks, osamp=osamp, nsamp=nsamp, queue=queue)
 		for i in range(nproc):
 			# Build the argument list with unique channel indices
-			args = (datafiles, channels[i::nproc], reffile, fs, 
+			args = (datafiles, channels[i::nproc], fs, 
 					thetas[i::nproc,:], distances[i::nproc,:], freqs)
 			procname = process.procname(i)
 			pool.addtask(target=sigwidths, name=procname, args=args, kwargs=kwargs)

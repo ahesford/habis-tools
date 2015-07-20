@@ -923,12 +923,15 @@ class Waveform(object):
 		return [(v[0] + start, v[1], v[2], v[3]) for v in peaks]
 
 
-	def isolatepeak(self, index, **kwargs):
+	def isolatepeak(self, index=None, **kwargs):
 		'''
 		Use self.envpeaks() to identify the peak nearest the provided
-		index value that also matches any filtering criteria specified
+		index that also matches any filtering criteria specified
 		in the arguments. A copy of the signal, which is windowed to
 		+/- 1 peak width around the identified peak, is returned.
+
+		If index is None, the most prominent peak in the signal is
+		returned.
 
 		If kwargs contains "tails" or "window" arguments, they are
 		stripped from the arguments and passed to self.window when
@@ -948,7 +951,12 @@ class Waveform(object):
 
 		# Find the peak nearest the index
 		peaks = self.envpeaks(**kwargs)
-		ctr, _, width, _ = min(peaks, key=lambda pk: abs(pk[0] - index))
+		if len(peaks) < 1: raise ValueError('No peaks found')
+
+		if index is not None:
+			ctr, _, width, _ = min(peaks, key=lambda pk: abs(pk[0] - index))
+		else:
+			ctr, _, width, _ = max(peaks, key=lambda pk: pk[3])
 
 		# The default window is +/- 1 peak width
 		if window is None: window = (-width, 2 * width)
