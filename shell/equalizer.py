@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 
-import os, sys, itertools, numpy as np
+import os, sys, numpy as np
 import multiprocessing, Queue
+
+from numpy import ma
 
 from itertools import izip
 
@@ -103,14 +105,27 @@ def sigffts(datfiles, chans, fs, peakwin={}, osamp=1, nsamp=None):
 	'''
 	# Open the data files
 	wsets = [WaveformSet.fromfile(dfile) for dfile in datfiles]
+	peakwin = peakwin.copy()
 
-	# Try to pull out the nearmap and window for peak isolation
-	nearmap = peakwin.pop('nearmap', None)
-	window = peakwin.pop('window', None)
+	nchans = len(chans)
+	nsets = len(wsets)
 
-	# Build window tails, if appropriate
-	try: tails = np.hanning(2 * window[2])
-	except (TypeError, IndexError): tails = None
+	# Pull out a nearmap or create a map of None
+	try:
+		nearmap = peakwin.pop('nearmap')
+	except KeyError:
+		nearmap = ((None for j in xrange(nsets)) for i in xrange(nchans))
+
+	try:
+		# Remove the optional tailwidth from the window
+		window = peakwin['window']
+		peakwin['window'] = window[:2]
+
+		# Build window tails, if appropriate
+		tails = np.hanning(2 * window[2])
+		peakwin['tails'] = tails
+	except (KeyError, IndexError):
+		pass
 
 	# Figure the output shape and transform type
 	if nsamp is None: nsamp = max(wset.nsamp for wset in wsets)
@@ -119,20 +134,39 @@ def sigffts(datfiles, chans, fs, peakwin={}, osamp=1, nsamp=None):
 	nfsamp = (int(nsamp // 2) + 1) if isReal else nsamp
 
 	# Create a place to store aligned waveforms
-	sdat = np.empty((len(chans), len(wsets), nfsamp), dtype=np.complex128)
+	sdat = np.zeros((nchans, nsets, nfsamp), dtype=np.complex128)
+	# Store indices of bad signals for masking
+	masked = []
 
-	for i, ch in enumerate(chans):
-		for j, wset in enumerate(wsets):
+	for i, (ch, nmrow) in enumerate(izip(chans, nearmap)):
+		for j, (wset, nmidx) in enumerate(izip(wsets, nmrow)):
 			sig = wset[ch,ch]
-			if window is not None or nearmap is not None:
-				# Window the waveform if desired
-				index = nearmap[i,j] if nearmap is not None else None
-				sig = sig.isolatepeak(index,
-						window=window, tails=tails, **peakwin)
+
+			if 'window' in peakwin or nmidx is not None:
+				# Isolate the peak according to preferences
+				try:
+					sig = sig.isolatepeak(nmidx, **peakwin)
+				except ValueError:
+					# Record indices of "bad" channels for masking
+					masked.append((i, j))
+					# Skip FFT for signals to be masked
+					continue
+
 			# Compute and store the DFT
 			sdat[i,j,:] = sig.fft((0, nsamp), isReal)
 
-	return sdat, fs / nsamp
+	# DFT frequency bin width
+	df = fs / nsamp
+
+	if not len(masked):
+		return sdat, df
+
+	# Mask away bad values
+	msdat = ma.MaskedArray(sdat)
+	for i, j in masked:
+		msdat[i,j,:] = ma.masked
+
+	return msdat, df
 
 
 def dirwidths(phis, thetas, dists, freqs, df):
@@ -154,7 +188,7 @@ def dirwidths(phis, thetas, dists, freqs, df):
 	has a radian frequency w[i] = 2 * pi * df * freqs[i].
 	'''
 	newax = np.newaxis
-	phis = np.asarray(phis)
+	phis = ma.asarray(phis)
 	nchan, nrefl, nfsamp = phis.shape
 
 	dists = np.asarray(dists)
