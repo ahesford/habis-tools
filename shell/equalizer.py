@@ -17,45 +17,6 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def wavepaths(elements, reflectors, nargs={}):
-	'''
-	Given a list of elements grouped by facet, and a collection of
-	reflectors, return a tuple (distances, angles) that indicates the
-	distances from each element to each reflector and the angle between the
-	propagation direction and the element's directivity axis (the normal to
-	the facet). The normal is found using habis.facet.lsqnormal, and the
-	optional nargs is a dictionary of kwargs to pass after the facet
-	element coordinates argument.
-
-	The argument elements should be a sequence of ndarrays such that
-	elements[i] is an N[i]-by-3 array of (x, y, z) coordinates for each of
-	N[i] elements in the i-th facet, and reflectors should be an Nr-by-3
-	array of (x, y, z) center coordinates for each of Nr reflectors.
-
-	The outputs will be lists of ndarrays such that distances[i] and
-	angles[i] are N[i]-by-Nr maps of propagation distances or angles,
-	respectively, such that entry (j, k) is the measure from element j to
-	reflector k. These lists are suitable for passing to np.concatenate(),
-	with axis=0, to produce composite element-to-reflector maps.
-	'''
-	from numpy.linalg import norm
-	from habis.facet import lsqnormal
-	# Compute the propagation vectors and normalize
-	directions = [reflectors[np.newaxis,:,:] - el[:,np.newaxis,:] for el in elements]
-	distances = [norm(dirs, axis=-1) for dirs in directions]
-	directions = [dirs / dists[:,:,np.newaxis] 
-			for dirs, dists in izip(directions, distances)]
-
-	# The normal should point inward, but points outward by default
-	normals = [-lsqnormal(el, **nargs) for el in elements]
-
-	# Figure the propagation angles
-	thetas = [np.arccos(np.dot(dirs, ne))
-			for dirs, ne in izip(directions, normals)]
-
-	return distances, thetas
-
-
 def sigwidths(datfiles, chans, fs, thetas, dists, freqs, queue=None, **kwargs):
 	'''
 	Call sigffts() followed by dirwidths() on the output. Arguments are
@@ -238,27 +199,11 @@ def equalizerEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		# Grab the reflector positions
-		rflfile = config.get(esec, 'reflectors')
+		# Grab the element-to-reflector distances and angles
+		distfile = config.get(esec, 'distances')
+		angfile = config.get(esec, 'angles')
 	except Exception as e:
-		err = 'Configuration must specify reflectors in [%s]' % esec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Grab the element positions by facet
-		eltfiles = config.getlist(esec, 'elements')
-		if len(eltfiles) < 1:
-			err = 'Key elements must contain at least one entry'
-			raise HabisConfigError(err)
-	except Exception as e:
-		err = 'Configuration must specify elements in [%s]' % esec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Grab the reflector radius
-		radius = config.getfloat(msec, 'radius')
-	except Exception as e:
-		err = 'Configuration must specify radius in [%s]' % msec
+		err = 'Configuration must specify distances and angles in [%s]' % esec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -352,23 +297,14 @@ def equalizerEngine(config):
 
 	if window: peaks['window'] = window
 
-	# Load the element and reflector positions, then compute distances and angles
-	elements = [np.loadtxt(efile) for efile in eltfiles]
-	nedim = elements[0].shape[1]
-	for el in elements[1:]:
-		if el.shape[1] != nedim:
-			raise ValueError('Dimensionality of all element files must agree')
-	# Ignore an optional sound-speed column in the reflector coordinates
-	reflectors = np.loadtxt(rflfile)[:,:nedim]
-	distances, thetas = wavepaths(elements, reflectors)
+	distances = np.loadtxt(distfile)
+	thetas = np.loadtxt(angfile)
 
-	# Concatenate the element, distance, and angle lists
-	elements = np.concatenate(elements, axis=0)
-	distances = np.concatenate(distances, axis=0) - radius
-	thetas = np.concatenate(thetas, axis=0)
+	if thetas.shape != distances.shape:
+		raise ValueError('Angle and distance maps must be of same shape')
 
 	# Build the channel list of the default is not provided
-	nchan = elements.shape[0]
+	nchan = distances.shape[0]
 	if channels is None:
 		channels = range(nchan)
 	elif len(channels) != nchan:
