@@ -2,6 +2,7 @@
 
 import os, sys, numpy as np
 import multiprocessing, Queue
+import operator as op
 
 from numpy import ma
 
@@ -17,7 +18,7 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def sigwidths(datfiles, chans, fs, thetas, dists, freqs, queue=None, **kwargs):
+def sigwidths(datfiles, chans, thetas, dists, queue=None, **kwargs):
 	'''
 	Call sigffts() followed by dirwidths() on the output. Arguments are
 	passed to their respective routines. The kwargs are passed to sigffts()
@@ -27,8 +28,8 @@ def sigwidths(datfiles, chans, fs, thetas, dists, freqs, queue=None, **kwargs):
 	queue is not None, the result will be passed to queue.put() before
 	return.
 	'''
-	sfts, df = sigffts(datfiles, chans, fs, **kwargs)
-	widths = dirwidths(sfts, thetas, dists, freqs, df)
+	sfts = sigffts(datfiles, chans, **kwargs)
+	widths = dirwidths(sfts, thetas, dists)
 	widthpairs = zip(chans, widths)
 
 	# Try to put the result on the queue
@@ -38,7 +39,7 @@ def sigwidths(datfiles, chans, fs, thetas, dists, freqs, queue=None, **kwargs):
 	return widthpairs
 
 
-def sigffts(datfiles, chans, fs, peakwin={}, osamp=1, nsamp=None):
+def sigffts(datfiles, chans, peakwin={}, osamp=1, nsamp=None):
 	'''
 	For each habis.formats.WaveformSet file in the iterable datfiles, pull
 	round-trip Waveform objects for all channels in the sequence chans and
@@ -61,8 +62,7 @@ def sigffts(datfiles, chans, fs, peakwin={}, osamp=1, nsamp=None):
 
 	Returned is an ndarray of shape (len(chans), len(datfiles), nfsamp),
 	where nfsamp is the number of samples necessary to store the output of
-	the above-described Waveform.fft() operation; along with the common bin
-	width, df = fs / nsamp, for the DFTs.
+	the above-described Waveform.fft() operation.
 	'''
 	# Open the data files
 	wsets = [WaveformSet.fromfile(dfile) for dfile in datfiles]
@@ -116,37 +116,32 @@ def sigffts(datfiles, chans, fs, peakwin={}, osamp=1, nsamp=None):
 			# Compute and store the DFT
 			sdat[i,j,:] = sig.fft((0, nsamp), isReal)
 
-	# DFT frequency bin width
-	df = fs / nsamp
-
 	if not len(masked):
-		return sdat, df
+		return sdat
 
 	# Mask away bad values
 	msdat = ma.MaskedArray(sdat)
 	for i, j in masked:
 		msdat[i,j,:] = ma.masked
 
-	return msdat, df
+	return msdat
 
 
-def dirwidths(phis, thetas, dists, freqs, df):
+def dirwidths(phis, thetas, dists):
 	'''
 	Given an ndarray phis of shape (Nc, Nr, Nf) that stores, as in the
 	output of sigffts(), the DFTs of backscatter measurements from Nc
 	channels to Nr along the last axis, each with a corresponding
 	propagation angle in thetas and an element-to-surface distance in
-	dists, both ndarrays of shape (Nc, Nr), determine the width parameter A
-	that best predicts (in the least squares sense) a directivity pattern
-	of the form 
+	dists, both ndarrays of shape (Nc, Nr), determine the width parameters
+	A(w) that best predict (in the least squares sense) a directivity
+	pattern of the form
 
-		D(w, sin(theta)) = exp(-2 * A * sin(theta) * w**2)
+		D(w, sin(theta)) = exp(-2 * A(w) * sin(theta))
 
 	in the spectral domain, where w is the radian frequency.
 
-	The sequence freqs specifies a list of POSITIVE DFT frequency bins that
-	will be used in the least-squares solution. Each frequency bin freqs[i]
-	has a radian frequency w[i] = 2 * pi * df * freqs[i].
+	The returned width parameters have shape (Nc, Nf).
 	'''
 	newax = np.newaxis
 	phis = ma.asarray(phis)
@@ -155,25 +150,21 @@ def dirwidths(phis, thetas, dists, freqs, df):
 	dists = np.asarray(dists)
 	thetas = np.asarray(thetas)
 
-	freqs = np.asarray(freqs)
-	nfreqs = len(freqs)
-
 	# Correct for distances
 	phis = phis * (dists[:,:,newax] / np.max(dists))**2
 
 	# Compute log-magnitude ratios to isolate directivity factor
 	# Pull out frequencies of interest
-	laphis = np.log(np.abs(phis[:,:,freqs]))
+	laphis = np.log(np.abs(phis))
 	y = laphis[:,:,newax,:] - laphis[:,newax,:,:]
 
 	# Compute the angular difference terms in the directivity exponent
 	sth = np.sin(thetas)
-	x = (2 * (sth[:,newax,:,newax] - sth[:,:,newax,newax]) * 
-			(2 * np.pi * df * freqs[newax,newax,newax,:])**2)
+	x = 2 * (sth[:,newax,:,newax] - sth[:,:,newax,newax])
 
 	# Compute the per-channel least-squares solutions
-	xtx = np.sum(x * x, axis=(1,2,3))
-	xty = np.sum(x * y, axis=(1,2,3))
+	xtx = np.sum(x * x, axis=(1,2))
+	xty = np.sum(x * y, axis=(1,2))
 	return xty / xtx
 
 
@@ -219,13 +210,6 @@ def equalizerEngine(config):
 		fs = 1. / per
 	except Exception as e:
 		err = 'Configuration must specify period in [%s]' % ssec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Grab the DFT bins to use for the width optimization
-		freqs = config.getrange(esec, 'freqs')
-	except Exception as e:
-		err = 'Configuration must specify freqs in [%s]' % esec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -317,8 +301,8 @@ def equalizerEngine(config):
 		kwargs = dict(peakwin=peaks, osamp=osamp, nsamp=nsamp, queue=queue)
 		for i in range(nproc):
 			# Build the argument list with unique channel indices
-			args = (datafiles, channels[i::nproc], fs, 
-					thetas[i::nproc,:], distances[i::nproc,:], freqs)
+			args = (datafiles, channels[i::nproc],
+					thetas[i::nproc,:], distances[i::nproc,:])
 			procname = process.procname(i)
 			pool.addtask(target=sigwidths, name=procname, args=args, kwargs=kwargs)
 
@@ -335,8 +319,9 @@ def equalizerEngine(config):
 
 		pool.wait()
 
-	widths.sort()
-	np.savetxt(outfile, [w[1] for w in widths], fmt='%16.8f')
+	widths.sort(key=op.itemgetter(0))
+	widths = np.array([w[1] for w in widths])
+	np.savetxt(outfile, widths, fmt='%16.8f')
 
 
 if __name__ == '__main__':
