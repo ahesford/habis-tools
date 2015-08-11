@@ -1036,19 +1036,18 @@ class Waveform(object):
 		return Waveform(self.nsamp, bsig, 0)
 
 
-	def directivity(self, width, theta, fmax):
+	def directivity(self, widths, theta):
 		'''
 		Return, as a new waveform, the result of applying to self a
 		spectral directivity factor
 
-			C(w) = exp(-2 * width * sin(theta) * w**2),
+			C(w) = exp(-widths(w) * sin(theta)),
 
-		where w = dw * i is the radial frequency for DFT bin i and the
-		bin step size is given by dw = (2 * pi * fmax / self.nsamp).
+		where w is a DFT bin index. The parameter widths must have the
+		same length as self.fft().
 		'''
-		# Build the frequencies and correction factor
-		w = (2 * math.pi * fmax / self.nsamp) * self.specidx()
-		corr = np.exp(-2 * width * np.sin(theta) * w**2)
+		widths = np.asarray(widths)
+		corr = np.exp(-widths * np.sin(theta))
 		sigft = Waveform(signal=self.fft() * corr)
 		return sigft.ifft(real=self.isReal)
 
