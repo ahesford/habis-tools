@@ -7,8 +7,9 @@ from habis import wrappers
 from habis.conductor import HabisConductor
 
 def main():
-	HabisConductor.registerWrapper("echo", wrappers.Echo)
-	HabisConductor.registerWrapper("test256", wrappers.Test256)
+	HabisConductor.registerWrapper("echo", "echo")
+	HabisConductor.registerWrapper("cat", "cat")
+	HabisConductor.registerWrapper("sleep", "sleep")
 	port = reactor.listenTCP(8088, pb.PBServerFactory(HabisConductor()))
 	print 'Listening on %s' % port.getHost()
 	reactor.run()
