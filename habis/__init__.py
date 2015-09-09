@@ -4,6 +4,7 @@ Array Breast Imaging System (HABIS) for processing data received from the
 instrument and exchanging data between nodes.
 '''
 
-__all__ = [ 'habiconf', 'formats', 'facet', 'sigtools', 'trilateration' ]
+__all__ = [ 'habiconf', 'formats', 'facet', 
+		'sigtools', 'trilateration', 'wrappers', 'conductor' ]
 
 from . import *
