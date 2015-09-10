@@ -44,11 +44,9 @@ def configureGroup(config):
 
 
 	def remoteCaller(_):
-		print 'Invoking remote caller'
 		d = hgroup.broadcast(*command)
-		d.addCallback(printResult)
+		d.addCallbacks(printResult, fatalError)
 		d.addCallback(lambda _ : reactor.stop())
-		d.addErrback(fatalError)
 		return d
 
 	# Create the client-side conductor group
