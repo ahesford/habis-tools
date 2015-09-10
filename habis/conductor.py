@@ -3,43 +3,91 @@ Classes that conduct HABIS processes over a network.
 '''
 
 from twisted.spread import pb
-from twisted.internet import threads
+from twisted.internet import threads, defer
 
-class HabisConductorProxy(object):
+class HabisConductorError(Exception): pass
+
+class HabisRemoteConductorGroup(object):
 	'''
-	A client-side proxy for a remote HabisConductor object.
+	A client-side class for managing a collection of remote HabisConductor
+	references.
 	'''
-	def __init__(self, factory, errback=None, *args, **kwargs):
+	def __init__(self, servers, port, reactor=None):
 		'''
-		Instantiate a HabisConductorProxy, store a reference to the
-		PBClientFactory instance factory in self.clientfactory, and
-		attempt to fetch a reference to the server-side HabisConductor
-		instance in the deferred self.rootdeferred.
+		Initialize connections on the specified port to each remote
+		address in the sequence servers. Invoke self.connect() to
+		initialize the connections.
 
-		If errback is not None, it should be a callable to be added as
-		an errback to self.rootdeferred, with *args and **kwargs
-		supplied directly to the addErrback() method.
+		If reactor is not None, capture a reference to the reactor in
+		self.reactor. Otherwise, install the default Twisted reactor
+		and capture a reference.
 		'''
-		self.clientfactory = factory
-		self.rootdeferred = self.clientfactory.getRootObject()
-		self.rootdeferred.addCallback(self.conductorReceived)
-		if errback is not None:
-			self.rootdeferred.addErrback(errback, *args, **kwargs)
+		# Initialize a map (address, port) => conductor reference
+		from collections import OrderedDict
+		self.conductors = OrderedDict.fromkeys(((server, port) for server in servers))
+		self.port = port
+		# Capture a reference to the provided reactor, or a default
+		if reactor is None: from twisted.internet import reactor
+		self.reactor = reactor
 
-
-	def conductorReceived(self, conductor):
-		'''
-		Record and return the conductor reference.
-		'''
-		self.conductor = conductor
-		return conductor
+		self.connected = False
+		self.connect()
 
 
-	def callRemote(self, *args, **kwargs):
+	def throwError(self, failure, message):
 		'''
-		Invoke self.conductor.callRemote(*args, **kwargs).
+		Throw a HabisConductorError with the provided message and a
+		reference to the underlying failure.
 		'''
-		return self.conductor.callRemote(*args, **kwargs)
+		error = '%s, underlying failure: %s' % (message, failure)
+		raise HabisConductorError(error)
+
+
+	def connect(self):
+		'''
+		Initialize connections to the servers specified as keys to
+		self.conductors, adding a callback to self.storeConductors that
+		stores the references in corresponding values in
+		self.conductors.
+		'''
+		# Initialize all connections
+		connections = []
+		for address, port in self.conductors:
+			factory = pb.PBClientFactory()
+			self.reactor.connectTCP(address, port, factory)
+			d = factory.getRootObject()
+			d.addErrback(self.throwError, 'Failed to get root object at %s:%d' % (address, port))
+			connections.append(d)
+
+		# Join all of the deferreds into a list, storing successful results
+		d = defer.gatherResults(connections, consumeErrors=True)
+		d.addCallback(self.storeConductors)
+		self.rootdeferred = d
+
+
+	def storeConductors(self, results):
+		'''
+		Capture a reference to each HabisConductor proxy fetched from a
+		remote connection.
+		'''
+		for cond, (addr, port) in zip(results, self.conductors):
+			self.conductors[addr, port] = cond
+		self.connected = True
+
+
+	def broadcast(self, cmd, *args, **kwargs):
+		'''
+		Invoke callRemote(*args, **kwargs) on each HabisConductor
+		object in self.conductors.
+
+		Returns a DeferredList joining all of the callRemote deferreds.
+		'''
+		calls = []
+		for (addr, port), cond in self.conductors.iteritems():
+			d = cond.callRemote(cmd, *args, **kwargs)
+			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
+			calls.append(d)
+		return defer.gatherResults(calls, consumeErrors=True)
 
 
 class HabisConductor(pb.Root):
@@ -101,6 +149,9 @@ class HabisConductor(pb.Root):
 	def remote_cmdlist(self):
 		'''
 		Return the class's mapping between remote methods and programs
-		to execute.
+		to execute. The 'remote_' prefix is stripped from the remote
+		method names.
 		'''
-		return self.wrapmap
+		pfix = 'remote_'
+		return dict((k.replace(pfix, '', 1) if k.startswith(pfix) else k, v)
+				for k, v in self.wrapmap.iteritems())
