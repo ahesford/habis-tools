@@ -9,64 +9,37 @@ class HabisConductorProxy(object):
 	'''
 	A client-side proxy for a remote HabisConductor object.
 	'''
-	def __init__(self):
+	def __init__(self, factory, errback=None, *args, **kwargs):
 		'''
-		Instantiate a HabisConductorProxy with an empty proxymap.
+		Instantiate a HabisConductorProxy, store a reference to the
+		PBClientFactory instance factory in self.clientfactory, and
+		attempt to fetch a reference to the server-side HabisConductor
+		instance in the deferred self.rootdeferred.
+
+		If errback is not None, it should be a callable to be added as
+		an errback to self.rootdeferred, with *args and **kwargs
+		supplied directly to the addErrback() method.
 		'''
-		self.proxymap = {}
+		self.clientfactory = factory
+		self.rootdeferred = self.clientfactory.getRootObject()
+		self.rootdeferred.addCallback(self.conductorReceived)
+		if errback is not None:
+			self.rootdeferred.addErrback(errback, *args, **kwargs)
+
 
 	def conductorReceived(self, conductor):
 		'''
-		Record the conductor reference and discover remote methods to
-		populate the proxy map.
-
-		Returns the deferred that will fire when the map of remote
-		methods is available. A callback to self.buildProxyMap is
-		attached to the deferred.
-		
-		No errbacks are attached to the deferred.
+		Record and return the conductor reference.
 		'''
 		self.conductor = conductor
-		d = self.conductor.callRemote("cmdlist")
-		d.addCallback(self.buildProxyMap)
-		return d
+		return conductor
 
 
-	def buildProxyMap(self, cmdmap):
+	def callRemote(self, *args, **kwargs):
 		'''
-		Record the list of remote methods on the associated conductor
-		in the dictionary self.proxymap. The argument cmdmap, returned
-		from the HabisConductor remote_cmdlist method, is a dictionary
-		whose keys are remote_<name> methods and whose values are the
-		remote executables to be called on the conductor server. The
-		local proxymap takes the same form, except the leading
-		"remote_" is stripped.
-
-		Returns self.proxymap after construction to allow callback
-		chaining.
+		Invoke self.conductor.callRemote(*args, **kwargs).
 		'''
-		proxymap = {}
-		for func, cmd in cmdmap.iteritems():
-			if not func.startswith("remote_"):
-				raise ValueError("Remote callables must start with 'remote_'")
-			lfunc = func.replace("remote_", "", 1)
-			proxymap[lfunc] = cmd
-		self.proxymap = proxymap
-		return self.proxymap
-
-
-	def callRemote(self, cmd, *args, **kwargs):
-		'''
-		If the requested cmd is in the keys of self.proxymap, forward
-		the requested call to the conductor associated with the
-		instance and return the resulting deferred.
-
-		Otherwise, raise a KeyError.
-		'''
-		if cmd not in self.proxymap:
-			raise KeyError('Command is not in proxymap for conductor')
-
-		return self.conductor.callRemote(cmd, *args, **kwargs)
+		return self.conductor.callRemote(*args, **kwargs)
 
 
 class HabisConductor(pb.Root):
