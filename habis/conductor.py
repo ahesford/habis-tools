@@ -33,6 +33,8 @@ class HabisRemoteConductorGroup(object):
 		self.connected = False
 		self.connect()
 
+		# XXX TODO: Require a callback to be invoked on successful connection
+
 
 	def throwError(self, failure, message):
 		'''

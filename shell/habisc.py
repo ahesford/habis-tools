@@ -42,6 +42,7 @@ def configureGroup(config):
 		err = 'Invalid optional port specification in [%s]' % csec
 		raise HabisConfigError.fromException(err, e)
 
+	# XXX TODO: Provide onConnect callback to start chain outside of class
 
 	def remoteCaller(_):
 		d = hgroup.broadcast(*command)
