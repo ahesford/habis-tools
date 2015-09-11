@@ -45,11 +45,11 @@ class ResponseManager(object):
 
 	def returncode(self):
 		'''
-		Return the first non-zero returncode in the result list,
-		0 otherwise.
+		Returns the first non-zero returncode in the result list. If
+		the result list has not been populated, returns 1. Otherwise,
+		returns 0.
 		'''
-		if len(self.results) != len(self.servers):
-			raise IndexError('Result and server lists must have same length')
+		if len(self.results) != len(self.servers): return 1
 
 		for result in self.results:
 			returncode = result['returncode']

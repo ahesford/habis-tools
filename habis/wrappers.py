@@ -31,6 +31,19 @@ class CommandWrapper(object):
 		self._args = [str(s) for s in a]
 
 
+	@staticmethod
+	def encodeResult(retcode, stdout=None, stderr=None):
+		'''
+		Encode the given return code and optional stdout and stderr
+		strings into a dictionary response with corresponding keys
+		"returncode", "stdout", "stdin".
+		'''
+		result = { 'returncode': retcode }
+		if stdout is not None: result['stdout'] = stdout
+		if stderr is not None: result['stderr'] = stderr
+		return result
+
+
 	def execute(self, **kwargs):
 		'''
 		Invoke the command associated with the wrapper, with additional
@@ -38,10 +51,8 @@ class CommandWrapper(object):
 		to subprocess32.Popen.communicate() to control interaction with
 		the child process during its lifetime.
 
-		Returns a dictionary with keys "stdout", "stderr", and
-		"returncode", where the values of "stdout" and "stderr" are the
-		contents of their respective streams, and the value of
-		"returncode" is an integer return code.
+		Returns an output dictionary, encoded with encodeResult(), that
+		encapsulates any program output and a return code.
 		'''
 		from subprocess32 import Popen, PIPE, TimeoutExpired
 
@@ -60,4 +71,4 @@ class CommandWrapper(object):
 				stdout, stderr = proc.communicate()
 			retcode = proc.returncode
 
-		return { "stdout": stdout, "stderr": stderr, "returncode": retcode }
+		return self.encodeResult(retcode, stdout, stderr)

@@ -169,6 +169,8 @@ class HabisConductor(pb.Root):
 		to execute. The 'remote_' prefix is stripped from the remote
 		method names.
 		'''
+		from habis.wrappers import CommandWrapper
 		pfix = 'remote_'
-		return dict((k.replace(pfix, '', 1) if k.startswith(pfix) else k, v)
+		response = dict((k.replace(pfix, '', 1) if k.startswith(pfix) else k, v)
 				for k, v in self.wrapmap.iteritems())
+		return CommandWrapper.encodeResult(0, str(response))
