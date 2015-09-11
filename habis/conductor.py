@@ -24,7 +24,8 @@ class HabisRemoteConductorGroup(object):
 		onConnect will be added as a callback to the deferred returned
 		by self.connect() and be provided a reference to self.
 		Likewise, onConnectErr will be added as an errback to the same
-		deferred to handle connection errors.
+		deferred to handle connection errors. If both are defined, the
+		callback and errback are installed in parallel.
 
 		If reactor is not None, a reference to will be captured in
 		self.reactor. Otherwise, the default twisted.internet.reactor
@@ -42,8 +43,12 @@ class HabisRemoteConductorGroup(object):
 		self.connected = False
 		d = self.connect()
 
-		if onConnect: d.addCallback(onConnect)
-		if onConnectErr: d.addErrback(onConnectErr)
+		if onConnect and onConnectErr:
+			d.addCallbacks(onConnect, onConnectErr)
+		elif onConnect:
+			d.addCallback(onConnect)
+		elif onConnectErr:
+			d.addErrback(onConnectErr)
 
 
 	def throwError(self, failure, message):

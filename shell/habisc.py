@@ -8,13 +8,29 @@ from twisted.internet import reactor
 from habis.habiconf import HabisConfigError, HabisConfigParser
 from habis.conductor import HabisRemoteConductorGroup
 
+class Terminator(object):
+	'''
+	Stops the provided reactor.
+	'''
+	def __init__(self):
+		self.terminated = False
+
+	def failure(self, failure):
+		self.terminate('Fatal error ' + str(failure.value))
+
+	def success(self, _):
+		self.terminate('Clean reactor exit')
+
+	def terminate(self, msg):
+		if self.terminated: return
+
+		self.terminated = True
+		print msg
+		reactor.stop()
+
+
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
-
-
-def fatalError(failure):
-	print 'Fatal error', failure.value
-	reactor.stop()
 
 
 def configureGroup(config):
@@ -41,23 +57,20 @@ def configureGroup(config):
 		err = 'Invalid optional port specification in [%s]' % csec
 		raise HabisConfigError.fromException(err, e)
 
+	t = Terminator()
+
 	def remoteCaller(_):
 		d = hgroup.broadcast(*command)
-		d.addCallbacks(printResult, fatalError)
-		def stopper(x):
-			print 'Stopper', x
+		def printResult(result):
+			print result
 			reactor.stop()
-		d.addCallback(lambda _ : reactor.stop())
+		d.addCallbacks(printResult, t.failure)
 		return d
 
 	# Create the client-side conductor group, run the remote command on success
-	hgroup = HabisRemoteConductorGroup(addrs, port, remoteCaller, fatalError, reactor)
+	hgroup = HabisRemoteConductorGroup(addrs, port, remoteCaller, t.failure, reactor)
 
 	return hgroup
-
-
-def printResult(result):
-	print result
 
 
 if __name__ == "__main__":
