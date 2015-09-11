@@ -12,28 +12,38 @@ class HabisRemoteConductorGroup(object):
 	A client-side class for managing a collection of remote HabisConductor
 	references.
 	'''
-	def __init__(self, servers, port, reactor=None):
+	def __init__(self, servers, port,
+			onConnect=None, onConnectErr=None, reactor=None):
 		'''
 		Initialize connections on the specified port to each remote
 		address in the sequence servers. Invoke self.connect() to
 		initialize the connections.
 
-		If reactor is not None, capture a reference to the reactor in
-		self.reactor. Otherwise, install the default Twisted reactor
-		and capture a reference.
+		The arguments onConnect and onConnectErr should be callables
+		that accept a single argument, or else None. If not None,
+		onConnect will be added as a callback to the deferred returned
+		by self.connect() and be provided a reference to self.
+		Likewise, onConnectErr will be added as an errback to the same
+		deferred to handle connection errors.
+
+		If reactor is not None, a reference to will be captured in
+		self.reactor. Otherwise, the default twisted.internet.reactor
+		will be installed and referenced in self.reactor.
 		'''
 		# Initialize a map (address, port) => conductor reference
 		from collections import OrderedDict
-		self.conductors = OrderedDict.fromkeys(((server, port) for server in servers))
+		self.conductors = OrderedDict.fromkeys(((s, port) for s in servers))
 		self.port = port
+
 		# Capture a reference to the provided reactor, or a default
 		if reactor is None: from twisted.internet import reactor
 		self.reactor = reactor
 
 		self.connected = False
-		self.connect()
+		d = self.connect()
 
-		# XXX TODO: Require a callback to be invoked on successful connection
+		if onConnect: d.addCallback(onConnect)
+		if onConnectErr: d.addErrback(onConnectErr)
 
 
 	def throwError(self, failure, message):
@@ -61,20 +71,20 @@ class HabisRemoteConductorGroup(object):
 			d.addErrback(self.throwError, 'Failed to get root object at %s:%d' % (address, port))
 			connections.append(d)
 
+		def gatherConductors(results):
+			'''
+			Capture a reference to all conductors in the map
+			self.conductors, then return self down the chain.
+			'''
+			for cond, (addr, port) in zip(results, self.conductors):
+				self.conductors[addr, port] = cond
+			self.connected = True
+			return self
+
 		# Join all of the deferreds into a list, storing successful results
 		d = defer.gatherResults(connections, consumeErrors=True)
-		d.addCallback(self.storeConductors)
-		self.rootdeferred = d
-
-
-	def storeConductors(self, results):
-		'''
-		Capture a reference to each HabisConductor proxy fetched from a
-		remote connection.
-		'''
-		for cond, (addr, port) in zip(results, self.conductors):
-			self.conductors[addr, port] = cond
-		self.connected = True
+		d.addCallback(gatherConductors)
+		return d
 
 
 	def broadcast(self, cmd, *args, **kwargs):

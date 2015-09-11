@@ -15,7 +15,6 @@ def usage(progname):
 def fatalError(failure):
 	print 'Fatal error', failure.value
 	reactor.stop()
-	return failure
 
 
 def configureGroup(config):
@@ -42,18 +41,17 @@ def configureGroup(config):
 		err = 'Invalid optional port specification in [%s]' % csec
 		raise HabisConfigError.fromException(err, e)
 
-	# XXX TODO: Provide onConnect callback to start chain outside of class
-
 	def remoteCaller(_):
 		d = hgroup.broadcast(*command)
 		d.addCallbacks(printResult, fatalError)
+		def stopper(x):
+			print 'Stopper', x
+			reactor.stop()
 		d.addCallback(lambda _ : reactor.stop())
 		return d
 
-	# Create the client-side conductor group
-	hgroup = HabisRemoteConductorGroup(addrs, port, reactor)
-	# Configure the command to run
-	hgroup.rootdeferred.addCallbacks(remoteCaller, fatalError)
+	# Create the client-side conductor group, run the remote command on success
+	hgroup = HabisRemoteConductorGroup(addrs, port, remoteCaller, fatalError, reactor)
 
 	return hgroup
 
