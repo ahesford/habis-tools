@@ -7,6 +7,61 @@ from twisted.internet import threads, defer
 
 class HabisConductorError(Exception): pass
 
+
+class HabisRemoteCommand(object):
+	'''
+	A class to prepare positional and keyword argument lists from a special
+	configuration.
+	'''
+	@classmethod
+	def fromargs(cls, cmd, *args, **kwargs):
+		'''
+		Create a HabisRemoteCommand instance for the given command,
+		using the provided args and kwargs as 'default' values.
+		'''
+		return cls(cmd, argmap={'default': args}, kwargmap={'default': kwargs})
+
+
+	def __init__(self, cmd, argmap={}, kwargmap={}, fatalError=False):
+		'''
+		Initialize the HabisRemoteCommand instance with the provided
+		string command. Optional argmap and kwargmap should be
+		dictionaries whose keys distinguish different option sets. Each
+		value in argmap should be a list of positional arguments; each
+		value in kwargmap should be a kwargs dictionary.
+
+		The boolean value fatalError is captured as self.fatalError
+		for record keeping.
+		'''
+		if not isinstance(cmd, basestring):
+			raise ValueError('Command must be a string')
+
+		self.cmd = cmd
+		self.argmap = dict(argmap)
+		self.kwargmap = dict(kwargmap)
+		self.fatalError = fatalError
+
+
+	def argsForKey(self, key):
+		'''
+		Return a tuple (args, kwargs) corresponding entries of
+		self.argmap[key] and self.kwargmap[key]. If the key does not
+		exist in either set, the 'default' key is used as a fallback.
+		If the 'default' key does not exist, the argument collection
+		will be empty.
+		'''
+		args = []
+		kwargs = {}
+
+		if key in self.argmap: args = self.argmap[key]
+		elif 'default' in self.argmap: args = self.argmap['default']
+
+		if key in self.kwargmap: kwargs = self.kwargmap[key]
+		elif 'default' in self.kwargmap: kwargs = self.kwargmap['default']
+
+		return args, kwargs
+
+
 class HabisResponseAccumulator(object):
 	'''
 	Accumulate HABIS conductor responses from multiple hosts and distill
@@ -64,20 +119,11 @@ class HabisRemoteConductorGroup(object):
 	A client-side class for managing a collection of remote HabisConductor
 	references.
 	'''
-	def __init__(self, servers, port,
-			onConnect=None, onConnectErr=None, reactor=None):
+	def __init__(self, servers, port, reactor=None):
 		'''
-		Initialize connections on the specified port to each remote
-		address in the sequence servers. Invoke self.connect() to
-		initialize the connections.
-
-		The arguments onConnect and onConnectErr should be callables
-		that accept a single argument, or else None. If not None,
-		onConnect will be added as a callback to the deferred returned
-		by self.connect() and be provided a reference to self.
-		Likewise, onConnectErr will be added as an errback to the same
-		deferred to handle connection errors. If both are defined, the
-		callback and errback are installed in parallel.
+		Initialize HabisRemoteConductorGroup that will populate its
+		conductor lists from the provided servers, each listening on
+		the given port.
 
 		If reactor is not None, a reference to will be captured in
 		self.reactor. Otherwise, the default twisted.internet.reactor
@@ -93,14 +139,6 @@ class HabisRemoteConductorGroup(object):
 		self.reactor = reactor
 
 		self.connected = False
-		d = self.connect()
-
-		if onConnect and onConnectErr:
-			d.addCallbacks(onConnect, onConnectErr)
-		elif onConnect:
-			d.addCallback(onConnect)
-		elif onConnectErr:
-			d.addErrback(onConnectErr)
 
 
 	def throwError(self, failure, message):
@@ -144,10 +182,11 @@ class HabisRemoteConductorGroup(object):
 		return d
 
 
-	def broadcast(self, cmd, *args, **kwargs):
+	def broadcast(self, hacmd):
 		'''
-		Invoke callRemote(*args, **kwargs) on each HabisConductor
-		object in self.conductors.
+		Invoke callRemote(cmd, *args, **kwargs) on each HabisConductor
+		object in self.conductors, where cmd, args and kwargs are
+		pulled from the HabisRemoteCommand instance hacmd.
 
 		Returns a DeferredList joining all of the callRemote deferreds.
 		'''
@@ -160,7 +199,9 @@ class HabisRemoteConductorGroup(object):
 
 		calls = []
 		for (addr, port), cond in self.conductors.iteritems():
-			d = cond.callRemote(cmd, *args, **kwargs)
+			# Try to get the args and kwargs for this server
+			args, kwargs = hacmd.argsForKey(addr)
+			d = cond.callRemote(hacmd.cmd, *args, **kwargs)
 			d.addCallback(addhost(addr))
 			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
 			calls.append(d)
