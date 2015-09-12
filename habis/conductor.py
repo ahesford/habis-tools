@@ -7,6 +7,58 @@ from twisted.internet import threads, defer
 
 class HabisConductorError(Exception): pass
 
+class HabisResponseAccumulator(object):
+	'''
+	Accumulate HABIS conductor responses from multiple hosts and distill
+	the output and return codes.
+	'''
+	def __init__(self, responses):
+		'''
+		Initialize a HabisResponseAccumulator with the provided
+		response lists.
+		'''
+		self.responses = list(responses)
+
+
+	def returncode(self):
+		'''
+		Returns the first nonzero return code, or else 0.
+		'''
+		for response in self.responses:
+			retcode = response['returncode']
+			if retcode != 0: return retcode
+
+		return 0
+
+
+	def getoutput(self, stderr=False):
+		'''
+		Return distilled output from the 'stdout' or 'stderr' result
+		keys if stderr is, respectively, False or True.
+		'''
+		output = ''
+		key = 'stdout' if not stderr else 'stderr'
+
+		for i, response in enumerate(self.responses):
+			try: text = response[key].rstrip()
+			except KeyError: text = ''
+
+			# Skip empty output
+			if len(text) < 1: continue
+
+			# Print the server name, if possible
+			try:
+				serv = response['host']
+			except KeyError:
+				serv = '[Missing host for response at index %d]' % i
+
+			output += serv + '\n' + '=' * len(serv) + '\n'
+			output += text + '\n\n'
+
+		return output.rstrip()
+
+
+
 class HabisRemoteConductorGroup(object):
 	'''
 	A client-side class for managing a collection of remote HabisConductor
@@ -99,9 +151,17 @@ class HabisRemoteConductorGroup(object):
 
 		Returns a DeferredList joining all of the callRemote deferreds.
 		'''
+		def addhost(host):
+			# Callback factory to add a host record to each response
+			def callback(result):
+				result['host'] = host
+				return result
+			return callback
+
 		calls = []
 		for (addr, port), cond in self.conductors.iteritems():
 			d = cond.callRemote(cmd, *args, **kwargs)
+			d.addCallback(addhost(addr))
 			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
 			calls.append(d)
 		return defer.gatherResults(calls, consumeErrors=True)

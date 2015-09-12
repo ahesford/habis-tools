@@ -5,87 +5,12 @@ import sys
 from twisted.spread import pb
 
 from habis.habiconf import HabisConfigError, HabisConfigParser
-from habis.conductor import HabisRemoteConductorGroup
-
-class ResponseManager(object):
-	'''
-	Manage responses from HABIS conductor commands.
-	'''
-	def __init__(self, servers, reactor=None):
-		'''
-		Initialize a response manager to handle errors and result
-		printing coming from the provided list of servers.
-		'''
-		self.servers = list(servers)
-		self._results = []
-		if reactor is None:
-			from twisted.internet import reactor
-		self.reactor = reactor
+from habis.conductor import HabisRemoteConductorGroup, HabisResponseAccumulator
 
 
-	@property
-	def results(self):
-		'''
-		A list of process result dictionaries, each of which must
-		contain a 'returncode' key with an integer value, and may
-		optionally contain string values for keys 'stdout' and 'stderr'
-		that contain the contents of these streams.
-		'''
-		return list(self._results)
-
-	@results.setter
-	def results(self, rlist):
-		if len(rlist) != len(self.servers):
-			raise IndexError('Result and server lists must have same length')
-		for result in rlist:
-			if 'returncode' not in result:
-				raise KeyError('Each result dictionary must have a returncode')
-		self._results = list(rlist)
-
-
-	def returncode(self):
-		'''
-		Returns the first non-zero returncode in the result list. If
-		the result list has not been populated, returns 1. Otherwise,
-		returns 0.
-		'''
-		if len(self.results) != len(self.servers): return 1
-
-		for result in self.results:
-			returncode = result['returncode']
-			if returncode != 0: return returncode
-
-		return 0
-
-
-	def getoutput(self, stderr=False):
-		'''
-		Return cleanly formatted, concatenated contents of 'stdout' (if
-		stderr is False) or 'stderr' keys in the result list.
-		'''
-		output = ''
-		key = 'stdout' if not stderr else 'stderr'
-		for serv, response in zip(self.servers,self.results):
-			try: text = response[key].rstrip()
-			except KeyError: text = ''
-
-			# Skip empty output
-			if len(text) < 1: continue
-
-			# Add the server name
-			sserv = serv.strip()
-			output += sserv + '\n' + '=' * len(sserv) + '\n'
-			output += text + '\n\n'
-
-		return output.rstrip()
-
-
-	def error(self, failure):
-		'''
-		Print a fatal error and stop the reactor.
-		'''
-		print 'Fatal error:', failure.value
-		reactor.stop()
+def fatalError(reason):
+	print 'Fatal error:', reason.value
+	reactor.stop()
 
 
 def usage(progname):
@@ -117,27 +42,31 @@ def configureGroup(config):
 		raise HabisConfigError.fromException(err, e)
 
 	from twisted.internet import reactor
-	responder = ResponseManager(addrs, reactor)
 
 	def remoteCaller(_):
 		d = hgroup.broadcast(*command)
-		def printResult(result):
-			responder.results = result
-			stdout = responder.getoutput()
+		def printResult(results):
+			acc = HabisResponseAccumulator(results)
+			stdout = acc.getoutput()
 			if len(stdout) > 0:
 				print stdout
-			stderr = responder.getoutput(True)
+			stderr = acc.getoutput(True)
 			if len(stderr) > 0:
 				print >> sys.stderr, stderr
+
+			retcode = acc.returncode()
+			if retcode != 0:
+				print >> sys.stderr, 'ERROR: nonzero return status %d' % retcode
+
 			reactor.stop()
-		d.addCallbacks(printResult, responder.error)
+		d.addCallbacks(printResult, fatalError)
 		return d
 
 	# Create the client-side conductor group, run the remote command on success
 	hgroup = HabisRemoteConductorGroup(addrs, port,
-			remoteCaller, responder.error, responder.reactor)
+			remoteCaller, fatalError, reactor)
 
-	return hgroup, responder
+	return hgroup
 
 
 if __name__ == "__main__":
@@ -154,7 +83,6 @@ if __name__ == "__main__":
 		sys.exit(1)
 
 	# Configure the client proxy
-	hgroup, responder = configureGroup(config)
+	hgroup = configureGroup(config)
 	from twisted.internet import reactor
 	reactor.run()
-	sys.exit(responder.returncode())
