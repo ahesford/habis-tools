@@ -27,19 +27,29 @@ class HabisRemoteCommand(object):
 		Initialize the HabisRemoteCommand instance with the provided
 		string command. Optional argmap and kwargmap should be
 		dictionaries whose keys distinguish different option sets. Each
-		value in argmap should be a list of positional arguments; each
-		value in kwargmap should be a kwargs dictionary.
+		value in kwargmap should be a kwargs dictionary. Each value in
+		argmap should either be a list of positional arguments or else
+		a single string; if the value is a string, it will be split
+		into string arguments using shlex.split().
 
 		The boolean value fatalError is captured as self.fatalError
 		for record keeping.
 		'''
+		from shlex import split as shsplit
+
 		if not isinstance(cmd, basestring):
 			raise ValueError('Command must be a string')
 
 		self.cmd = cmd
-		self.argmap = dict(argmap)
 		self.kwargmap = dict(kwargmap)
 		self.fatalError = fatalError
+
+		# Build the argmap
+		self.argmap = {}
+		for key, args in argmap.iteritems():
+			if isinstance(args, basestring):
+				args = shsplit(args)
+			self.argmap[key] = args
 
 
 	def argsForKey(self, key):
