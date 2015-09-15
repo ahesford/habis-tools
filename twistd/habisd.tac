@@ -16,11 +16,20 @@ def configureConductor():
 			'sleep' : '/bin/sleep',
 			'hostname' : '/bin/hostname',
 			'uptime' : '/usr/bin/uptime',
+			'test256' : '/opt/habis/bin/test256',
+			'habismon' : '/opt/habis/bin/habismon'
+	}
+
+	# The block command wrappers to attach to the conductor class
+	blockwrappers = {
+			'echo' : '/bin/echo'
 	}
 
 	# Register the commands to wrap
 	for func, cmd in wrappers.iteritems():
-		HabisConductor.registerWrapper(func, cmd)
+		HabisConductor.registerWrapper(func, cmd, isBlock=False)
+	for func, cmd in blockwrappers.iteritems():
+		HabisConductor.registerWrapper(func, cmd, isBlock=True)
 
 	# Listen on the desired port and address
 	factory = pb.PBServerFactory(HabisConductor())

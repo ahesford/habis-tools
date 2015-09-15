@@ -52,6 +52,17 @@ class HabisRemoteCommand(object):
 			self.argmap[key] = args
 
 
+	@property
+	def isBlock(self):
+		'''
+		Returns True if this is a blocked command that will return a
+		list of command response dictionaries for each host, False if
+		this is a normal command that only returns a single command
+		response dictionary.
+		'''
+		return self.cmd.startswith('block_')
+
+
 	def argsForKey(self, key):
 		'''
 		Return a tuple (args, kwargs) corresponding entries of
@@ -211,9 +222,15 @@ class HabisRemoteConductorGroup(object):
 		'''
 		def addhost(host):
 			# Callback factory to add a host record to each response
-			def callback(result):
-				result['host'] = host
-				return result
+			if hacmd.isBlock:
+				# Blocked commands return a list of result dicts
+				def callback(result):
+					for r in result: r['host'] = host
+					return result
+			else:
+				def callback(result):
+					result['host'] = host
+					return result
 			return callback
 
 		calls = []
@@ -237,44 +254,58 @@ class HabisConductor(pb.Root):
 	wrapmap = {}
 
 	@classmethod
-	def registerWrapper(cls, name, cmd):
+	def registerWrapper(cls, name, cmd, isBlock=False):
 		'''
-		Create a remote_<name> method will create an instance of
-		habis.wrappers.Wrapper to execute the command cmd and return
-		the results of its execute() method asynchronously over the
-		network. Positional arguments to the remote_<name> method are
-		passed to the wrapper constructor, while keyword arguments to
-		the remote_<name> method are passed to the execute() method of
-		the wrapper instance.
+		Create a remote_<name> (if isBlock is False) or
+		remote_block_<name> (if isBlock is True) method that will
+		create an instance of habis.wrappers.CommandWrapper or
+		habis.wrappers.BlockCommandWrapper, respectively, to execute
+		the command cmd and return the results of its execute() method
+		asynchronously over the network. Positional arguments to the
+		remote_<name> method are passed to the wrapper constructor,
+		along with an option 'wrapinit' keyword argument (passed to the
+		constructor as **wrapinit). Any other keyword arguments are
+		passed to the execute() method of the wrapper instance.
 		'''
 		from types import MethodType
 
+		if name.startswith('block_') and not isBlock:
+			raise ValueError('Non-block command names cannot start with "block_"')
+
 		# Ensure that the method does not already exist
-		methodName = 'remote_' + name
+		methodName = ('remote_' if not isBlock else 'remote_block_') + name
+
 		if hasattr(cls, methodName):
 			raise AttributeError('Attribute %s already exists in %s' % (methodName, cls.__name__))
 
 		docfmt = 'Instantiate a %s wrapper, asynchronously launch, and return the output'
 
+		if not isBlock:
+			from habis.wrappers import CommandWrapper as Wrapper
+		else:
+			from habis.wrappers import BlockCommandWrapper as Wrapper
+
 		def callWrapper(self, *args, **kwargs):
-			from habis import wrappers
-			w = wrappers.CommandWrapper(cmd, *args)
+			wrapinit = kwargs.pop('wrapinit', {})
+			w = Wrapper(cmd, *args, **wrapinit)
 			return threads.deferToThread(lambda : w.execute(**kwargs))
+
 		callWrapper.__doc__ = docfmt % cmd
 
 		# Add the method to the class
 		setattr(cls, methodName, MethodType(callWrapper, None, cls))
-		# Record the mapping between method name and wrapper object
-		cls.wrapmap[methodName] = cmd
+		# Record the mapping between method name and wrapped command
+		cls.wrapmap[methodName] = { 'command': cmd, 'isBlock': isBlock }
 
 
 	@classmethod
-	def deregisterWrapper(cls, name):
+	def deregisterWrapper(cls, name, isBlock=False):
 		'''
-		Remove the remote_<name> method that invokes an associated
-		habis.wrappers.Wrapper instance.
+		Remove the remote_<name> or remote_block_<name> method
+		(according to the truth value of isBlock) that invokes an
+		associated habis.wrappers.CommandWrapper instance.
 		'''
-		methodName = 'remote_' + name
+		methodName = ('remote_' if not isBlock else 'remote_block_') + name
 		if methodName not in cls.wrapmap:
 			raise AttributeError('Method was not previously registered with registerWrapper')
 

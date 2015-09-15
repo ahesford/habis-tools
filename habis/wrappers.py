@@ -2,15 +2,15 @@
 Routines to wrap HABIS executables in Python classes.
 '''
 
-def _strlist(a):
+def _strtup(a):
 	'''
-	If a is an iterable, convert it to a list of strings using
+	If a is an iterable, convert it to a tuple of strings using
 	str(). Otherwise, a should be an integer, and the list of
 	strings is build from xrange(a).
 	'''
 	try: it = iter(a)
 	except TypeError: it = xrange(a)
-	return [str(av) for av in it]
+	return tuple(str(av) for av in it)
 
 
 class CommandWrapper(object):
@@ -30,16 +30,16 @@ class CommandWrapper(object):
 	@property
 	def args(self):
 		'''
-		Return a copy of the positional argument list.
+		Return the positional argument tuple.
 		'''
-		return list(self._args)
+		return self._args
 
 	@args.setter
 	def args(self, a):
 		'''
-		Assign the positional argument list.
+		Assign the positional argument tuple.
 		'''
-		self._args = [str(s) for s in a]
+		self._args = tuple(str(s) for s in a)
 
 
 	@staticmethod
@@ -147,27 +147,27 @@ class BlockCommandWrapper(CommandWrapper):
 	@property
 	def actors(self):
 		'''
-		Return a copy of the actors list. When a wrapped command is
-		repeatedly invoked, one thread is spawned for each actor, and
-		that actor is passed as the first argument to the command.
+		Return the actors tuple. When a wrapped command is repeatedly
+		invoked, one thread is spawned for each actor, and that actor
+		is passed as the first argument to the command.
 		'''
-		return list(self._actors)
+		return self._actors
 
 
 	@actors.setter
-	def actors(self, act): self._actors = _strlist(act)
+	def actors(self, act): self._actors = _strtup(act)
 
 	@property
 	def blocks(self):
 		'''
-		Return a copy of the block list. For each invocation of the
-		wrapped command, a value from the self.chunk portion of the
-		block list is passed as a second argument.
+		Return the block tuple. For each invocation of the wrapped
+		command, a value from the self.chunk portion of the block tuple
+		is passed as a second argument.
 		'''
-		return list(self._blocks)
+		return self._blocks
 
 	@blocks.setter
-	def blocks(self, blk): self._blocks = _strlist(blk)
+	def blocks(self, blk): self._blocks = _strtup(blk)
 
 
 	def _thread_execute(self, queue, actor, lblocks, **kwargs):
@@ -182,7 +182,7 @@ class BlockCommandWrapper(CommandWrapper):
 		error is placed on stderr, and the return code will be 255.
 		'''
 		for blk in lblocks:
-			args = [actor, blk] + self.args
+			args = [actor, blk] + list(self.args)
 			try:
 				result = self._execute(self._command, *args, **kwargs)
 			except Exception as e:

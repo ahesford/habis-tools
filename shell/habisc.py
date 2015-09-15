@@ -7,8 +7,6 @@ import yaml
 from twisted.spread import pb
 from twisted.internet import reactor
 
-from habis.habiconf import HabisConfigError, HabisConfigParser
-
 from habis.conductor import HabisRemoteConductorGroup
 from habis.conductor import HabisResponseAccumulator
 from habis.conductor import HabisRemoteCommand
@@ -29,62 +27,64 @@ def nonfatalError(reason):
 	print 'Non-fatal error:', reason.value
 
 
-def printResult(results):
+def flattener(results):
 	'''
-	Pretty-print output from multiple remote HabisConductors.
-	
-	If shouldStop is not False, stop the reactor after printing.
+	Flatten a list-of-lists into a single list.
+	'''
+	return [r for result in results for r in result]
+
+
+def printResult(results, isBlock=False, clearline=True):
+	'''
+	Pretty-print output from multiple remote HabisConductors. If isBlock is
+	True, results is a list-of-lists that comes from multiple remote
+	blocked commands. This list-of-lists will be flattened prior to printing.
 	'''
 	if results is None: return
+
+	if isBlock: results = [r for result in results for r in result]
 
 	acc = HabisResponseAccumulator(results)
 	stdout = acc.getoutput()
 	if len(stdout) > 0:
 		print stdout
+		if clearline:
+			print ''
 	stderr = acc.getoutput(True)
 	if len(stderr) > 0:
 		print >> sys.stderr, stderr
+		if clearline:
+			print >> sys.stderr, ''
 
 	retcode = acc.returncode()
 	if retcode != 0:
 		print >> sys.stderr, 'ERROR: nonzero return status %d' % retcode
 
+	return results
+
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration> <cmdlist.yaml>' % progname
+	print >> sys.stderr, 'USAGE: %s <cmdlist.yaml>' % progname
 
 
-def configureGroup(config, cmdlist):
-	csec = 'conductorClient'
-
-	# Grab the remote host
-	try:
-		addrs = config.getlist(csec, 'address')
-	except Exception as e:
-		err = 'Configuration must specify addresses in [%s]' % csec
-		raise HabisConfigError.fromException(err, e)
-
-	# Grab the port on which to listen
-	try:
-		port = config.getint(csec, 'port', failfunc=lambda: 8088)
-	except Exception as e:
-		err = 'Invalid optional port specification in [%s]' % csec
-		raise HabisConfigError.fromException(err, e)
-
+def configureGroup(hosts, port, cmdlist):
 	# Create the client-side conductor group
-	hgroup = HabisRemoteConductorGroup(addrs, port, reactor)
+	hgroup = HabisRemoteConductorGroup(hosts, port, reactor)
 
 	def remoteCaller(_):
 		try: hacmd = cmdlist.pop(0)
 		except IndexError: return
 
+		# Blocked response list-of-lists must be flattened
+		isBlock = hacmd.isBlock
+
 		if len(cmdlist) > 0:
 			def nextCallback(result):
-				printResult(result)
+				printResult(result, isBlock)
 				return remoteCaller(result)
 		else: 
 			def nextCallback(result):
-				printResult(result)
+				printResult(result, isBlock, False)
 				reactor.stop()
 
 		d = hgroup.broadcast(hacmd)
@@ -102,28 +102,22 @@ def configureGroup(config, cmdlist):
 
 
 if __name__ == "__main__":
-	if len(sys.argv) != 3:
-		usage(sys.argv[0])
-		sys.exit(1)
-
-	try:
-		# Read the configuration file
-		config = HabisConfigParser.fromfile(sys.argv[1])
-	except Exception as e:
-		print >> sys.stderr, 'ERROR: could not load configuration file', sys.argv[1]
-		print >> sys.stderr, '\tReason:', str(e)
+	if len(sys.argv) != 2:
 		usage(sys.argv[0])
 		sys.exit(1)
 
 	try:
 		# Read the command list
-		commands = yaml.safe_load_all(open(sys.argv[2], 'rb'))
-		cmdlist = [HabisRemoteCommand(**c) for c in commands]
+		configuration = yaml.safe_load(open(sys.argv[1], 'rb'))
+		connect = configuration['connect']
+		hosts = connect['hosts']
+		port = connect.get('port', 8088)
+		cmdlist = [HabisRemoteCommand(**c) for c in configuration['commands']]
 	except Exception as e:
-		print >> sys.stderr, 'ERROR: could not load command file', sys.argv[2]
-		print >> sys.stderr, '\tReason:', str(e)
+		print >> sys.stderr, 'ERROR: could not load command file', sys.argv[1]
+		print >> sys.stderr, 'Reason:', e
 		sys.exit(1)
 
 	# Configure the client proxy
-	hgroup = configureGroup(config, cmdlist)
+	hgroup = configureGroup(hosts, port, cmdlist)
 	reactor.run()
