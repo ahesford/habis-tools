@@ -111,11 +111,20 @@ class HabisResponseAccumulator(object):
 			# Skip empty output
 			if len(text) < 1: continue
 
-			# Print the server name, if possible
-			try:
-				serv = response['host']
-			except KeyError:
-				serv = '[Missing host for response at index %d]' % i
+			# Grab the "host", "actor", and "block" designators
+			serv = response.get('host', '')
+			actor = response.get('actor', '')
+			block = response.get('block', '')
+
+			if actor:
+				actor = 'Actor ' + actor
+				serv = (serv + ' ' + actor) if serv else actor
+			if block:
+				block = 'Block ' + block
+				serv = (serv + ' ' + block) if serv else block
+
+			if not serv:
+				serv = '[Missing response identifier at index %d]' % i
 
 			output += serv + '\n' + '=' * len(serv) + '\n'
 			output += text + '\n\n'
