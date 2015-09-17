@@ -1,105 +1,137 @@
 #!/usr/bin/env python
 
-import numpy as np, os, sys
-import getopt
-import socket
-import random
-import shutil
-import subprocess
-
-from itertools import izip, repeat
-from mpi4py import MPI
+import os, sys, getopt, random
 
 from habis import formats
 
+def hostislocal(host):
+	'''
+	Returns True if the provided hostname or IP address belongs to the
+	local machine, False otherwise. Works by trying to bind to the address.
+	'''
+	import socket, errno
+	addr = socket.gethostbyname(host)
+	s = socket.socket()
+
+	try:
+		try: s.bind((addr, 0))
+		except socket.error as err:
+			if err.args[0] == errno.EADDRNOTAVAIL: return False
+			else: raise
+	finally: s.close()
+
+	return True
+
+
+def xfer(srcfile, dstfile, host):
+	'''
+	If the transfer is local (host is None or ''), attempt to hard-link the
+	source file srcfile at the location dstfile. If the link fails, attempt
+	a copy. Returns True (False) if the file was linked (copied), or raises
+	subprocess.CalledProcessError on error.
+
+	If the transfer is not local, transfer srcfile to <host>:<dstfile> with
+	scp. Returns True Unless a subprocess.CalledProcessError is raised.
+	'''
+	from subprocess32 import check_call, CalledProcessError
+
+	if host:
+		check_call(['scp', srcfile, host + ':' + dstfile])
+		return True
+
+	if os.path.abspath(srcfile) == os.path.abspath(dstfile):
+		# If source and destination are the same, no need to link
+		return True
+
+	try:
+		check_call(['ln', srcfile, dstfile])
+		return True
+	except CalledProcessError:
+		check_call(['cp', srcfile, dstfile])
+		return False
+
+
 def usage(progname = 'redistribute.py'):
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, "Usage:", binfile, "[-h] [-s svolfile] [-n nodelist] [-i host-suffix] <srcdir>/<inprefix> <destdir>/<outprefix>"
+	print >> sys.stderr, "Usage:", binfile, "[-h] [-z] -g <grpcounts> -n <hosts> -a <num> <srcdir>/<inprefix> <destdir>/<outprefix>"
+	print >> sys.stderr, "\t-g <grpcounts>: A comma-separated list of file groups ngrp1,ngrp2,[...]"
+	print >> sys.stderr, "\t-n <hosts>: A comma-separated list of of hosts participating in the transfer"
+	print >> sys.stderr, "\t-a <num>: Accumulate all files with the same value for group <num> on a given host"
+	print >> sys.stderr, "\t-z: Zero-pad group indices in destination file names"
+
 
 if __name__ == '__main__':
-	optlist, args = getopt.getopt(sys.argv[1:], 'hi:n:s:')
+	optlist, args = getopt.getopt(sys.argv[1:], 'hzg:n:a:')
 
-	svolfile = None
-	nodelist = None
-	ifsuffix = None
+	hostlist = None
+	grpcounts = None
+	groupacc = None
+	zeropad = False
 
 	# Parse the option list
 	for opt in optlist:
 		if opt[0] == '-n':
-			nodelist = [int(l) for l in opt[1].split(',')]
-		elif opt[0] == '-s':
-			svolfile = opt[1]
-		elif opt[0] == '-i':
-			ifsuffix = opt[1]
+			hostlist = [(o, hostislocal(o)) for o in opt[1].split(',')]
+		elif opt[0] == '-g':
+			grpcounts = [int(o) for o in opt[1].split(',')]
+		elif opt[0] == '-a':
+			groupacc = int(opt[1])
+		elif opt[0] == '-z':
+			zeropad = True
 		elif opt[0] == '-h':
 			usage(sys.argv[0])
-			MPI.COMM_WORLD.Abort()
 			sys.exit()
 		else:
 			usage(sys.argv[0])
-			MPI.COMM_WORLD.Abort(1)
 			sys.exit('Invalid argument')
 
-	# There must be at least two arguments (input and output file templates)
-	if len(args) < 2:
+	# Ensure mandatory arguments were provided
+	if len(args) < 2 or not (hostlist or grpcounts) or groupacc is None:
 		usage(sys.argv[0])
-		MPI.COMM_WORLD.Abort(1)
 		sys.exit('Improper argument specification')
+
+	ngroups = len(grpcounts)
+	if groupacc < 0 or groupacc >= ngroups:
+		sys.exit('Option to -a must be positive and less than number of groups')
 	
 	# Grab the in prefix and the source directory
 	srcdir, inprefix = os.path.split(args[0])
 	# The destination directory and prefix can remain joined together
 	destform = args[1]
 
-	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
-	identifier = 'MPI rank %d of %d' % (mpirank, mpisize)
+	print 'Transfer from %s to %s' % (srcdir, os.path.dirname(destform))
 
-	print '%s: transfer from %s to %s' % (identifier, srcdir, os.path.dirname(destform))
+	# Figure out the start and share of each destination host
+	nhosts = len(hostlist)
+	share, rem = grpcounts[groupacc] / nhosts, grpcounts[groupacc] % nhosts
+	dstshares = [(i * share + min(i, rem), share + int(i < rem)) for i in range(nhosts)]
+	# Map group indices to hosts
+	def grouptohost(i):
+		for j, (start, share) in enumerate(dstshares):
+			if start <= i < start + share:
+				return hostlist[j]
+		raise IndexError('Group index is not assigned to a host')
 
-	# Grab a dictionary of all spectral representations, keyed by index
-	hostname = socket.gethostname()
-	if ifsuffix is not None: hostname += ifsuffix
-	specfiles = dict((s[1], hostname + ":" + s[0]) 
-			for s in formats.findenumfiles(srcdir, prefix=inprefix, suffix='\.dat'))
+	# Build a randomly-ordered list of all local files
+	locfiles = formats.findenumfiles(srcdir, inprefix, '\.dat', ngroups)
+	random.shuffle(locfiles)
 
-	# Accumulate the list of sources on every rank, and flatten into one dictionary
-	srclists = MPI.COMM_WORLD.allgather(specfiles)
-	srclists = dict(kv for s in srclists for kv in s.items())
+	if zeropad:
+		from pycwp.util import zeropad as zpadstr
 
-	# If a subvolume list was specified, use it; otheruse use all subvolumes
-	if svolfile is not None:
-		svols = np.loadtxt(svolfile).astype(int).tolist()
-	else: svols = sorted(srclists.keys())
-
-	# If a receiving nodelist was not specified, use all participating nodes
-	if nodelist is None: nodelist = range(mpisize)
-
-	# Figure the share of subvolumes to be received at this rank
-	share, rem = len(svols) / len(nodelist), len(svols) % len(nodelist)
-	try:
-		drank = nodelist.index(mpirank)
-		start = drank * share + min(drank, rem)
-		if drank < rem: share += 1
-		rcvsvols = svols[start:start+share]
-	except ValueError:
-		rcvsvols = []
-
-	# Randomly shuffle the subvolume ordering to minimize contention
-	random.shuffle(rcvsvols)
-
-	# Pull out a list of local subvolumes
-	locsvols = set(specfiles.keys())
-
-	# Transfer the subvolumes
-	for svol in rcvsvols:
-		dstfile = destform + str(svol) + '.dat'
-		if svol in locsvols:
-			# If the file is local, just copy it
-			srcfile = os.path.join(srcdir, os.path.basename(specfiles[svol]))
-			shutil.copyfile(srcfile, dstfile)
+	# Transfer each file one-by-one
+	for lfile in locfiles:
+		srcfile, indices = lfile[0], lfile[1:]
+		host, isLocal = grouptohost(indices[groupacc])
+		# Build a string representation of the group indices
+		if zeropad:
+			grpstr = '-'.join(zpadstr(d, m) for d, m in zip(indices, grpcounts))
 		else:
-			# Otherwise, use scp
-			srcfile = srclists[svol]
-			subprocess.call(["scp", srcfile, dstfile])
+			grpstr = '-'.join(str(d) for d in indices)
 
-	print '%s: finished data exchange' % identifier
+		# Build the destination file name
+		destfile = destform + '-' + grpstr + '.dat'
+		# Perform the transfers
+		xfer(srcfile, destfile, host if not isLocal else None)
+
+	print 'Finished data exchange'

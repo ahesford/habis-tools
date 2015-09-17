@@ -13,17 +13,28 @@ from collections import OrderedDict
 from pycwp import cutil
 from pycwp.util import bidict
 
-def findenumfiles(dir, prefix='.*?', suffix=''):
+def findenumfiles(dir, prefix='.*?', suffix='', ngroups=1):
 	'''
 	Find all files in the directory dir with a name matching the regexp
-	r'^<PREFIX>([0-9]+)<SUFFIX>$', where <PREFIX> is replaced with an
-	optional prefix and <SUFFIX> is replaced with an optional suffix to
-	restrict the search, and return a list of tuples in which the first
-	item is the name and the second item is the matched integer.
+	r'^<PREFIX>(-([0-9]+)){ngroups}<SUFFIX>$', where <PREFIX> is replaced
+	with an optional prefix and <SUFFIX> is replaced with an optional
+	suffix to restrict the search, and return a list of tuples in which the
+	first item is the name and subsequent entries are the matched integers
+	(which will number ngroups) in left-to-right order.
 	'''
+	from os.path import join
+
+	if ngroups < 1:
+		raise ValueError('At least one number group must be specified')
+
+	# Build the number-matching portion
+	numstr = '-([0-9]+)' * ngroups
+	# Enumerate the matching groups (0 is the whole matching string)
+	grpidx = tuple(range(ngroups + 1))
 	# Build the regexp and filter the list of files in the directory
-	regexp = re.compile(r'^%s([0-9]+)%s$' % (prefix, suffix))
-	return [(os.path.join(dir, f), int(m.group(1)))
+	regexp = re.compile(r'^%s%s%s$' % (prefix, numstr, suffix))
+	# When converting matched groups to integers, discard the whole-string group
+	return [tuple([join(dir, f)] + [int(g) for g in m.group(*grpidx)[1:]])
 			for f in os.listdir(dir) for m in [regexp.match(f)] if m]
 
 
