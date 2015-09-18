@@ -107,11 +107,22 @@ if __name__ == "__main__":
 		sys.exit(1)
 
 	try:
-		# Read the command list
-		configuration = yaml.safe_load(open(sys.argv[1], 'rb'))
+		try:
+			# Mako is used for dynamic configuration is available
+			from mako.template import Template
+		except ImportError:
+			# Without Mako, just treat the configuration as raw YAML
+			configuration = yaml.safe_load(open(sys.argv[1], 'rb'))
+		else:
+			# With Mako, render the configuration before parsing
+			# No rendering variables are supported
+			configuration = yaml.safe_load(Template(filename=sys.argv[1]).render())
+
+		# Read connection information
 		connect = configuration['connect']
 		hosts = connect['hosts']
 		port = connect.get('port', 8088)
+		# Parse the command list
 		cmdlist = [HabisRemoteCommand(**c) for c in configuration['commands']]
 	except Exception as e:
 		print >> sys.stderr, 'ERROR: could not load command file', sys.argv[1]
