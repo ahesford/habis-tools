@@ -53,20 +53,23 @@ def xfer(srcfile, dstfile, host):
 
 def usage(progname = 'redistribute.py'):
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, "Usage:", binfile, "[-h] [-z] -g <grpcounts> -n <hosts> -a <num> <srcdir>/<inprefix> <destdir>/<outprefix>"
+	print >> sys.stderr, "Usage:", binfile, "[-h] [-z] [-t <nthreads>] -g <grpcounts> -n <hosts> -a <num> <srcdir>/<inprefix> <destdir>/<outprefix>"
 	print >> sys.stderr, "\t-g <grpcounts>: A comma-separated list of file groups ngrp1,ngrp2,[...]"
 	print >> sys.stderr, "\t-n <hosts>: A comma-separated list of of hosts participating in the transfer"
 	print >> sys.stderr, "\t-a <num>: Accumulate all files with the same value for group <num> on a given host"
+	print >> sys.stderr, "\t-t <nthreads>: Specify the number of threads to use for simultaneous transfers"
 	print >> sys.stderr, "\t-z: Zero-pad group indices in destination file names"
 
 
 if __name__ == '__main__':
-	optlist, args = getopt.getopt(sys.argv[1:], 'hzg:n:a:')
+	from threading import Thread
+	optlist, args = getopt.getopt(sys.argv[1:], 'hzg:n:a:n:t:')
 
 	hostlist = None
 	grpcounts = None
 	groupacc = None
 	zeropad = False
+	nthreads = 1
 
 	# Parse the option list
 	for opt in optlist:
@@ -76,6 +79,8 @@ if __name__ == '__main__':
 			grpcounts = [int(o) for o in opt[1].split(',')]
 		elif opt[0] == '-a':
 			groupacc = int(opt[1])
+		elif opt[0] == '-t':
+			nthreads = int(opt[1])
 		elif opt[0] == '-z':
 			zeropad = True
 		elif opt[0] == '-h':
@@ -89,6 +94,9 @@ if __name__ == '__main__':
 	if len(args) < 2 or not (hostlist or grpcounts) or groupacc is None:
 		usage(sys.argv[0])
 		sys.exit('Improper argument specification')
+
+	if nthreads < 1:
+		sys.exit('Number of threads must be a positive integer')
 
 	ngroups = len(grpcounts)
 	if groupacc < 0 or groupacc >= ngroups:
@@ -110,28 +118,41 @@ if __name__ == '__main__':
 		for j, (start, share) in enumerate(dstshares):
 			if start <= i < start + share:
 				return hostlist[j]
-		raise IndexError('Group index is not assigned to a host')
+		raise IndexError('Group index %d is not assigned to a host' % i)
 
 	# Build a randomly-ordered list of all local files
 	locfiles = formats.findenumfiles(srcdir, inprefix, '\.dat', ngroups)
 	random.shuffle(locfiles)
 
 	if zeropad:
-		from pycwp.util import zeropad as zpadstr
+		# Zero-pad the index string to allow full range of group indices
+		from pycwp.util import zeropad as idxstr
+	else:
+		# Ignore full range of group indices when not zero-padding
+		def idxstr(d, m): return str(d)
 
-	# Transfer each file one-by-one
-	for lfile in locfiles:
-		srcfile, indices = lfile[0], lfile[1:]
-		host, isLocal = grouptohost(indices[groupacc])
-		# Build a string representation of the group indices
-		if zeropad:
-			grpstr = '-'.join(zpadstr(d, m) for d, m in zip(indices, grpcounts))
-		else:
-			grpstr = '-'.join(str(d) for d in indices)
+	def transferloop(lfiles):
+		# Transfer each file one-by-one
+		for lfile in lfiles:
+			srcfile, indices = lfile[0], lfile[1:]
+			host, isLocal = grouptohost(indices[groupacc])
+			# Build a string representation of the group indices
+			grpstr = '-'.join(idxstr(d, m) for d, m in zip(indices, grpcounts))
 
-		# Build the destination file name
-		destfile = destform + '-' + grpstr + '.dat'
-		# Perform the transfers
-		xfer(srcfile, destfile, host if not isLocal else None)
+			# Build the destination file name
+			destfile = destform + '-' + grpstr + '.dat'
+			# Perform the transfers
+			xfer(srcfile, destfile, host if not isLocal else None)
+
+	workthreads = []
+	for i in range(nthreads):
+		# Process a disjoint chunk of the file list in each thread
+		t = Thread(target=transferloop, args=(locfiles[i::nthreads],))
+		t.daemon = True
+		t.start()
+		workthreads.append(t)
+
+	# Wait for all work to complete
+	for t in workthreads: t.join()
 
 	print 'Finished data exchange'

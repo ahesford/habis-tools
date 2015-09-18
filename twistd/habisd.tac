@@ -7,7 +7,7 @@ def configureConductor():
 	from habis.conductor import HabisConductor
 
 	# The port and address on which the server will listen
-	port = 8088
+	port = 8090
 	addr = ''
 
 	# The command wrappers to attach to the conductor class
@@ -17,7 +17,8 @@ def configureConductor():
 			'hostname' : '/bin/hostname',
 			'uptime' : '/usr/bin/uptime',
 			'test256' : '/opt/habis/bin/test256',
-			'habismon' : '/opt/habis/bin/habismon'
+			'habismon' : '/opt/habis/bin/habismon',
+			'redistribute' : '/opt/custom-python/bin/redistribute.py',
 	}
 
 	# The block command wrappers to attach to the conductor class

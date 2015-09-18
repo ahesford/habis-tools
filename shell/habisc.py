@@ -121,7 +121,7 @@ if __name__ == "__main__":
 		# Read connection information
 		connect = configuration['connect']
 		hosts = connect['hosts']
-		port = connect.get('port', 8088)
+		port = connect.get('port', 8090)
 		# Parse the command list
 		cmdlist = [HabisRemoteCommand(**c) for c in configuration['commands']]
 	except Exception as e:
