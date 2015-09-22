@@ -11,12 +11,13 @@ from habis.conductor import HabisRemoteConductorGroup
 from habis.conductor import HabisResponseAccumulator
 from habis.conductor import HabisRemoteCommand
 
-
-def fatalError(reason):
+def fatalError(reason, hgroup=None):
 	'''
 	Print the fatal error and stop the reactor.
 	'''
 	print 'Fatal error:', reason.value
+	if hgroup is not None:
+		hgroup.fatalError = True
 	reactor.stop()
 
 
@@ -89,14 +90,14 @@ def configureGroup(hosts, port, cmdlist):
 
 		d = hgroup.broadcast(hacmd)
 		if hacmd.fatalError:
-			d.addCallbacks(nextCallback, fatalError)
+			d.addCallbacks(nextCallback, fatalError, errbackArgs=(hgroup,))
 		else:
 			d.addErrback(nonfatalError)
 			d.addCallback(nextCallback)
 
 	# Attempt to connect, running the desired command on success
 	d = hgroup.connect()
-	d.addCallbacks(remoteCaller, fatalError)
+	d.addCallbacks(remoteCaller, fatalError, errbackArgs=(hgroup,))
 
 	return hgroup
 
@@ -132,3 +133,7 @@ if __name__ == "__main__":
 	# Configure the client proxy
 	hgroup = configureGroup(hosts, port, cmdlist)
 	reactor.run()
+	try: err = hgroup.fatalError
+	except AttributeError: err = False
+
+	sys.exit(int(err))

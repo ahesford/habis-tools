@@ -11,7 +11,12 @@ class SafetyCommandListener(LineReceiver):
 	fire habisc.py to control HABIS hardware.
 	'''
 
-	commands = { 'FIRE', 'INIT', 'STOP', 'QUIT' }
+	commands = {
+			'FIRE': '/opt/habis/share/calib/calib.fire.yaml',
+			'INIT': '/opt/habis/share/calib/calib.init.yaml',
+			'STOP': '/opt/habis/share/calib/calib.stop.yaml',
+			'QUIT': None
+	}
 
 	def __init__(self):
 		self.errcount = 0
@@ -23,6 +28,16 @@ class SafetyCommandListener(LineReceiver):
 		'''
 		self.sendLine('QUIT,' + reason)
 		self.transport.loseConnection()
+
+
+	def runhabisc(self, script):
+		'''
+		Invoke habisc to interact with the HABIS conductor;
+		raises a subprocess.CalledProcessError on error.
+		'''
+		from subprocess32 import check_call, CalledProcessError
+		habisc = '/opt/custom-python/bin/habisc.py'
+		check_call([habisc, script])
 
 
 	def lineReceived(self, line):
@@ -45,7 +60,11 @@ class SafetyCommandListener(LineReceiver):
 			self.hangup('Goodbye')
 			return
 
-		self.sendLine('OK,' + cmd)
+		# Run the desired process in the background
+		from twisted.internet.threads import deferToThread
+		d = deferToThread(self.runhabisc, self.commands[cmd])
+		d.addCallbacks(lambda _ : self.sendLine('SUCCESS,' + cmd),
+				lambda _ : self.sendLine('FAILURE,' + cmd))
 
 
 # Create the twisted application object

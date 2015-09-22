@@ -18,6 +18,7 @@ def configureConductor():
 			'uptime' : '/usr/bin/uptime',
 			'test256' : '/opt/habis/bin/test256',
 			'habismon' : '/opt/habis/bin/habismon',
+			'calib' : '/opt/habis/bin/calibNode',
 			'redistribute' : '/opt/custom-python/bin/redistribute.py',
 	}
 
