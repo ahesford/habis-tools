@@ -20,6 +20,8 @@ def configureConductor():
 			'habismon' : '/opt/habis/bin/habismon',
 			'calib' : '/opt/habis/bin/calibNode',
 			'redistribute' : '/opt/custom-python/bin/redistribute.py',
+			'habis-remove' : '/opt/habis/bin/habis-remove',
+			'habis-rescan' : '/opt/habis/bin/habis-rescan',
 	}
 
 	# The block command wrappers to attach to the conductor class
