@@ -65,7 +65,7 @@ def printResult(results, isBlock=False, clearline=True):
 
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <cmdlist.yaml>' % progname
+	print >> sys.stderr, 'USAGE: %s <cmdlist.yaml> [var=value ...]' % progname
 
 
 def configureGroup(hosts, port, cmdlist):
@@ -103,9 +103,17 @@ def configureGroup(hosts, port, cmdlist):
 
 
 if __name__ == "__main__":
-	if len(sys.argv) != 2:
+	if len(sys.argv) < 2:
 		usage(sys.argv[0])
 		sys.exit(1)
+
+	def varpair(s):
+		try: key, val = [v.strip() for v in s.split('=', 1)]
+		except IndexError:
+			raise ValueError('Missing equality in variable definition')
+		return key, val
+
+	varlist = dict(varpair(s) for s in sys.argv[2:])
 
 	try:
 		try:
@@ -113,11 +121,13 @@ if __name__ == "__main__":
 			from mako.template import Template
 		except ImportError:
 			# Without Mako, just treat the configuration as raw YAML
+			print >> sys.stderr, 'WARNING: Mako template engine not found, assuming raw YAML configuration'
 			configuration = yaml.safe_load(open(sys.argv[1], 'rb'))
 		else:
 			# With Mako, render the configuration before parsing
-			# No rendering variables are supported
-			configuration = yaml.safe_load(Template(filename=sys.argv[1]).render())
+			# Pass variable definitions from command line
+			cnftmpl = Template(filename=sys.argv[1])
+			configuration = yaml.safe_load(cnftmpl.render(**varlist))
 
 		# Read connection information
 		connect = configuration['connect']
