@@ -2,6 +2,9 @@
 Routines for performing acoustic trilateration.
 '''
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 import numpy as np, math
 from itertools import izip
 from numpy import ma, fft, linalg as la

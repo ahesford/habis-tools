@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+ * Restrictions are listed in the LICENSE file distributed with this package. */
+
 int main (int argc, char **argv) {
 	char *devpath = "/sys/bus/pci/rescan";
 	FILE *rfile;

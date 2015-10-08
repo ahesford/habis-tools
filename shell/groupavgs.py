@@ -1,4 +1,7 @@
-#!/opt/python-2.7.9/bin/python
+#!/usr/bin/env python
+
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
 
 import sys, itertools, math, numpy as np
 import multiprocessing, Queue

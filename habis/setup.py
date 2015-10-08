@@ -1,3 +1,6 @@
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 def configuration(parent_package='', top_path=None):
 	from numpy.distutils.misc_util import Configuration
 

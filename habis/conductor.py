@@ -2,6 +2,9 @@
 Classes that conduct HABIS processes over a network.
 '''
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 from twisted.spread import pb
 from twisted.internet import threads, defer
 

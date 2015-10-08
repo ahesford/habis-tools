@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <limits.h>
 
+/* Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+ * Restrictions are listed in the LICENSE file distributed with this package. */
+
 int main (int argc, char **argv) {
 	char *devfmt = "/sys/bus/pci/devices/%s/remove";
 	char *defdevice = "0000:00:03.0";

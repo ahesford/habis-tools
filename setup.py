@@ -7,6 +7,9 @@ for manipulating data received from the Hemispheric Array Breast Imaging System
 and for exchanging data among multiple nodes between imaging stages.
 '''
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 DOCLINES = __doc__.split('\n')
 
 def configuration(parent_package='', top_path=None):

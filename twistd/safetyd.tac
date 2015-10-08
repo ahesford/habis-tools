@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 from twisted.protocols.basic import LineReceiver
 from twisted.internet.protocol import Factory
 

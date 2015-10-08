@@ -2,6 +2,9 @@
 Routines to wrap HABIS executables in Python classes.
 '''
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 def _strtup(a):
 	'''
 	If a is an iterable, convert it to a tuple of strings using

@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 import numpy as np, os, sys, operator as op
 from itertools import izip, repeat
 from mpi4py import MPI

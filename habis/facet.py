@@ -2,6 +2,9 @@
 Routines for working with transducer facets.
 '''
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 import numpy as np
 from numpy import linalg as la
 from scipy.sparse.linalg import lsmr

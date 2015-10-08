@@ -2,6 +2,9 @@
 Routines for manipulating HABIS data file formats.
 '''
 
+# Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
+# Restrictions are listed in the LICENSE file distributed with this package.
+
 import mmap
 import numpy as np
 import re, os
