@@ -25,6 +25,7 @@ def configureConductor():
 			'redistribute' : '/opt/custom-python/bin/redistribute.py',
 			'habis-remove' : '/opt/habis/bin/habis-remove',
 			'habis-rescan' : '/opt/habis/bin/habis-rescan',
+			'flash' : '/opt/habis/bin/habis-flash',
 	}
 
 	# The block command wrappers to attach to the conductor class
