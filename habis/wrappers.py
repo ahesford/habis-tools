@@ -112,9 +112,9 @@ class BlockCommandWrapper(CommandWrapper):
 		generation of additional arguments. Valid keywords are:
 
 		- actors (default: 1): An integer or sequence of values, each
-		  passed as a dynamic "actor argument" to the wrapped command
-		  upon execution. A dedicated thread is spawned for each actor
-		  to parallelize command execution.
+		  optionally passed as a dynamic "actor argument" to the
+		  wrapped command upon execution. A dedicated thread is spawned
+		  for each actor to parallelize command execution.
 
 		- blocks (default: 1): An integer or a sequence of arbitrary
 		  values, each passed in turn as a dynamic "block argument" to
@@ -129,6 +129,10 @@ class BlockCommandWrapper(CommandWrapper):
 		  consecutive values of the block list will be broken when
 		  selecting the desired chunk index.
 
+		- hideactor (default: False): If True, the "actor argument"
+		  will not be passed to the wrapped command. Instead, the first
+		  and only dynamic argument will be the "block argument".
+
 		*** For each of actors and blocks, if an integer I is specified
 		    in place of a sequence, a list of range(I) is assumed.
 		'''
@@ -139,6 +143,8 @@ class BlockCommandWrapper(CommandWrapper):
 
 		actors = kwargs.pop('actors', 1)
 		blocks = kwargs.pop('blocks', 1)
+
+		self.hideactor = bool(kwargs.pop('hideactor', False))
 
 		if len(kwargs) > 0:
 			raise TypeError('Unexpected keyword arguments found')
@@ -185,7 +191,11 @@ class BlockCommandWrapper(CommandWrapper):
 		error is placed on stderr, and the return code will be 255.
 		'''
 		for blk in lblocks:
-			args = [actor, blk] + list(self.args)
+			if self.hideactor:
+				args = [blk] + list(self.args)
+			else:
+				args = [actor, blk] + list(self.args)
+
 			try:
 				result = self._execute(self._command, *args, **kwargs)
 			except Exception as e:

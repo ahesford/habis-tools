@@ -129,7 +129,7 @@ if __name__ == "__main__":
 		else:
 			# With Mako, render the configuration before parsing
 			# Pass variable definitions from command line
-			cnftmpl = Template(filename=sys.argv[1])
+			cnftmpl = Template(filename=sys.argv[1], strict_undefined=True)
 			configuration = yaml.safe_load(cnftmpl.render(**varlist))
 
 		# Read connection information
