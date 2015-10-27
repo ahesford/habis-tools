@@ -105,6 +105,24 @@ def configureGroup(hosts, port, cmdlist):
 	return hgroup
 
 
+def findconfig(confname):
+	'''
+	If confname contains a slash, the name contains the path; simply return
+	confname.
+
+	If confname contains no slash, return confname unmolested if any
+	filesystem object exists at the location. If no object exists, return
+	confname appended to a default script directory.
+
+	Obviously, using this name introduces a potential race.
+	'''
+	from os.path import lexists, join
+
+	if '/' in confname: return confname
+	if lexists(confname): return confname
+	return join('/opt/habis/share/habisc', confname)
+
+
 if __name__ == "__main__":
 	if len(sys.argv) < 2:
 		usage(sys.argv[0])
@@ -118,6 +136,9 @@ if __name__ == "__main__":
 
 	varlist = dict(varpair(s) for s in sys.argv[2:])
 
+	# Try to grab a configuration name
+	confname = findconfig(sys.argv[1])
+
 	try:
 		try:
 			# Mako is used for dynamic configuration is available
@@ -125,11 +146,11 @@ if __name__ == "__main__":
 		except ImportError:
 			# Without Mako, just treat the configuration as raw YAML
 			print >> sys.stderr, 'WARNING: Mako template engine not found, assuming raw YAML configuration'
-			configuration = yaml.safe_load(open(sys.argv[1], 'rb'))
+			configuration = yaml.safe_load(open(confname, 'rb'))
 		else:
 			# With Mako, render the configuration before parsing
 			# Pass variable definitions from command line
-			cnftmpl = Template(filename=sys.argv[1])
+			cnftmpl = Template(filename=confname, strict_undefined=True)
 			configuration = yaml.safe_load(cnftmpl.render(**varlist))
 
 		# Read connection information
@@ -139,7 +160,7 @@ if __name__ == "__main__":
 		# Parse the command list
 		cmdlist = [HabisRemoteCommand(**c) for c in configuration['commands']]
 	except Exception as e:
-		print >> sys.stderr, 'ERROR: could not load command file', sys.argv[1]
+		print >> sys.stderr, 'ERROR: could not load command file', confname
 		print >> sys.stderr, 'Reason:', e
 		sys.exit(1)
 
