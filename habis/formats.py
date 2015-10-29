@@ -343,12 +343,8 @@ class WaveformSet(object):
 		Encode the provided transmit-index list into bytes suitable for
 		writing after a global file header in WAVE version (1,0) files.
 		'''
-		try:
-			if txidx.dtype != np.dtype('uint32'):
-				raise TypeError('Transmit-index list must be uint32 ndarray')
-		except (TypeError, AttributeError):
-			txidx = np.array(txidx, dtype=np.uint32)
-
+		# Ensure the input is a 1-D list of uints
+		txidx = np.asarray(txidx, dtype=np.uint32)
 		if txidx.ndim != 1:
 			raise ValueError('Transmit-index list must be a 1-D list')
 
@@ -369,7 +365,7 @@ class WaveformSet(object):
 		'''
 		txbytes = ntx * np.dtype('uint32').itemsize
 		try: txstr = f.read(txbytes)
-		except AttributeError: txtr = f
+		except AttributeError: txstr = f
 
 		if len(txstr) != txbytes:
 			raise ValueError('Could not read encoded transmit-index list')
