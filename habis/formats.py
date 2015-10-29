@@ -13,9 +13,6 @@ import struct
 
 from collections import OrderedDict
 
-from pycwp import cutil
-from pycwp.util import bidict
-
 def findenumfiles(dir, prefix='.*?', suffix='', ngroups=1):
 	'''
 	Find all files in the directory dir with a name matching the regexp
@@ -207,6 +204,7 @@ class WaveformSet(object):
 	# struct format string for WaveformSet file header format
 	hdrfmt = '<4s2I2s4I'
 	# A bidirectional mapping between typecodes and Numpy dtype names
+	from pycwp.util import bidict
 	typecodes = bidict(I2 = 'int16', I4 = 'int32', I8 = 'int64',
 			F2 = 'float16', F4 = 'float32', F8 = 'float64',
 			C4 = 'complex64', C8 = 'complex128')
@@ -436,7 +434,7 @@ class WaveformSet(object):
 		If hdronly is True, an unopened file is opened for writing and
 		the file-level header is written. Writing of waveform data (and
 		receive-channel headers) is skipped.
-		
+
 		At most one of append and hdronly may be True.
 
 		** NOTE **
@@ -666,12 +664,17 @@ class WaveformSet(object):
 		'''
 		Return a (header, waveforms) record for the receive channel
 		with channel index rid. If window is None and dtype is None,
-		the waveforms data array is a reference to the internal
+		the waveforms data array is a view of the internal
 		copy-on-write memory map.
 
-		If tid is not None, it should be a channel index that specifies
-		a specific transmission to pull from the waveform array.
-		Otherwise, all transmit waveforms are returned.
+		If tid is not None, it should be a scalar integer or an
+		iterable of integers that represent transmit channel indices to
+		pull from the waveform array. When tid is a scalar, a 1-D array
+		is returned to represent the samples for the specified
+		transmission. When tid is an iterable (even of length 1), a 2-D
+		array is returned with transmit indices along the rows (in the
+		order specified by tid) and waveform samples along the columns.
+		When tid is None, self.txidx is assumed.
 
 		If window is not None, it should be a tuple (start, length)
 		that specifies the first sample and length of the temporal
@@ -688,17 +691,26 @@ class WaveformSet(object):
 		To force a copy without knowing or changing the window and
 		dtype, pass dtype=0.
 		'''
-		# Convert transmit-channel index to row index
-		if tid is not None: tcidx = self.tx2row(tid)
+		if tid is None:
+			# With no tid, pull all transmissions
+			tcidx = range(self.ntx)
+		else:
+			try:
+				# Map the transmit IDs to row indices
+				tcidx = [self.tx2row(t) for t in tid]
+				singletx = False
+			except TypeError:
+				# Handle mapping for a scalar tid
+				tcidx = self.tx2row(tid)
+				singletx = True
 
-		# Grab the record for the receive index
+		# Grab receive record, copy header to avoid corruption
 		hdr, waveforms = self._records[rid]
-		# Make a copy of the header to avoid corruption
 		hdr = hdr.copy()
+
 		# If the data is not changed, just return a view of the waveforms
 		if window is None and dtype is None:
-			if tid is None: return hdr, waveforms
-			else: return hdr, waveforms[tcidx,:]
+			return hdr, waveforms[tcidx,:]
 
 		# Pull an unspecified output window from the header
 		if window is None:
@@ -707,24 +719,23 @@ class WaveformSet(object):
 		if dtype is None or dtype == 0:
 			dtype = waveforms.dtype
 
-		if tid is None: oshape = (waveforms.shape[0], window[1])
-		else: oshape = (window[1],)
-
-		# Create the output copy
+		# Create an output array to store the results
+		oshape = (1 if singletx else len(tcidx), window[1])
 		output = np.zeros(oshape, dtype=dtype)
 
 		try:
 			# Figure out the overlapping sample window
 			# Raises TypeError if overlap() returns None
-			ostart, istart, wlen = cutil.overlap(window, hdr['win'])
+			from pycwp.cutil import overlap
+			ostart, istart, wlen = overlap(window, hdr['win'])
 			oend, iend = ostart + wlen, istart + wlen
 
-			# Copy the relevant portions of the waveforms
-			if tid is None:
-				output[:,ostart:oend] = waveforms[:,istart:iend]
-			else:
-				output[ostart:oend] = waveforms[tcidx,istart:iend]
+			# Copy portion of waveforms overlapping the window
+			output[:,ostart:oend] = waveforms[tcidx,istart:iend]
 		except TypeError: pass
+
+		# For a scalar tid, collapse the 2-D array
+		if singletx: output = output[0]
 
 		# Override the window in the header copy
 		hdr['win'][:] = window
@@ -734,15 +745,25 @@ class WaveformSet(object):
 
 	def getwaveform(self, rid, tid, *args, **kwargs):
 		'''
-		Return, as a habis.sigtools.Waveform object, the waveform
-		recorded at receive-channel index rid from transmission index
-		tid. Extra args and kwargs are passed through to getrecord().
+		Return, as one or more habis.sigtools.Waveform objects, the
+		waveform(s) recorded at receive-channel index rid from the
+		(scalar or iterable of) transmission(s) tid.
+
+		If tid is a scalar, a single Waveform object is returned.
+		Otherwise, is tid is an iterable or None (which pulls all
+		transmissions), a list of Waveform objects is returned.
+
+		Extra args and kwargs are passed through to getrecord().
 		'''
 		from .sigtools import Waveform
 		# Grab the relevant row of the record
-		hdr, waveform = self.getrecord(rid, tid, *args, **kwargs)
-		# Wrap the desired signal in a Waveform object
-		return Waveform(self.nsamp, waveform, hdr['win'][0])
+		hdr, wform = self.getrecord(rid, tid, *args, **kwargs)
+
+		# Wrap a single desired signal in a Waveform object
+		if np.ndim(wform) == 1:
+			return Waveform(self.nsamp, wform, hdr['win'][0])
+		else:
+			return [Waveform(self.nsamp, w, hdr['win'][0]) for w in wform]
 
 
 	def __getitem__(self, key):
