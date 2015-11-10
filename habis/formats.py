@@ -416,7 +416,40 @@ class WaveformSet(object):
 		self.txidx = txchans
 
 
-	def store(self, f, append=False, hdronly=False, ver=(1,0)):
+	def encodefilehdr(self, dtype=None, ver=None):
+		'''
+		Return a byte string, suitable for writing to a file, that
+		represents the file-level header for this WaveformSet. The
+		record data type can be overridden with the dtype argument. The
+		header version number can be specified as ver=(major, minor)
+		or, if None, defaults to (1,1) when self.txidx is equivalent to
+		range(self.ntx), and (1,0) otherwise.
+
+		Useful for creating an appendable WaveformSet output file that
+		can be written in parallel.
+		'''
+		if dtype is None: dtype = self.dtype
+		nchans = (self.nrx, self.ntx)
+
+		if ver is None:
+			ver = (1,1)
+			last = -1
+			for tid in self.txidx:
+				if tid != last + 1:
+					ver = (1,0)
+					break
+				last = tid
+
+		major, minor = self._verify_file_version(ver)
+
+		# Create the header bytes
+		hdr = type(self).packfilehdr(dtype, nchans, self.nsamp, self.f2c, ver)
+		# For version (1,0) files, explicitly encode the txlist
+		if minor == 0: hdr += type(self).packtxlist(self.txidx)
+		return hdr
+
+
+	def store(self, f, append=False, ver=(1,0)):
 		'''
 		Write the WaveformSet object to the data file in f (either a
 		name or a file-like object that allows writing).
@@ -427,38 +460,18 @@ class WaveformSet(object):
 		responsibility to assure that an existing file header is
 		consistent with records written by this method in append mode.
 
-		If hdronly is True, an unopened file is opened for writing and
-		the file-level header is written. Writing of waveform data (and
-		receive-channel headers) is skipped.
-
-		At most one of append and hdronly may be True.
-
 		** NOTE **
 		Because the WaveformSet may map some input file for waveform
 		arrays after calling load(), calling store() with the same file
 		used to load() may cause unexpected behavior.
 		'''
-		if append and hdronly:
-			raise ValueError('At most one of hdronly and append may be True')
-
-		major, minor = self._verify_file_version(ver)
-
 		# Open the file if it is not open
 		if isinstance(f, basestring):
 			f = open(f, mode=('wb' if not append else 'ab'))
 
 		if not append:
 			# Write the file-level header
-			nchans = (self.nrx, self.ntx)
-			hdr = type(self).packfilehdr(self.dtype,
-					nchans, self.nsamp, self.f2c, ver)
-			# Write the header
-			f.write(hdr)
-			# If the version number is (1, 0), write the transmit indices
-			if minor == 0: f.write(type(self).packtxlist(self.txidx))
-
-			# Skip writing waveform records if hdronly is set
-			if hdronly: return
+			f.write(self.encodefilehdr())
 
 		# Write each record in turn
 		for idx, (hdr, waveforms) in self._records.iteritems():

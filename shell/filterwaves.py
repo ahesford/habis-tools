@@ -4,7 +4,7 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import sys, itertools, numpy as np
-import multiprocessing, Queue
+import multiprocessing
 
 from pycwp import process
 from habis.habiconf import HabisConfigError, HabisConfigParser
@@ -14,30 +14,6 @@ from habis.sigtools import Waveform
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
-
-
-def copyhdr(f, wset, dtype=None, ver=(1,0)):
-	'''
-	Copy the file header and list of transmit channels from the
-	habis.formats.WaveformSet wset to f, a file-like object or the name of
-	a target file. If f is a file-like objec, the data is written at the
-	current file position. If f is a name, the named file is truncated.
-
-	If dtype is provided, it specifies a datatype to override the waveform
-	record datatype in wset.
-
-	The header format version can be specified as ver=(major, minor).
-	'''
-	# Open a named file, if necessary
-	if isinstance(f, basestring): f = open(f, 'wb')
-
-	if dtype is None: dtype = wset.dtype
-
-	# Copy the relevant header fields and write the header
-	nchans = (wset.nrx, wset.ntx)
-	hdr = wset.packfilehdr(dtype, nchans, wset.nsamp, wset.f2c, ver)
-	f.write(hdr)
-	if ver[1] == 0: f.write(wset.packtxlist(wset.txidx))
 
 
 def wavefilt(infile, rxchans, filt, outfile, lock=None, nsamp=None):
@@ -132,7 +108,8 @@ def mpwavefilt(infile, filt, nproc, outfile, nsamp=None):
 			print >> sys.stderr, 'ERROR: could not truncate input waveforms'
 			return
 
-	copyhdr(outfile, wset, dtype=np.float32)
+	# Transfer input header, with appropriate type changes, to output file
+	open(outfile, 'wb').write(wset.encodefilehdr(dtype=np.float32))
 	rxidx = wset.rxidx
 
 	# Delete the waveform set to close the memory-mapped input file
