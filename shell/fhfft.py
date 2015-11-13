@@ -3,7 +3,7 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import numpy as np, os, sys, fht, pyfftw, getopt, operator as op
+import numpy as np, os, sys, fht, pyfftw, getopt, glob
 from collections import defaultdict
 
 import multiprocessing
@@ -12,27 +12,29 @@ from habis.formats import WaveformSet
 from pycwp import process
 
 
-def usage(progname=None):
+def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s [-n n] [-l l] [-p p] [-f start:end] <measurements> <outfile>' % binfile
+	print >> sys.stderr, 'USAGE: %s [-n n] [-l l] [-p p] [-f start:end] [-o output] <measurements>' % binfile
 	print >> sys.stderr, '''
   Preprocess HABIS measurement data by Hadamard decoding transmissions and
   Fourier transforming the time-domain data. Measurement data is contained in
-  the 'measurements' WaveformSet file.
-
-  The processed data is transposed between nodes so that, on output, each node
-  contains all channel measurements for a subset of the transmissions included
-  in each measurement input. The output data is saved to files with a name
-  format given in outfmt, which is used to generate output files named
-  outfmt.format(tidx) for each integer transmission index tidx.
+  the 'measurements' WaveformSet files. If a filesystem object with the
+  specified exact name does not exist, it is treated as a glob to look for files.
+  
+  Output is stored, by default, in a file whose name has the same name as the
+  input with any extension swapped with '.fhfft.wset'. If the input file has no
+  extension, an extension is appended.
 
   OPTIONAL ARGUMENTS:
   -p: Use p processors (default: all available processors)
   -l: Assume Hadamard coding in groups of l elements (default: 2048)
   -f: Retain only FFT frequency bins in range(start, end) (default: all)
   -n: Override acquisition window to n samples in WaveformSet files
+  -o: Override the output file name (valid only for single measurement-file input)
 	'''
+	if fatal: sys.exit(fatal)
+
 
 def _r2c_datatype(idtype):
 	'''
@@ -184,10 +186,10 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), nsamp=None, lock=No
 
 if __name__ == '__main__':
 	# Set default options
-	lfht, freqrange, nsamp, = 2048, (None,), None
+	lfht, freqrange, nsamp, outfiles = 2048, (None,), None, None
 	nprocs = process.preferred_process_count()
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'hl:p:f:n:')
+	optlist, args = getopt.getopt(sys.argv[1:], 'hl:p:f:n:o:')
 
 	for opt in optlist:
 		if opt[0] == '-l':
@@ -198,15 +200,26 @@ if __name__ == '__main__':
 			freqrange = tuple((int(s, base=10) if len(s) else None) for s in opt[1].split(':'))
 		elif opt[0] == '-n':
 			nsamp = int(opt[1])
+		elif opt[0] == '-o':
+			outfiles = [opt[1]]
 		else:
-			usage()
-			sys.exit(1)
+			usage(fatal=True)
 
-	if len(args) != 2:
-		usage()
-		sys.exit()
+	infiles = []
+	for arg in args:
+		if os.path.lexists(arg): infiles.append(arg)
+		else: infiles.extend(glob.glob(arg))
 
-	infile, outfile = args
+	if outfiles is None:
+		outfiles = [os.path.splitext(f)[0] + '.fhfft.wset' for f in infiles]
 
-	print 'Processing data file', infile, 'with coding length', lfht
-	mpfhfft(infile, lfht, outfile, nprocs, freqrange, nsamp)
+	if len(infiles) < 1:
+		print >> sys.stderr, 'ERROR: No input files'
+		usage(fatal=True)
+	elif len(infiles) != len(outfiles):
+		print >> sys.stderr, 'ERROR: output name count disagrees with input name count'
+		usage(fatal=True)
+
+	for infile, outfile in zip(infiles, outfiles):
+		print 'Processing data file', infile, 'with coding length', lfht
+		mpfhfft(infile, lfht, outfile, nprocs, freqrange, nsamp)
