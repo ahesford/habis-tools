@@ -357,7 +357,9 @@ class WaveformSet(object):
 		Create a new instance of WaveformSet configured exactly as
 		wset, except without any waveform records.
 		'''
-		return cls(wset.txidx, wset.nsamp, wset.f2c, wset.dtype)
+		nwset = cls(wset.txidx, wset.nsamp, wset.f2c, wset.dtype, wset.txgrps)
+		nwset.extrabytes = dict(wset.extrabytes.iteritems())
+		return nwset
 
 
 	def __init__(self, txchans=[], nsamp=4096, f2c=0,
@@ -604,8 +606,10 @@ class WaveformSet(object):
 		# Parse through the specified number of receive records
 		for ridx in range(nrx):
 			if minor == 2:
-				g, i, px, py, pz, ws, wl = funpack('<2I3f2I')
+				i, g, px, py, pz, ws, wl = funpack('<2I3f2I')
 				idx = g * self.txgrps[1] + i
+				# Correct an off-by-one window specification bug
+				if wl == nsamp and ws == 1: ws = 0
 			else:
 				idx, px, py, pz, ws, wl = funpack('<I3f2I')
 				idx -= 1
@@ -948,12 +952,12 @@ class WaveformSet(object):
 		hdr = self.recordhdr(*hdr)
 
 		# Check that the header bounds make sense
-		if hdr.win[0] + hdr.win[1] > self.nsamp:
+		if hdr.win.end > self.nsamp:
 			raise ValueError('Waveform sample window exceeds acquisition window duration')
 
 		if waveforms is None:
 			# Create an all-zero waveform array
-			wshape = (self.ntx, hdr.win[1])
+			wshape = (self.ntx, hdr.win.length)
 			waveforms = np.zeros(wshape, dtype=self.dtype)
 		else:
 			try:
@@ -971,7 +975,7 @@ class WaveformSet(object):
 			ntx, nsamp = waveforms.shape
 			if ntx != self.ntx:
 				raise ValueError('Waveform array does not match transmission count for set')
-			if nsamp != hdr.win[1]:
+			if nsamp != hdr.win.length:
 				raise ValueError('Waveform array does not match sample count specified in header')
 
 		# Add or replace the record

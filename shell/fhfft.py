@@ -15,7 +15,7 @@ from pycwp import process
 def usage(progname=None):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s [-l l] [-p p] [-f start:end] <measurements> <outfile>' % binfile
+	print >> sys.stderr, 'USAGE: %s [-n n] [-l l] [-p p] [-f start:end] <measurements> <outfile>' % binfile
 	print >> sys.stderr, '''
   Preprocess HABIS measurement data by Hadamard decoding transmissions and
   Fourier transforming the time-domain data. Measurement data is contained in
@@ -31,6 +31,7 @@ def usage(progname=None):
   -p: Use p processors (default: all available processors)
   -l: Assume Hadamard coding in groups of l elements (default: 2048)
   -f: Retain only FFT frequency bins in range(start, end) (default: all)
+  -n: Override acquisition window to n samples in WaveformSet files
 	'''
 
 def _r2c_datatype(idtype):
@@ -48,15 +49,20 @@ def _r2c_datatype(idtype):
 		return np.dtype('float64'), np.dtype('complex128')
 
 
-def mpfhfft(infile, lfht, outfile, nproc, freqrange=(None,)):
+def mpfhfft(infile, lfht, outfile, nproc, freqrange=(None,), nsamp=None):
 	'''
 	Subdivide, along receive channels, the work of fhfft() among nproc
 	processes to Hadamard-decode and Fourier transform the WaveformSet
 	stored in infile into a WaveformSet file that will be written to
 	outfile. The output file will be overwritten if it already exists.
+
+	If nsamp is not None, the acquisition window of the input and output
+	WaveformSet files will be forced to the specified value.
 	'''
 	# Copy the input header and get the receive-channel indices
 	wset = WaveformSet.fromfile(infile)
+	if nsamp is not None: wset.nsamp = nsamp
+
 	rxidx = wset.rxidx
 	# Change the data type of the output
 	odtype = _r2c_datatype(wset.dtype)[1]
@@ -74,13 +80,14 @@ def mpfhfft(infile, lfht, outfile, nproc, freqrange=(None,)):
 			# Give each process a meaningful name
 			procname = process.procname(i)
 			# Stride the receive channels
-			args = (infile, lfht, rxidx[i::nproc], outfile, freqrange, lock)
+			args = (infile, lfht, rxidx[i::nproc],
+					outfile, freqrange, nsamp, lock)
 			pool.addtask(target=fhfft, name=procname, args=args)
 		pool.start()
 		pool.wait()
 
 
-def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), lock=None):
+def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), nsamp=None, lock=None):
 	'''
 	For a real WaveformSet file infile, tile a series of Hadamard
 	transforms of length lfht along the transmit-index dimension of each
@@ -108,6 +115,7 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), lock=None):
 
 	# Open the input and create a corresponding output
 	wset = WaveformSet.fromfile(infile)
+	if nsamp is not None: wset.nsamp = nsamp
 	oset = WaveformSet.empty_like(wset)
 
 	# Set the right input and output types for the transformed data
@@ -176,10 +184,10 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), lock=None):
 
 if __name__ == '__main__':
 	# Set default options
-	lfht, freqrange = 2048, (None,)
+	lfht, freqrange, nsamp, = 2048, (None,), None
 	nprocs = process.preferred_process_count()
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'hl:p:f:')
+	optlist, args = getopt.getopt(sys.argv[1:], 'hl:p:f:n:')
 
 	for opt in optlist:
 		if opt[0] == '-l':
@@ -188,6 +196,8 @@ if __name__ == '__main__':
 			nprocs = int(opt[1])
 		elif opt[0] == '-f':
 			freqrange = tuple((int(s, base=10) if len(s) else None) for s in opt[1].split(':'))
+		elif opt[0] == '-n':
+			nsamp = int(opt[1])
 		else:
 			usage()
 			sys.exit(1)
@@ -199,4 +209,4 @@ if __name__ == '__main__':
 	infile, outfile = args
 
 	print 'Processing data file', infile, 'with coding length', lfht
-	mpfhfft(infile, lfht, outfile, nprocs, freqrange)
+	mpfhfft(infile, lfht, outfile, nprocs, freqrange, nsamp)
