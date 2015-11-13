@@ -345,7 +345,7 @@ class Waveform(object):
 		# Find the common data window
 		if owin.length < 1:
 			cstart, cend = dwin.start, dwin.end
-		elif length < 1:
+		elif dwin.length < 1:
 			cstart, cend = owin.start, owin.end
 		else:
 			cstart = min(dwin.start, owin.start)
