@@ -169,7 +169,7 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), nsamp=None, lock=No
 		fwdfft()
 
 		# Record the output record
-		hdr = WaveformSet.recordhdr(hdr.index, hdr.pos, fswin)
+		hdr = WaveformSet.recordhdr(hdr.idx, hdr.pos, fswin)
 		oset.setrecord(hdr, c[:,fs:fe], copy=True)
 
 	# Write local records to the output
