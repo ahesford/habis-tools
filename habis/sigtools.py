@@ -17,6 +17,53 @@ from itertools import groupby
 from pycwp import cutil, mio
 
 
+class Window(tuple):
+	'''
+	A subclass of tuple restricting the form to (start, length), where each
+	is a nonnegative integer exposed as a property with the corresponding
+	name, along with a computed propety end = start + length.
+	'''
+	def __new__(cls, *args, **kwargs):
+		'''
+		Create a new instance of Window.
+		'''
+		if len(args) + len(kwargs) != 2:
+			raise ValueError('Exactly two arguments must be specified')
+
+		start = kwargs.pop('start', None)
+		length = kwargs.pop('length', None)
+		end = kwargs.pop('end', None)
+
+		if len(kwargs) > 0:
+			raise ValueError('Unrecognized keyword arguments')
+
+		if len(args) > 0:
+			if start is not None:
+				raise ValueError('Window start cannot be positional and keyword argument')
+			start = args[0]
+		if len(args) > 1:
+			# Must be None because kwargs would have been empty
+			length = args[1]
+
+		# Fill in missing values
+		if start is None:
+			start = end - length
+		elif length is None:
+			length = end - start
+
+		from .formats import _strict_nonnegative_int
+		start = _strict_nonnegative_int(start)
+		length = _strict_nonnegative_int(length)
+		return tuple.__new__(cls, (start, length))
+
+	@property
+	def start(self): return self[0]
+	@property
+	def length(self): return self[1]
+	@property
+	def end(self): return self[0] + self[1]
+
+
 class Waveform(object):
 	'''
 	This class encapsulates a 1-D signal of an arbitrary data type. The
@@ -93,11 +140,10 @@ class Waveform(object):
 
 	@nsamp.setter
 	def nsamp(self, value):
-		start, length = self.datawin
-		if value < start + length:
+		from .formats import _strict_nonnegative_int
+		value = _strict_nonnegative_int(value)
+		if value < self.datawin.end:
 			raise ValueError('Waveform length must meet or exceed length of data window')
-		if value < 0:
-			raise ValueError('Waveform length must be nonnegative')
 		self._nsamp = value
 
 
@@ -124,18 +170,19 @@ class Waveform(object):
 		A 2-tuple of the form (start, length) that specifies the
 		explicitly stored (nonzero) portion of the waveform.
 		'''
-		try: return (self._datastart, len(self._data))
-		except (TypeError, AttributeError): return (0, 0)
+		try: return Window(self._datastart, len(self._data))
+		except (TypeError, AttributeError): return Window(0, 0)
 
 
 	@datawin.setter
 	def datawin(self, value):
-		if value[0] < 0 or value[0] + value[1] > self.nsamp:
+		value = Window(*value)
+		if value.end > self.nsamp:
 			raise ValueError('Specified window is not contained in Waveform')
 
 		# Replace the data and window with the new segment
 		sig = self.getsignal(value, forcecopy=False)
-		self.setsignal(sig, value[0])
+		self.setsignal(sig, value.start)
 
 
 	@property
@@ -194,7 +241,7 @@ class Waveform(object):
 		'''
 		datawin = self.datawin
 		data = self.getsignal(datawin, forcecopy=True)
-		return Waveform(self.nsamp, data, datawin[0])
+		return Waveform(self.nsamp, data, datawin.start)
 
 
 	def __iter__(self):
@@ -267,12 +314,12 @@ class Waveform(object):
 	def __neg__(self):
 		datawin = self.datawin
 		data = -self.getsignal(datawin, forcecopy=False)
-		return Waveform(self.nsamp, data, datawin[0])
+		return Waveform(self.nsamp, data, datawin.start)
 
 	def __abs__(self):
 		datawin = self.datawin
 		data = abs(self.getsignal(datawin, forcecopy=False))
-		return Waveform(self.nsamp, data, datawin[0])
+		return Waveform(self.nsamp, data, datawin.start)
 
 
 	def __addsub(self, other, ssign=1, osign=1, inplace=False):
@@ -285,28 +332,25 @@ class Waveform(object):
 		Otherwise, a new Waveform will be created and returned.
 		'''
 		# Grab the data window for this signal
-		start, length = self.datawin
-		end = start + length
+		dwin = self.datawin
 
 		try:
-			ostart, olength = other.datawin
+			owin = other.datawin
 		except AttributeError:
 			# Try convering other to a waveform
 			# This assumes that other starts at sample 0
 			other = type(self)(signal=other)
-			ostart, olength = other.datawin
+			owin = other.datawin
 
 		# Find the common data window
-		oend = ostart + olength
-		if olength < 1:
-			cstart, cend = start, end
+		if owin.length < 1:
+			cstart, cend = dwin.start, dwin.end
 		elif length < 1:
-			cstart, cend = ostart, oend
+			cstart, cend = owin.start, owin.end
 		else:
-			cstart = min(start, ostart)
-			cend = max(end, oend)
-		cwin = (cstart, cend - cstart)
-
+			cstart = min(dwin.start, owin.start)
+			cend = max(dwin.end, owin.end)
+		cwin = Window(cstart, end=cend)
 
 		# Grab other signal over common window (avoid copies if possible)
 		osig = other.getsignal(cwin, forcecopy=False)
@@ -332,7 +376,7 @@ class Waveform(object):
 			data = (osig - ssig) if osign >= 0 else (-osig - ssig)
 
 		nsamp = max(self.nsamp, other.nsamp)
-		return type(self)(nsamp, data, cwin[0])
+		return type(self)(nsamp, data, cwin.start)
 
 
 	def __add__(self, other): return self.__addsub(other, 1, 1, False)
@@ -365,7 +409,7 @@ class Waveform(object):
 		# Pull the data window and scale
 		datawin = self.datawin
 		data = modefunc(self.getsignal(datawin, forcecopy=False), other)
-		return Waveform(self.nsamp, data, datawin[0])
+		return Waveform(self.nsamp, data, datawin.start)
 
 
 	def __mul__(self, other): return self.__scale(other, 'mul')
@@ -417,12 +461,12 @@ class Waveform(object):
 			self._datastart = 0
 			return
 
-		if start < 0 or int(start) != start:
-			raise ValueError('First sample of data window must be a nonnegative integer')
+		from .formats import _strict_nonnegative_int
+		start = _strict_nonnegative_int(start)
 
 		# Ensure signal is 1-D
 		self._data = dimcompat(signal, 1)
-		self._datastart = int(start)
+		self._datastart = start
 
 		# Increase the length of nsamp if data window is too large
 		length = len(self._data)
@@ -448,24 +492,23 @@ class Waveform(object):
 		always be a new copy.
 		'''
 		if window is None: window = (0, self.nsamp)
+		window = Window(*window)
 
-		datawin = self.datawin
-		ostart, oend = window[0], window[0] + window[1]
-		istart, iend = datawin[0], datawin[0] + datawin[1]
+		dwin = self.datawin
 
 		# Find the datatype if necessary
 		if dtype is None: dtype = self.dtype
 
 		# Determine if the output is a view or a copy
-		isview = ((not forcecopy) and istart <= ostart
-				and iend >= oend and dtype == self.dtype)
+		isview = ((not forcecopy) and dwin.start <= window.start
+				and dwin.end >= window.end and dtype == self.dtype)
 
 		try:
 			# Find overlap between the data and output windows
-			ostart, istart, wlen = cutil.overlap(window, datawin)
+			ostart, istart, wlen = cutil.overlap(window, dwin)
 		except TypeError:
 			# There is no overlap, the signal is 0
-			return np.zeros((window[1],), dtype=dtype)
+			return np.zeros((window.length,), dtype=dtype)
 
 		oend, iend = ostart + wlen, istart + wlen
 
@@ -473,7 +516,7 @@ class Waveform(object):
 			return self._data[istart:iend]
 		else:
 			# Copy the overlapping portion
-			signal = np.zeros((window[1],), dtype=dtype)
+			signal = np.zeros((window.length,), dtype=dtype)
 			signal[ostart:oend] = self._data[istart:iend]
 			return signal
 
@@ -506,15 +549,17 @@ class Waveform(object):
 		and the last N values mull multiply the signal in the range
 		[start+length-N:start+length].
 		'''
-		if tails is not None and len(tails) > window[1]:
+		if window is None: window = (0, self.nsamp)
+		window = Window(*window)
+
+		if tails is not None and len(tails) > window.length:
 			raise ValueError('Length of tails should not exceed length of window')
 
-		if window is None: window = (0, self.nsamp)
+		dwin = self.datawin
 
-		datawin = self.datawin
 		try:
 			# Find overlap between the data and output windows
-			ostart, istart, wlen = cutil.overlap(datawin, window)
+			ostart, istart, wlen = cutil.overlap(dwin, window)
 			oend = ostart + wlen
 		except TypeError:
 			# There is no overlap, return an empty signal
@@ -539,12 +584,12 @@ class Waveform(object):
 			ltail = len(tails) / 2
 			# Apply the left and right tails in succession
 			lwin = (window[0], ltail)
-			tailer(data, datawin, tails[:ltail], lwin)
+			tailer(data, dwin, tails[:ltail], lwin)
 			rwin = (window[0] + window[1] - ltail, ltail)
-			tailer(data, datawin, tails[ltail:], rwin)
+			tailer(data, dwin, tails[ltail:], rwin)
 
 		# Return a copy of the signal, cropped to the window
-		return Waveform(self.nsamp, data[ostart:oend], datawin[0] + ostart)
+		return Waveform(self.nsamp, data[ostart:oend], dwin.start + ostart)
 
 
 	def envelope(self):
@@ -609,25 +654,26 @@ class Waveform(object):
 		a complex type and True otherwise.
 		'''
 		if window is None: window = (0, self.nsamp)
+		window = Window(*window)
+
 		if real is None: real = self.isReal
 
 		# Choose the right function
 		fftfunc = fft.rfft if real else fft.fft
 
-		dstart, dlength = self.datawin
-		dend = dstart + dlength
+		dwin = self.datawin
 
 		# Short-circuit FFT if data and FFT windows don't overlap
-		if (dstart >= window[0] + window[1]) or (dend <= window[0]):
-			return Waveform(window[1])
+		if (dwin.start >= window.end) or (dwin.end <= window.start):
+			return Waveform(window.length)
 
 		# Because FFT can pad the end, no need to read past data window
-		acqlen = max(0, min(dend - window[0], window[1]))
-		acqwin = (window[0], acqlen)
+		acqlen = max(0, min(dwin.end - window.start, window.length))
+		acqwin = Window(window.start, acqlen)
 		# Grab the signal without copying of possible
 		sig = self.getsignal(acqwin, forcecopy=False)
 
-		return Waveform(signal=fftfunc(sig, n=window[1]))
+		return Waveform(signal=fftfunc(sig, n=window.length))
 
 
 	def oversample(self, n):
@@ -681,9 +727,9 @@ class Waveform(object):
 
 		if self.nsamp < ref.nsamp:
 			# Pad self for proper shifting when ref is longer
-			datawin = self.datawin
-			signal = self.getsignal(datawin, forcecopy=False)
-			exwave = Waveform(ref.nsamp, signal=signal, start=datawin[0])
+			dwin = self.datawin
+			signal = self.getsignal(dwin, forcecopy=False)
+			exwave = Waveform(ref.nsamp, signal=signal, start=dwin.start)
 			return exwave.shift(delay, **shargs)
 		else:
 			return self.shift(delay, **shargs)
@@ -734,20 +780,20 @@ class Waveform(object):
 		rewrapping data windows.
 		'''
 		if int(d) != d: raise TypeError('Shift amount must be an integer')
-		dstart, dlength = self.datawin
+		dwin = self.datawin
 		nsamp = self.nsamp
 
 		# Prepare a new waveform
 		shwave = Waveform(nsamp)
 
 		# Any shift of a zero waveform is just a zero waveform
-		if dlength == 0: return shwave
+		if dwin.length == 0: return shwave
 
 		if dtype is None: dtype = self.dtype
 
 		# Wrap the shifted start into the waveform window
-		nstart = int(dstart + d) % nsamp
-		nend = nstart + dlength
+		nstart = int(dwin.start + d) % nsamp
+		nend = nstart + dwin.length
 
 		if nend <= nsamp:
 			# If the shifted data window fits, no need to rewrap
@@ -892,7 +938,7 @@ class Waveform(object):
 		xcorr = self.xcorr(ref, osamp).real
 
 		# If the correlation is explicitly zero, the delay is 0
-		if xcorr.datawin[1] == 0: return 0
+		if xcorr.datawin.length == 0: return 0
 
 		# Find the point of maximal correlation
 		if negcorr:
@@ -969,7 +1015,7 @@ class Waveform(object):
 		ls = min(fs + window[1], self.nsamp)
 
 		# Window the signal around the identified peak
-		return self.window((fs, ls - fs), tails=tails)
+		return self.window(Window(fs, end=ls), tails=tails)
 
 
 	def bandpass(self, start, end, tails=None, dtype=None):

@@ -101,6 +101,8 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), lock=None):
 	number of transmit indices must be an integer multiple of the Hadamard
 	transform length.
 	'''
+	from habis.sigtools import Window
+
 	if not fht.ispow2(lfht):
 		raise ValueError('Hadamard transform length must be a power of 2')
 
@@ -129,6 +131,8 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), lock=None):
 	fs, fe, step = sl.indices(cdim[1])
 	if step != 1:
 		raise ValueError('Frequency range must specify consecutive values')
+
+	fswin = Window(fs, end=fe)
 	
 	# Create an FFT plan before populating results
 	fwdfft = pyfftw.FFTW(b, c, axes=(1,))
@@ -142,8 +146,7 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), lock=None):
 
 		# Clear the data array
 		b[:,:] = 0.
-		ws, wl = hdr['win']
-		we = ws + wl
+		ws, we = hdr.win.start, hdr.win.end
 
 		# Perform the tiled Hadamard transforms
 		if lfht > 1:
@@ -158,7 +161,7 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,), lock=None):
 		fwdfft()
 
 		# Record the output record
-		hdr['win'][:] = fs, (fe - fs)
+		hdr = WaveformSet.recordhdr(hdr.index, hdr.pos, fswin)
 		oset.setrecord(hdr, c[:,fs:fe], copy=True)
 
 	# Write local records to the output
