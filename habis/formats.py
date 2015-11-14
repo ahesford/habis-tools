@@ -593,7 +593,7 @@ class WaveformSet(object):
 		for ridx in range(nrx):
 			if minor == 2:
 				# Update running index
-				idx = += 1
+				idx += 1
 			else:
 				# Read a global channel index
 				# Correct 1-based indexing in early versions
