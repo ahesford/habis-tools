@@ -586,9 +586,15 @@ class WaveformSet(object):
 		buf = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
 		f.seek(fpos)
 
+		# For (1, 2) files, keep a running index tally
+		idx = -1
+
 		# Parse through the specified number of receive records
 		for ridx in range(nrx):
-			if minor != 2:
+			if minor == 2:
+				# Update running index
+				idx = += 1
+			else:
 				# Read a global channel index
 				# Correct 1-based indexing in early versions
 				idx = funpack('<I')[0] - int(minor < 2)
@@ -597,8 +603,6 @@ class WaveformSet(object):
 				i, g, px, py, pz, ws, wl = funpack('<2I3f2I')
 				txgrp = (i, g)
 				if minor == 2:
-					# Fake a global receive-channel index
-					idx = g * self.txgrps[1] + i
 					# Correct an off-by-one window specification bug
 					if wl == nsamp and ws == 1: ws = 0
 			else: txgrp = None
