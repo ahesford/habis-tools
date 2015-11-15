@@ -599,16 +599,17 @@ class WaveformSet(object):
 				# Correct 1-based indexing in early versions
 				idx = funpack('<I')[0] - int(minor < 2)
 
+			# Read element position and data window parameters
 			if minor in (2, 3):
+				# Also read transmission group configuration
 				i, g, px, py, pz, ws, wl = funpack('<2I3f2I')
 				txgrp = (i, g)
 				if minor == 2:
 					# Correct an off-by-one window specification bug
 					if wl == nsamp and ws == 1: ws = 0
-			else: txgrp = None
-
-			# Read element position and data window parameters
-			px, py, pz, ws, wl = funpack('<3f2I')
+			else:
+				px, py, pz, ws, wl = funpack('<3f2I')
+				txgrp = None 
 
 			# Build the channel header
 			hdr = (idx, (px, py, pz), (ws, wl), txgrp)
