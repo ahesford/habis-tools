@@ -168,15 +168,6 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,),
 	# Create an FFT plan before populating results
 	fwdfft = pyfftw.FFTW(b, c, axes=(1,))
 
-	def mutex(f):
-		"Call the function f (with no arguments) after acquiring a lock"
-		try: lock.acquire()
-		except AttributeError: pass
-		f()
-		try: lock.release()
-		except AttributeError: pass
-
-
 	for rxc in rxchans:
 		# Grab the waveform record
 		hdr, data = wset.getrecord(rxc)
@@ -201,16 +192,24 @@ def fhfft(infile, lfht, rxchans, outfile, freqrange=(None,),
 		fwdfft()
 
 		# Record the output record
-		hdr = WaveformSet.recordhdr(hdr.idx, hdr.pos, fswin)
+		hdr = WaveformSet.recordhdr(hdr.idx, hdr.pos, fswin, hdr.txgrp)
 		if not binfile:
-			oset.setrecord(hdr, c[:,fs:fe], copy=True)
+			oset.setrecord(hdr, c[:,fswin.start:fswin.end], copy=True)
 		else:
-			idx = rxc if rdl is not None else rdl[rxc]
-			mutex(lambda : oset[idx] = c[:,fs:fe].T)
+			idx = rxc if rdl is None else rdl[rxc]
+			try: lock.acquire()
+			except AttributeError: pass
+			oset[idx] = c[:,fswin.start:fswin.end].T
+			try: lock.release()
+			except AttributeError: pass
 
 	# Write local records to the output WaveformSet
 	if not binfile:
-		mutex(lambda : oset.store(outfile, append=True))
+		try: lock.acquire()
+		except AttributeError: pass
+		oset.store(outfile, append=True)
+		try: lock.release()
+		except AttributeError: pass
 
 
 if __name__ == '__main__':
