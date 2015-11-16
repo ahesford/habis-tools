@@ -22,15 +22,17 @@ def configureConductor():
 			'test256' : '/opt/habis/bin/test256',
 			'habismon' : '/opt/habis/bin/habismon',
 			'calib' : '/opt/habis/bin/calibNode',
-			'redistribute' : '/opt/custom-python/bin/redistribute.py',
+			'redistribute' : '/crypt/custom-python/bin/redistribute.py',
 			'habis-remove' : '/opt/habis/bin/habis-remove',
 			'habis-rescan' : '/opt/habis/bin/habis-rescan',
-			'flash' : '/opt/habis/bin/habis-flash',
+			'flash' : '/opt/habis/bin/habis-node-flash.sh',
+			'fhfft' : '/crypt/custom-python/bin/fhfft.py',
 	}
 
 	# The block command wrappers to attach to the conductor class
 	blockwrappers = {
-			'echo' : '/bin/echo'
+			'echo' : '/bin/echo',
+			'fieldmodel' : '/opt/habis/bin/FieldModelStepI',
 	}
 
 	# Register the commands to wrap
