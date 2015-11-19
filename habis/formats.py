@@ -222,7 +222,14 @@ class WaveformSet(object):
 
 	# Define a named tuple that represents a format-enforced transmit group configuration
 	class TxGroupIndex(tuple):
+		'''
+		A class to encapsulate and type-check transmit-index pairs.
+		'''
 		def __new__(cls, lidx, gidx):
+			'''
+			Create a new TxGroupIndex with local index lidx and
+			group index gidx.
+			'''
 			lidx = _strict_nonnegative_int(lidx)
 			gidx = _strict_nonnegative_int(gidx)
 			return tuple.__new__(cls, (lidx, gidx))
@@ -252,7 +259,17 @@ class WaveformSet(object):
 
 	# Define a named tuple that represents a format-enforced channel header
 	class ChannelHeader(tuple):
+		'''
+		A class to encapsulate and type-check receive-channel headers
+		in WaveformSet files.
+		'''
 		def __new__(cls, idx, pos, win, txgrp=None):
+			'''
+			Create a new header for receive channel idx,
+			element location pos = (px, py, pz), and data window
+			win = (start, length). The transmit group txgrp may
+			either be None or (index, group).
+			'''
 			from .sigtools import Window
 			idx = _strict_nonnegative_int(idx)
 			px, py, pz = pos
