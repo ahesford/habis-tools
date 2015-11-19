@@ -252,14 +252,14 @@ class WaveformSet(object):
 
 	# Define a named tuple that represents a format-enforced channel header
 	class ChannelHeader(tuple):
-		def __new__(cls, index, pos, win, txgrp=None):
+		def __new__(cls, idx, pos, win, txgrp=None):
 			from .sigtools import Window
-			index = _strict_nonnegative_int(index)
+			idx = _strict_nonnegative_int(idx)
 			px, py, pz = pos
 			pos = tuple(float(p) for p in (px, py, pz))
 			win = Window(*win)
 			if txgrp is not None: txgrp = WaveformSet.TxGroupIndex(*txgrp)
-			return tuple.__new__(cls, (index, pos, win, txgrp))
+			return tuple.__new__(cls, (idx, pos, win, txgrp))
 		@property
 		def idx(self): return self[0]
 		@property
@@ -269,13 +269,13 @@ class WaveformSet(object):
 		@property
 		def txgrp(self): return self[3]
 
-
-	@classmethod
-	def recordhdr(cls, index, pos, win, txgrp=None):
-		'''
-		A convenience method to allow creation of a record header.
-		'''
-		return cls.ChannelHeader(index, pos, win, txgrp)
+		def copy(self, **kwargs):
+			"Copy the header, optionally replacing certain properties."
+			keys = ['idx', 'pos', 'win', 'txgrp']
+			props = dict((key, kwargs.pop(key, getattr(self, key))) for key in keys)
+			if len(kwargs):
+				raise TypeError("Unrecognized keyword argument '%s'" % (kwargs.iterkeys().next()))
+			return type(self)(**props)
 
 
 	@staticmethod
@@ -410,84 +410,6 @@ class WaveformSet(object):
 		return (1, 3)
 
 
-	def encodechanhdr(self, hdr, ver=None):
-		'''
-		Return a byte string, suitable for writing to a file, that
-		represents a recive-channel header returned from getrecord().
-		The format version number can be specified as ver = (major,
-		minor) or, if None, defaults to some reasonable value.
-		'''
-		if ver is None: ver = self.getdefaultver()
-		major, minor = self._verify_file_version(ver, write=True)
-
-		hdr = self.recordhdr(*hdr)
-
-		idx = hdr.idx
-		px, py, pz = hdr.pos
-		ws, wl = hdr.win
-
-		# First encode the global channel index
-		# (Early versions used a 1-based scheme)
-		hbytes = struct.pack('<I', idx + int(minor < 2))
-
-		if minor == 3:
-			try:
-				count, size = self.txgrps
-				i, g = hdr.txgrp
-			except (TypeError, ValueError):
-				raise ValueError('Version (1, 3) requires transmit-group configuration')
-
-			# Encode the channel transmit grouping
-			hbytes += struct.pack('<2I', i, g)
-
-		# Encode element location and data window
-		return hbytes + struct.pack('<3f2I', px, py, pz, ws, wl)
-
-
-	def encodefilehdr(self, dtype=None, ver=None):
-		'''
-		Return a byte string, suitable for writing to a file, that
-		represents the file-level header for this WaveformSet. The
-		record data type can be overridden with the dtype argument. The
-		header version number can be specified as ver = (major, minor)
-		or, if None, defaults to some reasonable value.
-		'''
-		if dtype is None: dtype = self.dtype
-		if ver is None: ver = self.getdefaultver()
-
-		# Ensure the version is recognized
-		major, minor = self._verify_file_version(ver, write=True)
-
-		# Encode the magic number, file version and datatype
-		typecode = self.typecodes.inverse[np.dtype(dtype).name][0]
-		hdr = struct.pack('<4s2I2s', 'WAVE', major, minor, typecode)
-
-		# Encode common transmission parameters
-		hdr += struct.pack('<4I', self.f2c, self.nsamp, self.nrx, self.ntx)
-
-		if minor == 0:
-			# For (1, 0) files, encode transmit indices (1-based)
-			txidx = np.asarray([txi + 1 for txi in self.txidx], dtype=np.uint32)
-			hdr += txidx.tobytes()
-		elif minor == 3:
-			try:
-				# Encode the transmission group parameters
-				hdr += struct.pack('<2H', *self.txgrps)
-			except (TypeError, ValueError):
-				raise ValueError('File version (1, 3) requires a transmission group configuration')
-
-			# Unspecified TGC parameters default to 0
-			try: tgc = self.extrabytes['tgc']
-			except KeyError: tgc = np.zeros(256, dtype=np.float32).tobytes()
-
-			if len(tgc) != 1024:
-				raise ValueError('File version (1, 3) requires 1024 TGC bytes')
-
-			hdr += tgc
-
-		return hdr
-
-
 	def store(self, f, append=False, ver=None):
 		'''
 		Write the WaveformSet object to the data file in f (either a
@@ -509,17 +431,67 @@ class WaveformSet(object):
 			f = open(f, mode=('wb' if not append else 'ab'))
 
 		if ver is None: ver = self.getdefaultver()
+		major, minor = self._verify_file_version(ver, write=True)
+
+		if minor == 3:
+			# Ensure valid transmit-group configuration
+			try: count, size = self.txgrps
+			except (TypeError, ValueError):
+				raise ValueError('Version (1,3) file requires transmit-group configuration')
 
 		if not append:
-			# Write the file-level header
-			f.write(self.encodefilehdr(ver=ver))
+			# Encode the magic number, file version and datatype
+			typecode = self.typecodes.inverse[np.dtype(self.dtype).name][0]
+			hbytes = struct.pack('<4s2I2s', 'WAVE', major, minor, typecode) 
+
+			# Encode common transmission parameters
+			hbytes += struct.pack('<4I', self.f2c, self.nsamp, self.nrx, self.ntx)
+
+			if minor == 0:
+				# For (1, 0) files, encode transmit indices (1-based)
+				txidx = np.asarray([txi + 1 for txi in self.txidx], dtype=np.uint32)
+				hbytes += txidx.tobytes()
+			elif minor == 3:
+				# Encode the transmission group parameters
+				hbytes += struct.pack('<2H', *self.txgrps)
+
+				# Unspecified TGC parameters default to 0
+				try: tgc = self.extrabytes['tgc']
+				except KeyError: tgc = np.zeros(256, dtype=np.float32).tobytes()
+
+				if len(tgc) != 1024:
+					raise ValueError('File version (1,3) requires 1024 TGC bytes')
+
+				hbytes += tgc
+
+			f.write(hbytes)
 
 		# Write each record in turn
 		for idx, (hdr, waveforms) in self._records.iteritems():
 			if idx != hdr.idx:
 				raise ValueError('Record index does not match receive-channel index')
-			f.write(self.encodechanhdr(hdr, ver=ver))
+
+			px, py, pz = hdr.pos
+			ws, wl = hdr.win
+
+			# First encode the global channel index
+			# Early versions use a 1-based index
+			hbytes = struct.pack('<I', idx + int(minor < 2))
+
+			if minor == 3:
+				# Encode the channel transmit grouping
+				try: i, g = hdr.txgrp
+				except (TypeError, ValueError):
+					raise ValueError('Version (1,3) records require transmit-group configuration')
+				hbytes += struct.pack('<2I', i, g)
+
+			# Encode element location and data window
+			hbytes += struct.pack('<3f2I', px, py, pz, ws, wl)
+			f.write(hbytes)
+			# Encode the waveform data
 			waveforms.tofile(f)
+
+		f.close()
 
 
 	def load(self, f):
@@ -579,36 +551,40 @@ class WaveformSet(object):
 			self.extrabytes['tgc'] = f.read(1024)
 
 		# Record the start of the waveform data records in the file
-		fpos = f.tell()
+		fsrec = f.tell()
 
 		# Use a single Python mmap buffer for backing data
 		# This avoids multiple openings of the file for independent maps
 		buf = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
-		f.seek(fpos)
+		f.seek(fsrec)
 
 		# For (1, 2) files, keep a running index tally
 		idx = -1
 
 		# Parse through the specified number of receive records
-		for ridx in range(nrx):
+		while True:
 			if minor == 2:
 				# Update running index
 				idx += 1
 			else:
 				# Read a global channel index
 				# Correct 1-based indexing in early versions
-				idx = funpack('<I')[0] - int(minor < 2)
+				try: idx = funpack('<I')[0] - int(minor < 2)
+				except struct.error: break
 
 			# Read element position and data window parameters
 			if minor in (2, 3):
 				# Also read transmission group configuration
-				i, g, px, py, pz, ws, wl = funpack('<2I3f2I')
+				try: i, g, px, py, pz, ws, wl = funpack('<2I3f2I')
+				except struct.error: break
+
 				txgrp = (i, g)
 				if minor == 2:
 					# Correct an off-by-one window specification bug
 					if wl == nsamp and ws == 1: ws = 0
 			else:
-				px, py, pz, ws, wl = funpack('<3f2I')
+				try: px, py, pz, ws, wl = funpack('<3f2I')
+				except struct.error: break
 				txgrp = None 
 
 			# Build the channel header
@@ -617,14 +593,26 @@ class WaveformSet(object):
 			# Determine the shape of the waveform
 			waveshape = (ntx, wl)
 			# Determine the start and end of waveform data block
-			fstart = f.tell()
-			# Return a view of the map
-			wavemap = np.ndarray(waveshape, dtype=dtype,
-					buffer=buf, order='C', offset=fstart)
+			fsmap = f.tell()
+			try:
+				# Return a view of the map
+				wavemap = np.ndarray(waveshape, dtype=dtype,
+						buffer=buf, order='C', offset=fsmap)
+			except TypeError: break
 			# Add the record to the set
 			self.setrecord(hdr, wavemap, copy=False)
 			# Skip to the next header
-			f.seek(fstart + wavemap.nbytes)
+			f.seek(fsmap + wavemap.nbytes)
+			# Update the offset of the next record
+			fsrec = f.tell()
+
+		import warnings
+
+		if f.tell() != fsrec:
+			warnings.warn('Junk at end of file') 
+
+		if nrx and self.nrx != nrx:
+			raise ValueError('Header specifies %d records, but read %d' % (nrx, self.nrx))
 
 
 	@property
@@ -873,9 +861,7 @@ class WaveformSet(object):
 		if singletx: output = output[0]
 
 		# Override the window in the header copy
-		hdr = self.recordhdr(hdr.idx, hdr.pos, window, hdr.txgrp)
-
-		return hdr, output
+		return hdr.copy(win=window), output
 
 
 	def getwaveform(self, rid, tid, *args, **kwargs):
@@ -947,7 +933,7 @@ class WaveformSet(object):
 		local copy of the waveform array, cast to this set's dtype,
 		will always be made.
 		'''
-		hdr = self.recordhdr(*hdr)
+		hdr = self.ChannelHeader(*hdr)
 
 		if hdr.txgrp is not None and self.txgrps is None:
 			raise ValueError('Record specifies Tx-group parameters, but set has no Tx-group configuration')

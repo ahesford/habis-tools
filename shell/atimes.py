@@ -21,6 +21,33 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
+def validatechans(wset, kwargs):
+	'''
+	Validate the contents of the 'rxelts' and 'txelts' sequences in the
+	kwargs dictionary, if they exist. If rxelts is not specified, populate
+	it with sorted(wset.rxidx). If txelts is not specified, populate it
+	with rxelts. Returns (rxelts, txelts).
+	'''
+	# Pull the rxelts list
+	rxelts = kwargs.get('rxelts', None)
+	if rxelts is None:
+		rxelts = sorted(wset.rxidx)
+	else:
+		rxidx = wset.rxidx
+		if any(rxi not in rxidx for rxi in rxelts):
+			raise ValueError('Receive-channel list contains elements not in data file')
+
+	# Pull the txelts list
+	txelts = kwargs.get('txelts', None)
+	if txelts is None: txelts = list(rxelts)
+
+	txidx = wset.txidx
+	if any(txi not in txidx for txi in txelts):
+		raise ValueError('Transmit-channel list contains elements not in data file')
+
+	return rxelts, txelts
+
+
 def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 	'''
 	Compute the delay matrix for a habis.formats.WaveformSet stored in
@@ -41,15 +68,9 @@ def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 	be overwritten.
 	'''
 	# Grab the dimensions of the waveform matrix
-	wset = WaveformSet.fromfile(datafile)
-	# Determine the shape of the delay matrix
-	try: tlen = len(kwargs['txelts'])
-	except (KeyError, TypeError): tlen = wset.ntx
-	try: rlen = len(kwargs['rxelts'])
-	except (KeyError, TypeError): rlen = wset.nrx
+	rxelts, txelts = validatechans(WaveformSet.fromfile(datafile), kwargs)
+	rlen, tlen = len(rxelts), len(txelts)
 	wshape = (tlen, rlen)
-	# No need to keep the WaveformSet around; kill the memmap
-	del wset
 
 	try:
 		# Try to read an existing delay file and check its size
@@ -141,9 +162,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	* rxelts and txelts: If not None, should be a lists of element indices
 	  such that entry (i,j) in the delay matrix corresponds to the waveform
-	  datafile[rxelts[j],txelts[i]]. When rxelts or txelts are None or
-	  unspecified, they are populated by sorted(datafile.rxidx) and
-	  sorted(datafile.txidx), respectively.
+	  datafile[rxelts[j],txelts[i]]. When rxelts is None or unspecified, it
+	  is populated by sorted(datafile.rxidx). When txelts is None or
+	  unspecified, it defaults to rxelts.
 
 	* compenv: If True, delay analysis will proceed on signal and reference
 	  envelopes. If false, delay analysis uses the original signals.
@@ -156,10 +177,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	ref = Waveform.fromfile(reffile)
 
 	# Determine the elements to include in the delay matrix
-	rxelts = kwargs.get('rxelts', None)
-	if rxelts is None: rxelts = sorted(data.rxidx)
-	txelts = kwargs.get('txelts', None)
-	if txelts is None: txelts = sorted(data.txidx)
+	rxelts, txelts = validatechans(data, kwargs)
 
 	# Use envelopes for delay analysis if desired
 	compenv = kwargs.get('compenv', False)
@@ -322,16 +340,11 @@ def atimesEngine(config):
 	maskoutliers = config.getboolean(asec, 'maskoutliers', failfunc=lambda: False)
 	compenv = config.getboolean(asec, 'compenv', failfunc=lambda: False)
 
-	# Determine the shape of the multipath data
+	# Validate or select default transmit and receive lists from the first file
+	# Other files will be validated at access time
 	wset = WaveformSet.fromfile(datafiles[0])
-	wshape = wset.ntx, wset.nrx
+	rxelts, txelts = validatechans(wset, {'rxelts': rxelts, 'txelts': txelts})
 	wnsamp = wset.nsamp
-
-	# Check that all subsequent data files have the same shape
-	for datafile in datafiles[1:]:
-		wset = WaveformSet.fromfile(datafile)
-		if (wset.ntx, wset.nrx) != wshape:
-			raise TypeError('All input waveform data must have same shape')
 
 	# Allow the memmap to be closed
 	del wset
