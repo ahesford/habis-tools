@@ -212,7 +212,7 @@ def fhfft(infile, rxchans, outfile, freqrange=(None,), nsamp=None,
 			data = np.asarray(data, order='F')
 
 			# Perform the grouped Hadamard transforms
-			for grp, idxmap in sorted(fhts):
+			for grp, idxmap in sorted(fhts.items()):
 				rows = [wset.tx2row(i[1]) for i in idxmap]
 				b[rows,ws:we] = fht.fht(data[rows,:], axes=0)
 		else:
