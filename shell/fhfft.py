@@ -3,11 +3,12 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import numpy as np, os, sys, fht, pyfftw, getopt, glob
+import numpy as np, os, sys, fht, pyfftw, getopt
 from collections import defaultdict
 
 import multiprocessing
 
+from habis.habiconf import matchfiles, buildpaths
 from habis.formats import WaveformSet
 from pycwp import process, mio
 
@@ -29,8 +30,7 @@ def usage(progname=None, fatal=False):
 	print >> sys.stderr, '''
   Preprocess HABIS measurement data by Hadamard decoding transmissions and
   Fourier transforming the time-domain data. Measurement data is contained in
-  the 'measurements' WaveformSet files. If a filesystem object with the
-  specified exact name does not exist, it is treated as a glob to look for files.
+  the 'measurements' WaveformSet files.
 
   Output is stored, by default, in a WaveformSet file whose name has the same
   name as the input with any extension swapped with '.fhfft.wset'. If the input
@@ -42,7 +42,7 @@ def usage(progname=None, fatal=False):
   -t: Suppress Fourier transform
   -f: Retain only FFT frequency bins in range(start, end) (default: all)
   -n: Override acquisition window to n samples in WaveformSet files
-  -o: Override the output file name (valid only for single measurement-file input)
+  -o: Provide a path for placing output files
   -b: Write output as a simple 3-D matrix rather than a WaveformSet file
   -r: Read a file r for an ordering of output channels (ignored for WaveformSet files)
 	'''
@@ -247,7 +247,7 @@ def fhfft(infile, rxchans, outfile, freqrange=(None,), nsamp=None,
 
 if __name__ == '__main__':
 	# Set default options
-	dofht, dofft, freqrange, nsamp, outfiles = True, True, (None,), None, None
+	dofht, dofft, freqrange, nsamp, outpath = True, True, (None,), None, None
 	binfile, rdl = False, None
 	nprocs = process.preferred_process_count()
 
@@ -265,7 +265,7 @@ if __name__ == '__main__':
 		elif opt[0] == '-n':
 			nsamp = int(opt[1])
 		elif opt[0] == '-o':
-			outfiles = [opt[1]]
+			outpath = opt[1]
 		elif opt[0] == '-b':
 			binfile = True
 		elif opt[0] == '-r':
@@ -276,20 +276,20 @@ if __name__ == '__main__':
 	if not (dofht or dofft):
 		raise ValueError('ERROR: FHT and FFT cannot both be disabled')
 
-	infiles = [f for arg in args for f in glob.glob(arg)]
-
-	if outfiles is None:
-		ext = (binfile and '.mat') or '.wset'
-		outfiles = [os.path.splitext(f)[0] + '.fhfft' + ext for f in infiles]
-
-	if len(infiles) < 1:
-		print >> sys.stderr, 'ERROR: No input files'
+	try: infiles = matchfiles(args)
+	except IOError as e:
+		print >> sys.stderr, 'ERROR:', e
 		usage(fatal=True)
-	elif len(infiles) != len(outfiles):
-		print >> sys.stderr, 'ERROR: output name count disagrees with input name count'
+
+	ext = 'fhfft' + ((binfile and '.mat') or '.wset')
+	try:
+		outfiles = buildpaths(infiles, outpath, 
+				'fhfft' + ((binfile and '.mat') or '.wset'))
+	except IOError as e:
+		print >> sys.stderr, 'ERROR:', e
 		usage(fatal=True)
 
 	for infile, outfile in zip(infiles, outfiles):
-		print 'Processing data file', infile
+		print 'Processing data file', infile, '->', outfile
 		mpfhfft(infile, outfile, nprocs, freqrange,
 				nsamp, binfile, rdl, dofht, dofft)

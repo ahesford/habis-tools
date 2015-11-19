@@ -8,6 +8,61 @@ Tools for manipulating and accessing HABIS configuration files.
 import ConfigParser
 import shlex
 
+
+def matchfiles(files, forcematch=True):
+	'''
+	Given a list of files or globs, return a list of matching files.
+
+	If forcematch is True an IOError is raised:
+
+	1. If a specifically named file (not a glob) does not exist.
+	2. If the list of matches is empty.
+	'''
+	import glob
+	results = []
+	for f in files:
+		r = glob.glob(f)
+		if forcematch and not (len(r) or glob.has_magic(f)):
+			raise IOError("File '%s' does not exist" % f)
+		results.extend(r)
+
+	if forcematch and not len(results):
+		raise IOError('No files found')
+
+	return results
+
+
+def buildpaths(files, outpath=None, extension=None):
+	'''
+	Given a list files of filenames, transform the names according to the
+	following rules:
+
+	1. If len(files) == 1 and outpath is not None, return [outpath].
+	2. If extension is not None, replace any existing extension in each
+	   input names with the specified extension string.
+	3. If outpath is not None, replace each (possibly modified) input name
+	   with os.path.join(outpath, os.path.basename(input)).
+
+	In case 1, the outpath is not checked for validity. In all other cases,
+	if outpath is specified, it must refer to a valid directory. An IOError
+	will be raised if this is not the case.
+	'''
+	if len(files) == 1 and outpath is not None: return [outpath]
+
+	from os.path import join, basename, splitext, isdir
+
+	# Swap the extensions if necessary
+	if extension is not None:
+		files = [splitext(f)[0] + '.' + extension for f in files]
+
+	if outpath is not None:
+		if not isdir(outpath):
+			raise IOError('Output path must refer to an existing directory')
+		files = [join(outpath, basename(f)) for f in files]
+
+	return files
+
+
 class HabisConfigError(ConfigParser.Error): 
 	'''
 	This generic exception is raised to identify improper HABIS configurations.

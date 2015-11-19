@@ -3,18 +3,18 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import sys, itertools, numpy as np, os, glob, getopt
+import sys, numpy as np, os, getopt
 import multiprocessing
 
 from pycwp import process
-from habis.habiconf import HabisConfigError, HabisConfigParser
+from habis.habiconf import matchfiles, buildpaths
 from habis.formats import WaveformSet
 from habis.sigtools import Waveform
 
 
 def usage(progname, fatal=False):
-	print >> sys.stderr, 'USAGE: %s [-r rxlist] [-t txlist] [-p nprocs] [-n nsamp] [-o output] -f <start:end[:tails]> <inputs>' % progname
-	if fatal: sys.exit(1)
+	print >> sys.stderr, 'USAGE: %s [-r rxlist] [-t txlist] [-p nprocs] [-n nsamp] [-o outpath] -f <start:end[:tails]> <inputs>' % progname
+	sys.exit(int(fatal))
 
 
 def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
@@ -175,7 +175,7 @@ def mpwavefilt(infile, filt, nproc, outfile, rxchans=None, txchans=None, nsamp=N
 
 
 if __name__ == '__main__':
-	outfiles, filt, nsamp = None, None, None
+	outpath, filt, nsamp = None, None, None
 	rxchans, txchans = None, None
 	nprocs = process.preferred_process_count()
 
@@ -189,7 +189,7 @@ if __name__ == '__main__':
 		elif opt[0] == '-n':
 			nsamp = int(opt[1])
 		elif opt[0] == '-o':
-			outfiles = [opt[1]]
+			outpath = opt[1]
 		elif opt[0] == '-r':
 			rxchans = [int(s) for s in opt[1].split(',')]
 		elif opt[0] == '-t':
@@ -202,18 +202,17 @@ if __name__ == '__main__':
 		usage(sys.argv[0], fatal=True)
 
 	# Prepare the input and output lists
-	infiles = [f for arg in args for f in glob.glob(arg)]
-	if outfiles is None:
-		outfiles = [os.path.splitext(f)[0] + '.bpf.wset' for f in infiles]
-
-	if len(infiles) < 1:
-		print >> sys.stderr, 'ERROR: no input files'
+	try: infiles = matchfiles(args)
+	except IOError as e:
+		print >> sys.stderr, 'ERROR:', e
 		usage(sys.argv[0], fatal=True)
-	elif len(infiles) != len(outfiles):
-		print >> sys.stderr, 'ERROR: output name count disagrees with input name count'
+
+	try: outfiles = buildpaths(infiles, outpath, 'bpf.wset')
+	except IOError as e:
+		print >> sys.stderr, 'ERROR:', e
 		usage(sys.argv[0], fatal=True)
 
 	# Process the waveforms
 	for datafile, outfile in zip(infiles, outfiles):
-		print 'Filtering data file', datafile
+		print 'Filtering data file', datafile, '->', outfile
 		mpwavefilt(datafile, filt, nprocs, outfile, rxchans, txchans, nsamp)
