@@ -145,8 +145,8 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	* start (default: 0) and stride (default: 1): For an input WaveformSet
 	  wset, process receive channels in wset.rxidx[start::stride].
 
-	* lock (default: None): If not None, lock.acquire() will be called to
-	  serialize writes to output.
+	* lock (default: None): If not None, it should be a context manager
+	  that is invoked to serialize writes to output.
 
 	* event (default: None): If not None, event.set() and event.wait() are
 	  called to ensure the output WaveformSet header is written before
@@ -157,8 +157,10 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	nsamp = kwargs.pop('nsamp', None)
 
 	# Grab synchronization mechanisms
-	lock = kwargs.pop('lock', None)
-	event = kwargs.pop('event', None)
+	try: lock = kwargs.pop('lock')
+	except KeyError: lock = multiprocessing.Lock()
+	try: event = kwargs.pop('event')
+	except KeyError: event = multiprocessing.Event()
 
 	# Grab FFT and FHT switches and options
 	dofht = kwargs.pop('dofht', True)
@@ -231,34 +233,33 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			pyfftw.simd_alignment, wset.dtype, order='C')
 
 	if dofft:
+		# Create FFT output and a plan
 		cdim = (ntx, nsamp // 2 + 1)
 		c = pyfftw.n_byte_align_empty(cdim,
 				pyfftw.simd_alignment, otype, order='C')
-
-		# Find the spectral window
+		fwdfft = pyfftw.FFTW(b, c, axes=(1,))
+		# Find the spectral window of interest
 		fswin = specwin(cdim[1], freqs)
 
-		# Create an FFT plan before populating results
-		fwdfft = pyfftw.FFTW(b, c, axes=(1,))
-
 	# Create the input file header, if necessary
-	getattr(lock, 'acquire', lambda : None)()
-
-	if not getattr(event, 'is_set', lambda : False)():
-		if binfile:
-			# Create a sliced binary matrix output
-			windim = (fswin.length if dofft else nsamp, oset.ntx, wset.nrx)
-			mio.Slicer(outfile, dtype=otype, trunc=True, dim=windim)
-		else:
-			# Create a WaveformSet output
-			oset.store(outfile)
-		getattr(event, 'set', lambda : None)()
-
-	getattr(lock, 'release', lambda : None)()
+	with lock:
+		if not event.is_set():
+			if binfile:
+				# Create a sliced binary matrix output
+				windim = (fswin.length if dofft else nsamp, oset.ntx, wset.nrx)
+				mio.Slicer(outfile, dtype=otype, trunc=True, dim=windim)
+			else:
+				# Create a WaveformSet output
+				oset.store(outfile)
+			event.set()
 
 	for rxc in wset.rxidx[start::stride]:
 		# Grab the waveform record
 		hdr, data = wset.getrecord(rxc)
+
+		# Validate the group map
+		if outidx[hdr.idx] != gsize * hdr.txgrp.grp + hdr.txgrp.idx:
+			raise ValueError('Receive channel %d group configuration does not match provided map' % rxc)
 
 		# Clear the data array
 		b[:,:] = 0.
@@ -290,12 +291,13 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			hdr = hdr.copy(txgrp=None)
 			oset.setrecord(hdr, b[outrows,ws:we], copy=True)
 
+	# Ensure the output header has been written
+	event.wait()
+
 	if not binfile:
 		# Write local records to the output WaveformSet
-		getattr(event, 'wait', lambda : None)()
-		getattr(lock, 'acquire', lambda : None)()
-		oset.store(outfile, append=True)
-		getattr(lock, 'release', lambda : None)()
+		with lock:
+			oset.store(outfile, append=True)
 	else:
 		# Map receive channels to rows (slabs) in the output
 		rows = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
@@ -303,9 +305,8 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		for rxc in wset.rxidx:
 			if dofft: b = oset.getrecord(rxc, window=fswin)[1]
 			else: b = oset.getrecord(rxc, window=(0, nsamp))[1]
-			getattr(lock, 'acquire', lambda : None)()
-			outbin[rows[rxc]] = b.T
-			getattr(lock, 'release', lambda : None)()
+			with lock:
+				outbin[rows[rxc]] = b.T
 
 
 if __name__ == '__main__':
