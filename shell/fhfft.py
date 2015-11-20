@@ -198,13 +198,16 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	otype = dofft and _r2c_datatype(wset.dtype) or wset.dtype
 	oset = WaveformSet(outidx.keys(), nsamp, wset.f2c, otype)
 
+	# Prepare a list of input rows to be copied to output
+	outrows = [wset.tx2row(i) for i in outidx.itervalues()]
+
 	if dofht:
 		if not fht.ispow2(gsize):
 			raise ValueError('Hadamard transform length must be a power of 2')
 
 		if signs is not None:
 			# Ensure signs has values 0 or 1 in the right type
-			signs = np.asarray(signs, dtype=bool).astype(wset.dtype).squeeze()
+			signs = np.asarray([1 - 2 * s for s in signs], dtype=wset.dtype)
 			if signs.ndim != 1 or len(signs) != gsize:
 				raise ValueError('Sign array must have shape (wset.txgrps[1],)')
 
@@ -273,21 +276,19 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 					# Include the sign flips
 					b[rows,ws:we] *= signs[:,np.newaxis]
 		else:
+			# With no FHT, just copy the data
 			b[:,ws:we] = data
 
 		# Perform the FFT if desired
 		if dofft: fwdfft()
 
-		# Build a list of rows for the output
-		rows = [oset.tx2row(i) for i in outidx.iterkeys()]
-
 		# Store the output record in a WaveformSet file
 		if dofft:
 			hdr = hdr.copy(win=fswin, txgrp=None)
-			oset.setrecord(hdr, c[rows,fswin.start:fswin.end], copy=True)
+			oset.setrecord(hdr, c[outrows,fswin.start:fswin.end], copy=True)
 		else:
 			hdr = hdr.copy(txgrp=None)
-			oset.setrecord(hdr, b[rows,ws:we], copy=True)
+			oset.setrecord(hdr, b[outrows,ws:we], copy=True)
 
 	if not binfile:
 		# Write local records to the output WaveformSet
@@ -297,9 +298,9 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		getattr(lock, 'release', lambda : None)()
 	else:
 		# Map receive channels to rows (slabs) in the output
-		rows = dict((i, j) for (j, i) in enumerate(wset.rxidx))
+		rows = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
 		outbin = mio.Slicer(outfile)
-		for rxc in sorted(wset.rxidx):
+		for rxc in wset.rxidx:
 			if dofft: b = oset.getrecord(rxc, window=fswin)[1]
 			else: b = oset.getrecord(rxc, window=(0, nsamp))[1]
 			getattr(lock, 'acquire', lambda : None)()
