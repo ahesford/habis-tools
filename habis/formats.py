@@ -840,18 +840,17 @@ class WaveformSet(object):
 		To force a copy without knowing or changing the window and
 		dtype, pass dtype=0.
 		'''
-		if tid is None:
-			# With no tid, pull all transmissions
-			tcidx = range(self.ntx)
-		else:
-			try:
-				# Map the transmit IDs to row indices
-				tcidx = [self.tx2row(t) for t in tid]
-				singletx = False
-			except TypeError:
-				# Handle mapping for a scalar tid
-				tcidx = self.tx2row(tid)
-				singletx = True
+		# With no tid, pull all transmissions
+		if tid is None: tid = self.txidx
+
+		try:
+			# Map the transmit IDs to row indices
+			tcidx = [self.tx2row(t) for t in tid]
+			singletx = False
+		except TypeError:
+			# Handle mapping for a scalar tid
+			tcidx = [self.tx2row(tid)]
+			singletx = True
 
 		# Grab receive record, copy header to avoid corruption
 		hdr, waveforms = self._records[rid]
@@ -872,7 +871,7 @@ class WaveformSet(object):
 			dtype = waveforms.dtype
 
 		# Create an output array to store the results
-		oshape = (1 if singletx else len(tcidx), window[1])
+		oshape = (len(tcidx), window[1])
 		output = np.zeros(oshape, dtype=dtype)
 
 		try:

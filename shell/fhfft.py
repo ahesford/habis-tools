@@ -197,7 +197,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	outidx = OrderedDict((i[0], i[1] + gsize * i[2]) for i in grpmap)
 
 	# Create a WaveformSet object to hold the ungrouped data
-	otype = dofft and _r2c_datatype(wset.dtype) or wset.dtype
+	otype = _r2c_datatype(wset.dtype) if dofft else wset.dtype
 	oset = WaveformSet(outidx.keys(), nsamp, wset.f2c, otype)
 
 	# Prepare a list of input rows to be copied to output
@@ -302,7 +302,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		# Map receive channels to rows (slabs) in the output
 		rows = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
 		outbin = mio.Slicer(outfile)
-		for rxc in wset.rxidx:
+		for rxc in wset.rxidx[start::stride]:
 			if dofft: b = oset.getrecord(rxc, window=fswin)[1]
 			else: b = oset.getrecord(rxc, window=(0, nsamp))[1]
 			with lock:
