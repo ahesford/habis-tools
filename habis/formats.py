@@ -302,7 +302,9 @@ class WaveformSet(object):
 		class. If not, raise a ValueError. If so, just return the
 		version tuple.
 		'''
-		major, minor = version
+		try: major, minor = version
+		except (TypeError, ValueError):
+			raise ValueError('Version format is not recognized')
 
 		if major != 1: raise ValueError('Unsupported major version')
 		if write and minor not in (0, 1, 3):
@@ -511,7 +513,7 @@ class WaveformSet(object):
 		f.close()
 
 
-	def load(self, f):
+	def load(self, f, ver=None):
 		'''
 		Associate the WaveformSet object with the data in f, a
 		file-like object or string specifying a file name. If f is a
@@ -524,6 +526,9 @@ class WaveformSet(object):
 
 		Each block of waveform data is memory-mapped from the source
 		file. This mapping is copy-on-write; changes do not persist.
+
+		If ver is specified, file parsing will fail with an IOError
+		unless the encoded version matches the specified version.
 		'''
 		# Open the file if it is not open
 		if isinstance(f, basestring):
@@ -539,6 +544,9 @@ class WaveformSet(object):
 		if magic != 'WAVE':
 			raise ValueError('Invalid magic number in file')
 		self._verify_file_version((major, minor))
+
+		if (ver is not None) and (major, minor) != self._verify_file_version(ver):
+			raise IOError('File version %s does not match required version %s' % ((major, minor), ver))
 
 		dtype = np.dtype(self.typecodes[typecode])
 
@@ -855,6 +863,10 @@ class WaveformSet(object):
 		# Pull an unspecified output window from the header
 		if window is None:
 			window = hdr.win
+		else:
+			from .sigtools import Window
+			window = Window(*window)
+
 		# Pull an unspecified data type from the waveforms
 		if dtype is None or dtype == 0:
 			dtype = waveforms.dtype

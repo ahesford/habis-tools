@@ -101,7 +101,11 @@ if __name__ == '__main__':
 	grpmap, locmap = None, None
 	nprocs = process.preferred_process_count()
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'g:l:p:')
+	try:
+		optlist, args = getopt.getopt(sys.argv[1:], 'g:l:p:')
+	except getopt.GetoptError as e:
+		print >> sys.stderr, 'ERROR:', e
+		usage(fatal=True)
 
 	for opt in optlist:
 		if opt[0] == '-p':

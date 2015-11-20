@@ -27,6 +27,8 @@ def configureConductor():
 			'habis-rescan' : '/opt/habis/bin/habis-rescan',
 			'flash' : '/opt/habis/bin/habis-node-flash.sh',
 			'fhfft' : '/crypt/custom-python/bin/fhfft.py',
+			'rxchanlist' : '/crypt/custom-python/bin/wset-rxchanlist.py',
+			'bpf' : '/crypt/custom-python/bin/wset-bpf.py',
 	}
 
 	# The block command wrappers to attach to the conductor class
