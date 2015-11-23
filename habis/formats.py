@@ -849,7 +849,7 @@ class WaveformSet(object):
 			singletx = False
 		except TypeError:
 			# Handle mapping for a scalar tid
-			tcidx = [self.tx2row(tid)]
+			tcidx = self.tx2row(tid)
 			singletx = True
 
 		# Grab receive record, copy header to avoid corruption
@@ -871,7 +871,7 @@ class WaveformSet(object):
 			dtype = waveforms.dtype
 
 		# Create an output array to store the results
-		oshape = (len(tcidx), window[1])
+		oshape = (1 if singletx else len(tcidx), window[1])
 		output = np.zeros(oshape, dtype=dtype)
 
 		try:
