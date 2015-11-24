@@ -861,7 +861,7 @@ class Waveform(object):
 		except AttributeError:
 			# Treat a Numpy array as a signal starting at sample 0
 			ref = type(self)(signal=ref)
-			rstart, rlength = ref.datwin
+			rstart, rlength = ref.datawin
 
 		# Find the necessary padding for convolution
 		npad = cutil.ceilpow2(slength + rlength - 1)
