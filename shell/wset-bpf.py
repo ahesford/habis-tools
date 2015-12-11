@@ -61,11 +61,6 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 	# The output always uses a float32 datatype and no transmission group
 	oset.dtype = np.float32
 	oset.txgrps = None
-	# Pull the bandwidth specifiers for the filter
-	bstart, bend = filt[:2]
-	# Try to pull the tailwidth, or use no roll-off
-	try: tails = np.hanning(2 * filt[2])
-	except IndexError: tails = None
 
 	if rxchans is None: rxchans = wset.rxidx
 	if txchans is None: txchans = sorted(rxchans)
@@ -112,7 +107,7 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 			# Pull the waveform for the Tx-Rx pair
 			wave = wset.getwaveform(rxc, txmap[txc])
 			# Set output to filtered waveform (force type conversion)
-			owave = wave.bandpass(bstart, bend, tails, dtype=oset.dtype)
+			owave = wave.bandpass(*filt, dtype=oset.dtype)
 			oset.setwaveform(rxc, txc, owave)
 
 	# Ensure that the header has been written

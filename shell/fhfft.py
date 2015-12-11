@@ -30,7 +30,7 @@ def specwin(nsamp, freqs=None):
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s [-n n] [-h] [-t] [-p p] [-b] [-f s:e] [-s s] [-o outpath] -g g <measurements>' % binfile
+	print >> sys.stderr, 'USAGE: %s [-n n] [-h] [-t] [-p p] [-z] [-b] [-f s:e] [-s s] [-o outpath] -g g <measurements>' % binfile
 	print >> sys.stderr, '''
   Preprocess HABIS measurement data by Hadamard decoding transmissions and
   Fourier transforming the time-domain data. Measurement data is contained in
@@ -52,6 +52,7 @@ def usage(progname=None, fatal=False):
   -o: Provide a path for placing output files
   -b: Write output as a simple 3-D matrix rather than a WaveformSet file
   -s: Correct the decoded signs with the given sign map (default: skip)
+  -z: Subtract a DC bias from the waveforms before processing
 	'''
 	if fatal: sys.exit(fatal)
 
@@ -142,6 +143,10 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	  (corresponding to lines in the file) that should be negated, and 0
 	  anywhere else. Ignored when dofht is False.
 
+	* debias (default: False): If True, all input waveforms will have a DC
+	  bias removed prior to processing by subtracting the mean signal value
+	  over the sampling window.
+
 	* start (default: 0) and stride (default: 1): For an input WaveformSet
 	  wset, process receive channels in wset.rxidx[start::stride].
 
@@ -176,6 +181,9 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	# Grab sign map information
 	signs = kwargs.pop('signs', None)
+
+	# Determine whether the waveforms should be debiased
+	debias = kwargs.pop('debias', False)
 
 	if len(kwargs):
 		raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
@@ -261,6 +269,10 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		if outidx[hdr.idx] != gsize * hdr.txgrp.grp + hdr.txgrp.idx:
 			raise ValueError('Receive channel %d group configuration does not match provided map' % rxc)
 
+		# Remove a signal bias, if appropriate
+		if debias:
+			data -= np.mean(data, axis=1)[:,np.newaxis]
+
 		# Clear the data array
 		b[:,:] = 0.
 		ws, we = hdr.win.start, hdr.win.end
@@ -310,32 +322,35 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 
 if __name__ == '__main__':
-	# Set default options
-	dofht, dofft, binfile = True, True, False
-	grpmap, signs, freqs, nsamp, outpath = None, None, None, None, None
+	grpmap, outpath = None, None
 	nprocs = process.preferred_process_count()
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'htp:f:n:o:bg:s:')
+	optlist, args = getopt.getopt(sys.argv[1:], 'htp:f:n:o:bg:s:z')
+
+	# Don't populate default options
+	kwargs = {}
 
 	for opt in optlist:
 		if opt[0] == '-h':
-			dofht = False
+			kwargs['dofht'] = False
 		elif opt[0] == '-t':
-			dofft = False
+			kwargs['dofft'] = False
 		elif opt[0] == '-p':
 			nprocs = int(opt[1])
 		elif opt[0] == '-f':
-			freqs = tuple((int(s, base=10) if len(s) else None) for s in opt[1].split(':'))
+			kwargs['freqs'] = tuple((int(s, base=10) if len(s) else None) for s in opt[1].split(':'))
 		elif opt[0] == '-n':
-			nsamp = int(opt[1])
+			kwargs['nsamp'] = int(opt[1])
 		elif opt[0] == '-o':
 			outpath = opt[1]
 		elif opt[0] == '-b':
-			binfile = True
+			kwargs['binfile'] = True
 		elif opt[0] == '-g':
 			grpmap = np.loadtxt(opt[1], dtype=np.uint32)
 		elif opt[0] == '-s':
-			signs = np.loadtxt(opt[1], dtype=bool)
+			kwargs['signs'] = np.loadtxt(opt[1], dtype=bool)
+		elif opt[0] == '-z':
+			kwargs['debias'] = True
 		else:
 			usage(fatal=True)
 
@@ -344,15 +359,15 @@ if __name__ == '__main__':
 		print >> sys.stderr, 'ERROR:', e
 		usage(fatal=True)
 
+	# Determine the propr file extension
+	outext = 'fhfft' + ((kwargs.get('binfile', False) and '.mat') or '.wset')
+
 	try:
-		outfiles = buildpaths(infiles, outpath, 
-				'fhfft' + ((binfile and '.mat') or '.wset'))
+		outfiles = buildpaths(infiles, outpath, outext)
 	except IOError as e:
 		print >> sys.stderr, 'ERROR:', e
 		usage(fatal=True)
 
 	for infile, outfile in zip(infiles, outfiles):
 		print 'Processing data file', infile, '->', outfile
-		mpfhfft(nprocs, infile, outfile, grpmap,
-				freqs=freqs, nsamp=nsamp, signs=signs,
-				dofht=dofht, dofft=dofft, binfile=binfile)
+		mpfhfft(nprocs, infile, outfile, grpmap, **kwargs)

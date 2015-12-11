@@ -14,7 +14,7 @@ from habis.formats import WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = os.path.basename(sys.argv[0])
-	print >> sys.stderr, 'USAGE: %s [-g grpmap] [-l locmap] [-p nprocs]' % progname
+	print >> sys.stderr, 'USAGE: %s [-g grpmap] [-l locmap] [-p nprocs] <inputs>' % progname
 	sys.exit(int(fatal))
 
 

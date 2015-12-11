@@ -177,7 +177,7 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0, window=No
 
 		# Shift the reference according to preferences
 		if regress:
-			ref = ref.shift(offset - ref.zerotime(regress))
+			ref = ref.shift(offset - ref.zerotime(*regress))
 		elif offset:
 			ref = ref.shift(offset)
 
@@ -292,7 +292,7 @@ def averageEngine(config):
 			avg = alignedsum(avgs.itervalues(), osamp, False)
 			avg /= np.max(avg.envelope())
 			if regress:
-				avg = avg.shift(offset-avg.zerotime(regress))
+				avg = avg.shift(offset-avg.zerotime(*regress))
 			elif offset:
 				avg = avg.shift(offset)
 			cropper(avg, window).store(outfile)

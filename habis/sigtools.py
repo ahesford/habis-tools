@@ -810,23 +810,22 @@ class Waveform(object):
 		return shwave
 
 
-	def zerotime(self, band=None):
+	def zerotime(self, start=0, end=None):
 		'''
 		Attempt to find the time origin of this signal by determining,
 		using linear regression, the slope of the phase angle of the
 		signal. Shifting by the negative of this slope should eliminate
 		linear phase variations in the phase angle.
 
-		If specified, band should be of the form (start, end), and
-		specifies the range of *POSITIVE* DFT frequency bin indices
-		over which regression will be performed. If band is not
-		specified, all positive frequencies are used.
+		The regression will be performed over the range (start, end) of
+		*POSITIVE* DFT frequency bin indices. If end is None, all
+		positive frequencies are used.
 		'''
-		if band is None: band = (0, int(self.nsamp / 2) + 1)
+		if end is None: end = int(self.nsamp / 2) + 1
 		# Compute positive DFT frequencies
-		freqs = -2.0 * math.pi * np.arange(band[0], band[1]) / self.nsamp
+		freqs = -2.0 * math.pi * np.arange(start, end) / self.nsamp
 		# Compute the unwrapped phase angle in the band of interest
-		sft = self.fft().getsignal((band[0], band[1] - band[0]), forcecopy=False)
+		sft = self.fft().getsignal((start, end - start), forcecopy=False)
 		ang = np.unwrap(np.angle(sft))
 		# Perform the regression (ignore all but slope)
 		slope = linregress(freqs, ang)[0]
@@ -1018,20 +1017,22 @@ class Waveform(object):
 		return self.window(Window(fs, end=ls), tails=tails)
 
 
-	def bandpass(self, start, end, tails=None, dtype=None):
+	def bandpass(self, start, end, tails=0, dtype=None):
 		'''
 		Perform a bandpass operation that zeros all frequencies below
 		the frequency bin at index start and above (and including) the
 		frequency bin at index end. Only positive frequencies may be
 		specified.
 
-		If tails is provided, it should be a 1-D array of length N that
-		will modify the frequencies of sig according to the formula
+		If tails is provided, it should be a scalar or a 1-D array of
+		length N that will modify the frequencies of sig according to
+		the formula
 
 			fsig[start:start+N/2] *= tails[:N/2],
 			fsig[end-N/2:end] *= tails[-N/2:],
 
-		where fsig = rfft(sig). If the signal is complex (and,
+		where fsig = rfft(sig). If tails is a scalar, an array of
+		np.hanning(2 * tails) is used. If the signal is complex (and,
 		therefore, a C2C DFT is used, negative frequencies are
 		similarly modified.
 
@@ -1043,7 +1044,13 @@ class Waveform(object):
 			raise ValueError('Starting index should be less than ending index')
 
 		# Check the tail for sanity
-		if tails is not None and len(tails) > (end - start):
+		tails = np.asarray(tails)
+		if tails.ndim < 1:
+			tails = np.hanning(2 * tails)
+		elif tails.ndim > 1:
+			raise TypeError('Tails must be scalar or 1-D array compatible')
+
+		if len(tails) > (end - start):
 			raise ValueError('Single-side tail should not exceed half window width')
 
 		r2c = self.isReal
@@ -1068,7 +1075,7 @@ class Waveform(object):
 			fsig[n-start+1:] = 0
 
 		# Apply the tails
-		if tails is not None:
+		if len(tails) > 0:
 			ltails = len(tails) / 2
 			fsig[start:start+ltails] *= tails[:ltails]
 			fsig[end-ltails:end] *= tails[-ltails:]
