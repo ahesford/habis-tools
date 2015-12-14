@@ -11,6 +11,7 @@ import multiprocessing
 
 from habis.habiconf import matchfiles, buildpaths
 from habis.formats import WaveformSet
+from habis.sigtools import Window
 from pycwp import process, mio
 
 def specwin(nsamp, freqs=None):
@@ -20,7 +21,7 @@ def specwin(nsamp, freqs=None):
 	if freqs is None: freqs = (None,)
 
 	# Find the spectral window
-	fs, fe, step = slice(*freqs).indices(nsamp)
+	fs, fe, step = slice(*freqs[:2]).indices(nsamp)
 	if step != 1:
 		raise ValueError('Frequency range must specify consecutive values')
 
@@ -30,7 +31,7 @@ def specwin(nsamp, freqs=None):
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s [-n n] [-h] [-t] [-p p] [-z] [-b] [-f s:e] [-s s] [-o outpath] -g g <measurements>' % binfile
+	print >> sys.stderr, 'USAGE: %s [-p p] [-h] [-f s:e:w] [-t] [-n n] [-z] [-b] [-s s] [-o outpath] -g g <measurements>' % binfile
 	print >> sys.stderr, '''
   Preprocess HABIS measurement data by Hadamard decoding transmissions and
   Fourier transforming the time-domain data. Measurement data is contained in
@@ -46,13 +47,13 @@ def usage(progname=None, fatal=False):
   OPTIONAL ARGUMENTS:
   -p: Use p processors (default: all available processors)
   -h: Suppress Hadamard decoding
-  -t: Suppress Fourier transform
-  -f: Retain only FFT frequency bins in range(s,e) (default: all)
+  -f: Retain only DFT bins s:e, with a tail filter of width w (default: all) 
+  -t: Output time-domain, rather than frequency-domain, waveforms
   -n: Override acquisition window to n samples in WaveformSet files
-  -o: Provide a path for placing output files
+  -z: Subtract a DC bias from the waveforms before processing
   -b: Write output as a simple 3-D matrix rather than a WaveformSet file
   -s: Correct the decoded signs with the given sign map (default: skip)
-  -z: Subtract a DC bias from the waveforms before processing
+  -o: Provide a path for placing output files
 	'''
 	if fatal: sys.exit(fatal)
 
@@ -133,7 +134,8 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	* dofht (default: True): Set to False to disable Hadamard decoding.
 
-	* dofft (default: True): Set to False to disable Fourier transforms.
+	* tdout (default: False): Set to True to output time-domain waveforms
+	  rather than spectral samples. Preserves input acquisition windows.
 
 	* binfile (default: False): Set to True to produce binary matrix
 	  output instead of WaveformSet files.
@@ -169,8 +171,9 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	# Grab FFT and FHT switches and options
 	dofht = kwargs.pop('dofht', True)
-	dofft = kwargs.pop('dofft', True)
+	tdout = kwargs.pop('tdout', False)
 	freqs = kwargs.pop('freqs', None)
+	dofft = (freqs is not None) or not tdout
 
 	# Grab output controls
 	binfile = kwargs.pop('binfile', False)
@@ -205,7 +208,8 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	outidx = OrderedDict((i[0], i[1] + gsize * i[2]) for i in grpmap)
 
 	# Create a WaveformSet object to hold the ungrouped data
-	otype = _r2c_datatype(wset.dtype) if dofft else wset.dtype
+	ftype = _r2c_datatype(wset.dtype)
+	otype = ftype if not tdout else wset.dtype
 	oset = WaveformSet(outidx.keys(), nsamp, wset.f2c, otype)
 
 	# Prepare a list of input rows to be copied to output
@@ -244,10 +248,19 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		# Create FFT output and a plan
 		cdim = (ntx, nsamp // 2 + 1)
 		c = pyfftw.n_byte_align_empty(cdim,
-				pyfftw.simd_alignment, otype, order='C')
-		fwdfft = pyfftw.FFTW(b, c, axes=(1,))
+				pyfftw.simd_alignment, ftype, order='C')
+		fwdfft = pyfftw.FFTW(b, c, axes=(1,), direction='FFTW_FORWARD')
+
+		if tdout:
+			# Create an inverse FFT plan for time-domain output
+			invfft = pyfftw.FFTW(c, b, axes=(1,), direction='FFTW_BACKWARD')
+
 		# Find the spectral window of interest
 		fswin = specwin(cdim[1], freqs)
+
+		# Try to build bandpass tails
+		try: tails = np.hanning(2 * freqs[2])
+		except (TypeError, IndexError): tails = np.array([])
 
 	# Create the input file header, if necessary
 	with lock:
@@ -265,8 +278,9 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		# Grab the waveform record
 		hdr, data = wset.getrecord(rxc)
 
-		# Validate the group map
-		if outidx[hdr.idx] != gsize * hdr.txgrp.grp + hdr.txgrp.idx:
+		# Validate the group map if possible
+		glidx = gsize * hdr.txgrp.grp + hdr.txgrp.idx
+		if (hdr.idx in outidx) and outidx[hdr.idx] != glidx:
 			raise ValueError('Receive channel %d group configuration does not match provided map' % rxc)
 
 		# Remove a signal bias, if appropriate
@@ -292,33 +306,44 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			# With no FHT, just copy the data
 			b[:,ws:we] = data
 
-		# Perform the FFT if desired
-		if dofft: fwdfft()
+		if dofft:
+			fwdfft()
+
+			# Suppress content out of the band
+			c[:,:fswin.start] = 0.
+			c[:,fswin.end:] = 0.
+
+			# Bandpass filter the spectral samples
+			if len(tails) > 0:
+				ltails = len(tails) / 2
+				c[:,fswin.start:fswin.start+ltails] *= tails[np.newaxis,:ltails]
+				c[:,fswin.end-ltails:fswin.end] *= tails[np.newaxis,-ltails:]
+
+			# Revert to time-domain representation if necessary
+			if tdout: invfft()
 
 		# Store the output record in a WaveformSet file
-		if dofft:
-			hdr = hdr.copy(win=fswin, txgrp=None)
-			oset.setrecord(hdr, c[outrows,fswin.start:fswin.end], copy=True)
-		else:
+		if tdout:
 			hdr = hdr.copy(txgrp=None)
 			oset.setrecord(hdr, b[outrows,ws:we], copy=True)
+		else:
+			hdr = hdr.copy(win=fswin, txgrp=None)
+			oset.setrecord(hdr, c[outrows,fswin.start:fswin.end], copy=True)
 
 	# Ensure the output header has been written
 	event.wait()
 
 	if not binfile:
 		# Write local records to the output WaveformSet
-		with lock:
-			oset.store(outfile, append=True)
+		with lock: oset.store(outfile, append=True)
 	else:
 		# Map receive channels to rows (slabs) in the output
 		rows = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
 		outbin = mio.Slicer(outfile)
 		for rxc in wset.rxidx[start::stride]:
-			if dofft: b = oset.getrecord(rxc, window=fswin)[1]
-			else: b = oset.getrecord(rxc, window=(0, nsamp))[1]
-			with lock:
-				outbin[rows[rxc]] = b.T
+			if tdout: b = oset.getrecord(rxc, window=(0, nsamp))[1]
+			else: b = oset.getrecord(rxc, window=fswin)[1]
+			with lock: outbin[rows[rxc]] = b.T
 
 
 if __name__ == '__main__':
@@ -334,7 +359,7 @@ if __name__ == '__main__':
 		if opt[0] == '-h':
 			kwargs['dofht'] = False
 		elif opt[0] == '-t':
-			kwargs['dofft'] = False
+			kwargs['tdout'] = True
 		elif opt[0] == '-p':
 			nprocs = int(opt[1])
 		elif opt[0] == '-f':
