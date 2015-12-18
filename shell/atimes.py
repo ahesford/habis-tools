@@ -49,11 +49,12 @@ def validatechans(wset, kwargs):
 def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 	'''
 	Compute the delay matrix for a habis.formats.WaveformSet stored in
-	datafile. If delayfile is specified and can be read as a T x R matrix,
-	where T and R are the "ntx" and "nrx" attributes of the WaveformSet,
-	respectively, the delays are read from that file. Otherwise, the
-	waveform set is read directly from datafile and delays are determined
-	through delay analysis.
+	datafile. If delayfile is specified and has the form
+
+		[[t, r, delay] for t in txelts for r in rxelts],
+
+	the delays are read from that file. Otherwise, the WaveformSet is read
+	directly and delays are determined through delay analysis.
 
 	Delay analysis for individual waveforms is farmed out to calcdelays()
 	among nproc processes. The datafile argument, along with *args and
@@ -62,28 +63,30 @@ def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 	of calcdelays, so *args and **kwargs should not contain these values.
 
 	If delayfile is specified but computation is still required, the
-	computed matrix will be saved to delayfile. Any existing content will
+	computed delays will be saved to delayfile. Any existing content will
 	be overwritten.
 	'''
-	# Grab the dimensions of the waveform matrix
+	# Grab the participating channels
 	rxelts, txelts = validatechans(WaveformSet.fromfile(datafile), kwargs)
-	rlen, tlen = len(rxelts), len(txelts)
-	wshape = (tlen, rlen)
 
 	try:
-		# Try to read an existing delay file and check its size
-		delays = np.loadtxt(delayfile)
-		if delays.shape != wshape:
-			raise ValueError('Delay file has wrong shape; recomputing')
-		return delays, rxelts
+		# Try to read an existing delay file and convert to a dictionary
+		delays = {(int(t), int(r)): v for (t, r, v) in np.loadtxt(delayfile)}
+		# Ensure the cache contains exactly the right keys
+		keys = set(delays.iterkeys())
+		for t, r in itertools.product(txelts, rxelts):
+			try: keys.remove((t,r))
+			except KeyError: raise ValueError('Missing delay in cache')
+		if len(keys): raise ValueError('Extra delay in cache')
+		return delays
 	except (ValueError, IOError):
 		# ValueError if format is inappropriate or delayfile is None
 		# IOError if delayfile does not point to an existent file
 		pass
 
-	# Create a result queue and a matrix to store the accumulated results
+	# Create a result queue and a dictionary to accumulate results
 	queue = multiprocessing.Queue(nproc)
-	delays = np.zeros(wshape, dtype=np.float32)
+	delays = { }
 
 	# Extend the kwargs to include the result queue
 	kwargs['queue'] = queue
@@ -107,23 +110,23 @@ def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 		# Wait for all processes to respond
 		responses = 0
 		while responses < nproc:
-			try:
-				results = queue.get(timeout=0.1)
-				for idx, delay in results:
-					row, col = np.unravel_index(idx, wshape, 'C')
-					delays[row,col] = delay
-				responses += 1
+			try: results = queue.get(timeout=0.1)
 			except Queue.Empty: pass
+			else:
+				delays.update(results)
+				responses += 1
 
 		pool.wait()
 
 	try:
 		# Save the computed delays, if desired
-		np.savetxt(delayfile, delays, fmt='%16.8f')
+		np.savetxt(delayfile,
+				[[t, r, v] for (t, r), v in delays.iteritems()],
+				fmt='%d %d %16.8f')
 	except (ValueError, IOError):
 		pass
 
-	return delays, rxelts
+	return delays
 
 
 def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
@@ -144,16 +147,20 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	The reference waveform is read from reffile using
 	habis.sigtools.Waveform.fromfile.
 
-	The return value is a list of 2-tuples, wherein the first element is a
-	flattened waveform index and the second element is the corresponding
-	adjusted delay in samples.
+	The return value is a dictionary that maps a (t,r) transmit-receive
+	index pair to an adjusted delay in samples.
 
 	The optional kwargs are parsed for the following keys:
 
 	* window: If not None, should be a (start, length, [tailwidth]) tuple
 	  of ints that specifies a temporal window applied to each waveform
-	  before delay analysis. Optional tailwidth specifies the half-width of
-	  a Hann window passed as the tails argument to Waveform.window.
+	  before delay analysis. The start should be relative to 0
+	  fire-to-capture delay; the actual window used will be
+
+	  	(start - datafile.f2c, length, [tailwidth]).
+
+	  The optional tailwidth specifies the half-width of a Hann window
+	  passed as the tails argument to Waveform.window.
 
 	* peaks: If not None, should be a dictionary of kwargs to be passed to
 	  Waveform.envpeaks for every waveform. Additionally, a 'nearmap' key
@@ -194,8 +201,14 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	# Pull the window and compute optional tails
 	window = kwargs.get('window', None)
-	try: tails = np.hanning(2 * window[2])
-	except (TypeError, IndexError): tails = None
+	try:
+		window = list(window)
+	except TypeError:
+		pass
+	else:
+		window[0] -= data.f2c
+		try: tails = np.hanning(2 * window[2])
+		except IndexError: tails = None
 
 	# Pull the optional peak search criteria
 	peaks = kwargs.get('peaks', None)
@@ -206,7 +219,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		raise KeyError('kwarg "peaks" must be a dictionary with a "nearmap" key')
 
 	# Compute the strided results
-	result = []
+	result = { }
 	for idx in range(start, t * r, stride):
 		# Find the transmit and receive indices
 		i, j = np.unravel_index(idx, (t, r), 'C')
@@ -219,8 +232,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			exd = 0.5 * (nearmap[tid] + nearmap[rid]) - data.f2c
 			sig = sig.isolatepeak(exd, **peaks)
 		if compenv: sig = sig.envelope()
-		# Compute the delay (may be negative)
-		result.append((idx, sig.delay(ref, osamp) + data.f2c))
+		# Compute and record the delay
+		result[(tid, rid)] = sig.delay(ref, osamp) + data.f2c
 
 	try: kwargs['queue'].put(result)
 	except (KeyError, AttributeError): pass
@@ -329,7 +342,6 @@ def atimesEngine(config):
 		err = 'Invalid specification of optional peak in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
-	symmetrize = config.getboolean(asec, 'symmetrize', failfunc=lambda: False)
 	usediag = config.getboolean(asec, 'usediag', failfunc=lambda: False)
 	maskoutliers = config.getboolean(asec, 'maskoutliers', failfunc=lambda: False)
 	compenv = config.getboolean(asec, 'compenv', failfunc=lambda: False)
@@ -362,38 +374,36 @@ def atimesEngine(config):
 		for (dfile, dlayfile) in izip(datafiles, delayfiles):
 			print 'Finding delays for data set', dfile
 
-			delays, lrx = finddelays(dfile, dlayfile, nproc,
-					reffile, osamp, compenv=compenv,
-					window=window, peaks=peaks,
-					rxelts=rxelts, txelts=txelts)
+			delays = finddelays(dfile, dlayfile, nproc, reffile,
+					osamp, compenv=compenv, window=window,
+					peaks=peaks, rxelts=rxelts, txelts=txelts)
+
+			# Note the receive channels in this data file
+			lrx = set(k[1] for k in delays.iterkeys())
 
 			# Convert delays to arrival times
-			delays = delays * dt + t0
+			delays = { k: v * dt + t0 for k, v in delays.iteritems() }
 
-			if np.any(delays < 0):
+			if np.any(delays.itervalues() < 0):
 				raise ValueError('Non-physical, negative delays exist')
 
-			if maskoutliers: delays = cutil.mask_outliers(delays)
-			if symmetrize: delays = 0.5 * (delays + delays.T)
+			if maskoutliers:
+				# Remove outlying values from the delay dictionary
+				q1, q2, q3 = numpy.percentile(delays.values(), [25, 50, 75])
+				iqr = q3 - q1
+				lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+				delays = { k: v for k, v in delays.iteritems() if lo <= v <= hi }
 
-			# Prepare the arrival-time finder
-			atf = trilateration.ArrivalTimeFinder(delays)
 			if not usediag:
+				# Prepare the arrival-time finder
+				atf = trilateration.ArrivalTimeFinder(delays)
 				# Compute the optimized times for this data file
-				optimes = atf.lsmr()
-			elif maskoutliers:
-				# Preserve any masked entries
-				optimes = ma.diag(delays)
-				# Replace masked diagonals with optimized times
-				mask = ma.getmaskarray(optimes)
-				if np.any(mask):
-					rtimes = atf.lsmr()
-					optimes = np.where(mask, rtimes, optimes)
+				optimes = { k: v for k, v in atf.lsmr() if k in lrx }
 			else:
-				# Just take the diagonal if values are not masked
-				optimes = np.diag(delays)
+				# Take only diagonal values
+				optimes = { k[0]: v for k, v in delays.iteritems() if k[0] == k[1] }
 
-			times[target].update(izip(lrx, optimes))
+			times[target].update(optimes)
 
 	# Build the combined times list
 	for tmap in times.itervalues():

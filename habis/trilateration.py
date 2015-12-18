@@ -26,76 +26,136 @@ class ArrivalTimeFinder(object):
 	The map can be a masked array to exclude some measurements from
 	consideration.
 	'''
-	def __init__(self, atmap):
+	def __init__(self, *args, **kwargs):
 		'''
-		Initialize an ArrivalTimeFinder using the (optionally masked)
-		map of (Nt x Nr) arrival times of signals. The arrival time
-		atmap[i,j] is that observed at receive channel j for a
-		transmission from channel i.
+		Initialize an ArrivalTimeFinder by passing all arguments to
+		self.setatmap().
 		'''
-		# Copy the arrival-time map
-		self.atmap = atmap
+		# Assign the arrival-time map
+		self.setatmap(*args, **kwargs)
 
 
 	@property
-	def atmap(self): return self._atmap
+	def atmap(self):
+		''' A reference to the associated arrival-time map. '''
+		return self._atmap
 
-	@atmap.setter
-	def atmap(self, atmap):
-		# Copy the arrival-time map (this preserves masks)
-		atmap = ma.array(atmap, copy=True)
-		if atmap.ndim != 2:
-			raise TypeError('Arrival time map must be of rank 2')
+	@property
+	def rxelts(self):
+		''' The list of receive elements represented in the arrival-time map. '''
+		return self._rxelts
 
-		# Capture a copy to the arrival-time map
+	@property
+	def txelts(self):
+		''' The list of transmit elements represented in the arrival-time map. '''
+		return self._txelts
+
+
+	def setatmap(self, atmap, txelts=None, rxelts=None):
+		'''
+		Assign the given arrival-time map, which characterizes the
+		arrival time from transmission element txelts[i] to receive
+		element rxelts[j] as atmap[i,j].
+		
+		The map may be a masked array; masked values will not be used
+		in optimization.
+
+		If atmap is an array and txelts is None, range(atmap.shape[0])
+		is assumed. Likewise, if atmap is an array and rxelts is None,
+		range(atmap.shape[1]) is assumed.
+
+		The atmap can also be a dictionary-like object (with a .keys()
+		method) which maps (t,r) pairs to arrival-time values. In this
+		case, any txelts and rxelts arguments are ignored and replaced
+		with the tuples
+
+			txelts = tuple(sorted(set(k[0] for k in atmap.keys())))
+			rxelts = tuple(sorted(set(k[1] for k in atmap.keys())))
+
+		Any missing keys in (txelts X rxelts) will be interpreted as
+		masked (undesired) values.
+		'''
+		try:
+			# Pull the elements right from dictionary keys
+			txelts = tuple(sorted(set(k[0] for k in atmap.keys())))
+			rxelts = tuple(sorted(set(k[1] for k in atmap.keys())))
+		except AttributeError:
+			# Copy an array-like map, preserving any masks
+			atmap = ma.array(atmap, copy=True) 
+			
+			try:
+				ntx, nrx = atmap.shape
+			except ValueError:
+				raise TypeError('Arrival-time map must be of rank 2') 
+			
+			if txelts is None: txelts = tuple(xrange(ntx))
+			else:
+				if len(txelts) != ntx:
+					raise ValueError('Length of txelts must match row count in atmap')
+				txelts = tuple(txelts)
+				
+			if rxelts is None: rxelts = tuple(xrange(nrx))
+			else:
+				if len(rxelts) != nrx:
+					raise ValueError('Length of rxelts must match column count in atmap')
+				rxelts = tuple(rxelts)
+		else:
+			# Convert the dictionary to a masked array
+			atarr = ma.empty((len(txelts), len(rxelts)), dtype=np.float32)
+			for i, t in enumerate(txelts):
+				for j, r in enumerate(rxelts):
+					try: atarr[i,j] = atmap[(t,r)]
+					except KeyError: atarr[i,j] = ma.masked
+			atmap = atarr
+
+		# Copy the maps
+		self._txelts = txelts
+		self._rxelts = rxelts
 		self._atmap = atmap
-
-	@atmap.deleter
-	def atmap(self): del self._atmap
-
-
-	def bfgs(self, itargs={}):
-		'''
-		Return, using BFGS (scipy.optimize.fmin_bfgs), the optimum
-		arrival times based on the previously provided arrival-time
-		map. The dictionary itargs is passed to BFGS.
-		'''
-		# Create a function that computes the cost functional
-		def f(x):
-			atest = 0.5 * (x[:,np.newaxis] + x[np.newaxis,:])
-			return ((atest - self.atmap)**2).sum()
-		times = fmin_bfgs(f, np.diag(self.atmap), **itargs)
-		return times
 
 
 	def lsmr(self, itargs={}):
 		'''
-		Return, using LSMR (scipy.sparse.linagl.lsmr), the optimum
-		arrival times based on the previously provided arrival-time
-		map. The dictionary itargs is passed to LSMR.
+		Compute, using LSMR (scipy.sparse.linalg.lsmr), the optimum
+		round-trip arrival times based on the previously provided
+		arrival-time map and participating element lists. The
+		dictionary itargs is passed to LSMR.
+
+		The return value is a dictionary whose keys are element indices
+		and whose values are the associated round-trip arrival times.
 		'''
 		# Build the sparse matrix relating optimum times to the map
-		nx, ny = self.atmap.shape
 		data, indices, indptr = [], [], [0]
-		for i in range(nx):
-			for j in range(ny):
+
+		# Build a master, participating element list
+		eltlist = sorted(set(self.txelts).union(self.rxelts))
+		# Map the element indices to list order
+		eltmap = dict(reversed(x) for x in enumerate(eltlist))
+
+		for i in self.txelts:
+			ei = eltmap[i]
+			for j in self.rxelts:
+				ej = eltmap[j]
+
 				if i == j:
-					indices.append(i)
+					indices.append(ei)
 					data.append(1.)
 				else:
-					indices.extend([min(i, j), max(i,j)])
-					data.extend([0.5, 0.5])
+					indices.extend((min(ei,ej), max(ei,ej)))
+					data.extend((0.5, 0.5))
+
 				indptr.append(len(data))
+
 		matrix = csr_matrix((data, indices, indptr), dtype=np.float32)
 
-		# Flatten the map
+		# Flatten the map in C-order to agree with rows of relational matrix
 		atmap = self.atmap.ravel()
 		# Try to determine a mask of values to keep
 		mask = np.logical_not(ma.getmaskarray(atmap))
 
-		# Solve the system
+		# Solve the system and build the map
 		times = lsmr(matrix[mask], atmap[mask], **itargs)[0]
-		return times
+		return dict(kp for kp in izip(eltlist, times))
 
 
 class MultiPointTrilateration(object):
