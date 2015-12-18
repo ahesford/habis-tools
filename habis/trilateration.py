@@ -17,11 +17,11 @@ from . import facet
 
 class ArrivalTimeFinder(object):
 	'''
-	Given an (Nt x Nt) map of arrival times for signals broadcast by Nt
-	transmitter channels (along the rows) and received by a coincident set
-	of Nt receiver channels (along the columns), determine a set of Nt
-	round-trip arrival times that optimally (in the least-squares sense)
-	predict the entire arrival-time map.
+	Given an (Nt x Nr) map of arrival times for signals broadcast by Nt
+	transmitter channels (along the rows) and received by a set of Nr
+	receiver channels (along the columns), determine a set of Nr round-trip
+	arrival times that optimally (in the least-squares or minimum norm
+	sense) predict the entire arrival-time map.
 
 	The map can be a masked array to exclude some measurements from
 	consideration.
@@ -29,8 +29,8 @@ class ArrivalTimeFinder(object):
 	def __init__(self, atmap):
 		'''
 		Initialize an ArrivalTimeFinder using the (optionally masked)
-		map of (Nt x Nt) arrival times of signals. The arrival time
-		atmap[i][j] is that observed at receive channel j for a
+		map of (Nt x Nr) arrival times of signals. The arrival time
+		atmap[i,j] is that observed at receive channel j for a
 		transmission from channel i.
 		'''
 		# Copy the arrival-time map
@@ -46,8 +46,6 @@ class ArrivalTimeFinder(object):
 		atmap = ma.array(atmap, copy=True)
 		if atmap.ndim != 2:
 			raise TypeError('Arrival time map must be of rank 2')
-		if atmap.shape[0] != atmap.shape[1]:
-			raise TypeError('Arrival time map must be square')
 
 		# Capture a copy to the arrival-time map
 		self._atmap = atmap

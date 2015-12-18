@@ -37,7 +37,7 @@ def buildpaths(files, outpath=None, extension=None):
 	Given a list files of filenames, transform the names according to the
 	following rules:
 
-	1. If len(files) == 1 and outpath is not None, return [outpath].
+	1. If len(files) == 1 and outpath is not a directory, return [outpath].
 	2. If extension is not None, replace any existing extension in each
 	   input names with the specified extension string.
 	3. If outpath is not None, replace each (possibly modified) input name
@@ -47,9 +47,10 @@ def buildpaths(files, outpath=None, extension=None):
 	if outpath is specified, it must refer to a valid directory. An IOError
 	will be raised if this is not the case.
 	'''
-	if len(files) == 1 and outpath is not None: return [outpath]
-
 	from os.path import join, basename, splitext, isdir
+
+	if len(files) == 1 and not (outpath is None or isdir(outpath)):
+		return [outpath]
 
 	# Swap the extensions if necessary
 	if extension is not None:

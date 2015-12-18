@@ -18,16 +18,16 @@ def usage(progname, fatal=False):
 
 
 def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
-		nsamp=None, lock=None, event=None):
+		nsamp=None, start=0, stride=1, lock=None, event=None):
 	'''
-	For the habis.formats.WaveformSet object stored in infile, successively
-	filter all waveforms received by the channels specified in the sequence
-	rxchans and transmitted by the channels specified in the sequence
-	txchans using a bandpass filter (habis.sigtools.Waveform.bandpass). If
-	rxchans is None, all receive channels are used. If txchans is None, it
-	defaults to rxchans. Append the filtered waveforms to the specified
-	file named by outfile, which will be created or truncated. All output
-	waveforms will be of type float32.
+	For the habis.formats.WaveformSet object in infile, successively filter
+	all waves received by channels in the sequence rxchans[start::stride]
+	and transmitted by the channels specified in the sequence txchans using
+	a bandpass filter (habis.sigtools.Waveform.bandpass). If rxchans is
+	None, all receive channels are used. If txchans is None, it defaults to
+	rxchans. Append the filtered waveforms to the specified file named by
+	outfile, which will be created or truncated. All output waveforms will
+	be of type float32.
 
 	The filter is defined by the tuple filt = (start, end, [tailwidth]).
 	The bandwidth start and end parameters are specified in units of R2C
@@ -56,56 +56,34 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 	wset = WaveformSet.fromfile(infile)
 	# Attempt to truncate the input signals, if possible
 	if nsamp is not None: wset.nsamp = nsamp
-	# Create an empty waveform set to capture filtered output
-	oset = WaveformSet.empty_like(wset)
-	# The output always uses a float32 datatype and no transmission group
-	oset.dtype = np.float32
-	oset.txgrps = None
-
 	if rxchans is None: rxchans = wset.rxidx
 	if txchans is None: txchans = sorted(rxchans)
 
-	# Map the transmit channels to transmission numbers
-	try:
-		gcount, gsize = wset.txgrps
-	except TypeError:
-		# With no grouping, the map is the identity
-		txmap = dict((i, i) for i in txchans)
-	else:
-		txmap = { }
-		for txch in txchans:
-			try:
-				hdr = wset.getrecord(txch)[0]
-			except KeyError:
-				raise KeyError('Could not determine transmission mapping for channel %d' % txch)
-			try:
-				i, g = hdr.txgrp
-			except TypeError:
-				raise ValueError('WaveformSet specifies Tx-group parameters, but record specifies none')
-			txmap[txch] = i + g * gsize
+	if wset.txgrps is not None:
+		raise ValueError('Bandpass filtering is not supported for grouped transmissions')
 
-	# Copy the transmit-channel map
-	oset.txidx = txchans
+	# Create an empty waveform set to capture filtered output
+	oset = WaveformSet.empty_like(txchans, wset.nsamp, wset.f2c, np.float32)
 
 	# Create the input file header, if necessary
 	getattr(lock, 'acquire', lambda : None)()
 
 	if not getattr(event, 'is_set', lambda : False)():
-		oset.store(outfile, ver=(1,0))
+		oset.store(outfile)
 		getattr(event, 'set', lambda : None)()
 
 	getattr(lock, 'release', lambda : None)()
 
-	for rxc in rxchans:
-		# Pull the waveform header to copy to the output (ignore waveforms)
-		hdr = wset.getrecord(rxc)[0]
+	for rxc in rxchans[start::stride]:
+		# Read the record
+		hdr, data = wset.getrecord(rxc)
 
 		# Create an empty record in the output set to hold filtered waves
-		oset.setrecord(hdr.copy(txgrp=None))
+		oset.setrecord(hdr)
 
 		for txc in txchans:
 			# Pull the waveform for the Tx-Rx pair
-			wave = wset.getwaveform(rxc, txmap[txc])
+			wave = Waveform(wset.nsamp, data[txc], hdr.win.start)
 			# Set output to filtered waveform (force type conversion)
 			owave = wave.bandpass(*filt, dtype=oset.dtype)
 			oset.setwaveform(rxc, txc, owave)
@@ -115,7 +93,7 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 
 	# Write new records to output
 	getattr(lock, 'acquire', lambda : None)()
-	oset.store(outfile, append=True, ver=(1,0))
+	oset.store(outfile, append=True)
 	getattr(lock, 'release', lambda : None)()
 
 
@@ -134,23 +112,6 @@ def mpwavefilt(infile, filt, nproc, outfile, rxchans=None, txchans=None, nsamp=N
 	input and output waveforms will be truncated. If nsamp is None, the
 	length encoded in the input WaveformSet will be used.
 	'''
-	# Copy the input header to output and get receive-channel indices
-	wset = WaveformSet.fromfile(infile)
-
-	# Make sure the set can be truncated as desired
-	if nsamp is not None:
-		try:
-			wset.nsamp = nsamp
-		except ValueError:
-			print >> sys.stderr, 'ERROR: could not truncate input waveforms'
-			return
-
-	if rxchans is None: rxchans = wset.rxidx
-	if txchans is None: txchans = sorted(rxchans)
-
-	# Delete the waveform set to close the memory-mapped input file
-	del wset
-
 	# Create a lock and event for output synchronization
 	lock = multiprocessing.Lock()
 	event = multiprocessing.Event()
@@ -161,8 +122,7 @@ def mpwavefilt(infile, filt, nproc, outfile, rxchans=None, txchans=None, nsamp=N
 			# Assign a meaningful process name
 			procname = process.procname(i)
 			# Stride the recieve channels
-			rxidx = rxchans[i::nproc]
-			args = (infile, filt, outfile, rxidx, txchans, nsamp, lock, event)
+			args = (infile, filt, outfile, rxchans, txchans, nsamp, i, nproc, lock, event)
 			pool.addtask(target=wavefilt, name=procname, args=args)
 
 		pool.start()
