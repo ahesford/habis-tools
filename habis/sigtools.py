@@ -14,7 +14,7 @@ from scipy.stats import linregress
 from operator import itemgetter, add
 from itertools import groupby
 
-from pycwp import cutil, mio
+from pycwp import cutil, mio, signal
 
 
 class Window(tuple):
@@ -960,13 +960,13 @@ class Waveform(object):
 
 	def envpeaks(self, *args, **kwargs):
 		'''
-		Return the output of pycwp.cutil.findpeaks for self.envelope().
-		The args and kwargs are passed on to findpeaks.
+		Return the output of pycwp.signal.findpeaks for self.envelope().
+		The args and kwargs are passed on to findpeaks().
 		'''
 		# Find peaks in the data window
 		start, length = self.datawin
 		envelope = self.envelope().getsignal((start, length), forcecopy=False)
-		peaks = cutil.findpeaks(envelope, *args, **kwargs)
+		peaks = signal.findpeaks(envelope, *args, **kwargs)
 		# Map indices to full sample window
 		return [(v[0] + start, v[1], v[2], v[3]) for v in peaks]
 
