@@ -12,7 +12,7 @@ from itertools import izip
 
 from collections import OrderedDict
 
-from pycwp import process, cutil
+from pycwp import process, stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles, buildpaths
 from habis.formats import WaveformSet
@@ -389,10 +389,7 @@ def atimesEngine(config):
 
 			if maskoutliers:
 				# Remove outlying values from the delay dictionary
-				q1, q2, q3 = numpy.percentile(delays.values(), [25, 50, 75])
-				iqr = q3 - q1
-				lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-				delays = { k: v for k, v in delays.iteritems() if lo <= v <= hi }
+				delays = stats.mask_outliers(delays)
 
 			if not usediag:
 				# Prepare the arrival-time finder

@@ -29,6 +29,7 @@ def configureConductor():
 			'fhfft' : '/crypt/custom-python/bin/fhfft.py',
 			'rxchanlist' : '/crypt/custom-python/bin/wset-rxchanlist.py',
 			'bpf' : '/crypt/custom-python/bin/wset-bpf.py',
+			'atimes' : '/crypt/custom-python/atimes.py',
 	}
 
 	# The block command wrappers to attach to the conductor class
