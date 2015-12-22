@@ -55,6 +55,42 @@ def getreflpos(args):
 	return pos.squeeze()
 
 
+def geteltpos(args):
+	'''
+	For args = (elts, eltpos, times, reflectors, rad, c, tol), where:
+	  * elts is a list of element indices,
+	  * eltpos maps element indices to guess coordinates (x, y, z),
+	  * times maps element indices to a length-N sequence of round-trip
+	    arrival times from that element to each of N reflectors,
+	  * reflectors is a length-N sequence (x, y, z, c) specifying the
+	    position and background sound speed for each reflector,
+	  * rad is the (common) radius of the reflectors,
+	  * c is the (uniform) background sound speed,
+	  * and tol is a tolerance for Newton-Raphson iteraton,
+
+	use habis.trilateration.PlaneTrilaterion (if len(elts) > 2) or
+	habis.trilateration.MultiPointTrilateration to recover the positions of
+	each element in elts.
+
+	The return value is a map from element indices to final coordinates.
+	'''
+	elts, eltpos, times, reflectors, rad, c, tol = args
+
+	# Pull the element coordinates
+	celts = np.array([eltpos[e] for e in elts])
+	# Pull the arrival times, converted to background speed
+	ctimes = (np.array([times[e] for e in elts]) *
+			(reflectors[:,-1] / c)[np.newaxis,:])
+
+	# No need to enforce coplanarity for one or two elements
+	tcls = (trilateration.PlaneTrilateration if len(elts) > 2
+			else trilateration.MultiPointTrilateration)
+	pltri = tcls(reflectors[:,:-1], rad, c)
+	repos = pltri.newton(ctimes, pos=celts, tol=tol)
+
+	return dict(izip(elts, repos))
+
+
 def trilaterationEngine(config):
 	'''
 	Use the MultiPointTrilateration and PlaneTrilateration classes in
@@ -190,22 +226,17 @@ def trilaterationEngine(config):
 		try: facets[f].append(e)
 		except KeyError: facets[f] = [e]
 
-	# Store computed element coordinates by index
-	relements = {}
-
-	for elts in facets.itervalues():
-		# Convert arrival times to a uniform sound speed
-		ctimes = (np.array([times[e] for e in elts]) * 
-				(reflectors[:,-1] / c)[np.newaxis,:])
-		# Pull relevant element position guesses
-		celts = np.array([eltpos[e] for e in elts])
-
-		# No need to enforce coplanarity for a single element
-		tcls = (trilateration.PlaneTrilateration if len(elts) > 1
-				else trilateration.MultiPointTrilateration)
-		pltri = tcls(reflectors[:,:-1], radius, c)
-		repos = pltri.newton(ctimes, pos=celts, tol=tol)
-		relements.update(izip(elts, repos))
+	# Compute the element positions in parallel by facet
+	# Use async calls to correctly handle keyboard interrupts
+	result = pool.map_async(geteltpos,
+			((elts, eltpos, times, reflectors, radius, c, tol)
+				for elts in facets.itervalues()))
+	while True:
+		try:
+			relements = dict(kp for r in result.get(5) for kp in r.iteritems())
+			break
+		except multiprocessing.TimeoutError:
+			pass
 
 	# Save the element coordinates in the output file
 	relements = np.array([[i] + list(v) for i, v in relements.iteritems()])
