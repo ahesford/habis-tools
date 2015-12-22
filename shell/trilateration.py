@@ -8,10 +8,19 @@ import multiprocessing
 
 from itertools import izip
 
-from pycwp import process, cutil
+from pycwp import process
 
 from habis import trilateration
-from habis.habiconf import HabisConfigError, HabisConfigParser
+from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
+
+def dictload(f):
+	'''
+	Use np.loadtxt(f) to read a 2-D text matrix file, then encode the
+	matrix using the first column as integer keys and the remaining columns
+	as corresponding values.
+	'''
+	return { int(t[0]): t[1:] for t in np.loadtxt(f, ndmin=2) }
+
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -58,7 +67,7 @@ def trilaterationEngine(config):
 	msec = 'measurement'
 	try:
 		# Try to grab the input time files
-		timefiles = config.getlist(tsec, 'timefile')
+		timefiles = matchfiles(config.getlist(tsec, 'timefile'))
 		if len(timefiles) < 1:
 			err = 'Key timefile must contain at least one entry'
 			raise HabisConfigError(err)
@@ -68,10 +77,7 @@ def trilaterationEngine(config):
 
 	try:
 		# Try to grab the nominal element files
-		inelements = config.getlist(tsec, 'inelements')
-		if len(inelements) != len(timefiles):
-			err = 'Key inelements must contain as many entries as timefile list'
-			raise HabisConfigError(err)
+		inelements = matchfiles(config.getlist(tsec, 'inelements'))
 	except Exception as e:
 		err = 'Configuration must specify inelements in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
@@ -91,15 +97,10 @@ def trilaterationEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		outelements = config.getlist(tsec, 'outelements',
-				failfunc=lambda: [''] * len(timefiles))
+		outelements = config.get(tsec, 'outelements', failfunc=lambda: None)
 	except Exception as e:
 		err = 'Invalid specification of optional outelements in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
-
-	if len(outelements) != len(timefiles):
-		err = 'Lists outelements and timefile must have equal length'
-		raise HabisConfigError(err)
 
 	try:
 		# Grab the number of processes to use (optional)
@@ -131,23 +132,38 @@ def trilaterationEngine(config):
 		err = 'Invalid specification of optional varc in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
+	try:
+		# Pull the facet (coplanar element groups) size
+		fctsize = config.getint(tsec, 'fctsize', failfunc=lambda: 1)
+	except Exception as e:
+		err = 'Invalid specification of optional fctsize in [%s]' % tsec
+		raise HabisConfigError.fromException(err, e)
 
-	# Pull the element indices for each group file
-	elements = [np.loadtxt(efile) for efile in inelements]
-	# Pull the arrival times and convert surface times to center times
-	times = [np.loadtxt(tfile) for tfile in timefiles]
+	if fctsize < 1:
+		raise HabisConfigError('Optional fctsize must be a positive integer')
+
+	# Accumulate all element coordinates and arrival times
+	eltpos = dict(kp for efile in inelements
+			for kp in dictload(efile).iteritems())
+	times = dict(kp for tfile in timefiles
+			for kp in dictload(tfile).iteritems())
+	# Only consider elements in both sets
+	elements = sorted(set(eltpos.iterkeys()).intersection(times.iterkeys()))
+
 	# Pull the reflector guess as a 2-D matrix
-	guess = cutil.asarray(np.loadtxt(guessfile), 2, False)
+	guess = np.loadtxt(guessfile, ndmin=2)
 	# Ensure that the reflector has a sound-speed guess
-	if guess.shape[1] != 4:
+	if guess.shape[1] == 3:
 		guess = np.concatenate([guess, [[c]] * guess.shape[0]], axis=1)
+	elif guess.shape[1] != 4:
+		raise ValueError('Guess file must contain 3 or 4 columns')
 
 	# Allocate a multiprocessing pool
 	pool = multiprocessing.Pool(processes=nproc)
 
-	# Concatenate times and element lists for reflector trilateration
-	ctimes = np.concatenate(times, axis=0)
-	celts = np.concatenate(elements, axis=0)
+	# Pull the relevant times and element coordinates
+	ctimes = np.array([times[e] for e in elements])
+	celts = np.array([eltpos[e] for e in elements])
 
 	# Compute the reflector positions in parallel
 	# Use async calls to correctly handle keyboard interrupts
@@ -164,18 +180,37 @@ def trilaterationEngine(config):
 	# Save the reflector positions
 	np.savetxt(outreflector, reflectors, fmt='%16.8f')
 
-	for ctimes, celts, ofile in izip(times, elements, outelements):
-		# Don't do trilateration if the result will not be saved
-		if not len(ofile): continue
+	# Skip trilateration of element positions if there is no ouptut file
+	if not outelements: return
 
-		# Convert arrival times to uniform sound speed
-		ctimes *= (reflectors[:,-1] / c)[np.newaxis,:]
+	# Build a list of the elements in each facet
+	facets = { }
+	for e in elements:
+		f = int(e // fctsize)
+		try: facets[f].append(e)
+		except KeyError: facets[f] = [e]
 
-		# Create and save a refined estimate of the reflector locations
-		# Strip out the sound-speed guess from the reflector position
-		pltri = trilateration.PlaneTrilateration(reflectors[:,:-1], radius, c)
-		relements = pltri.newton(ctimes, pos=celts, tol=tol)
-		np.savetxt(ofile, relements, fmt='%16.8f')
+	# Store computed element coordinates by index
+	relements = {}
+
+	for elts in facets.itervalues():
+		# Convert arrival times to a uniform sound speed
+		ctimes = (np.array([times[e] for e in elts]) * 
+				(reflectors[:,-1] / c)[np.newaxis,:])
+		# Pull relevant element position guesses
+		celts = np.array([eltpos[e] for e in elts])
+
+		# No need to enforce coplanarity for a single element
+		tcls = (trilateration.PlaneTrilateration if len(elts) > 1
+				else trilateration.MultiPointTrilateration)
+		pltri = tcls(reflectors[:,:-1], radius, c)
+		repos = pltri.newton(ctimes, pos=celts, tol=tol)
+		relements.update(izip(elts, repos))
+
+	# Save the element coordinates in the output file
+	relements = np.array([[i] + list(v) for i, v in relements.iteritems()])
+	refmt = ' '.join(['%d'] + ['%16.8f']*(relements.shape[1] - 1))
+	np.savetxt(outelements, relements, fmt=refmt)
 
 
 if __name__ == '__main__':
