@@ -23,21 +23,16 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def validatechans(wset, kwargs):
+def validatechans(wset, rxelts=None, txelts=None):
 	'''
-	Validate the contents of the 'rxelts' and 'txelts' sequences in the
-	kwargs dictionary, if they exist. If rxelts is not specified, populate
-	it with sorted(wset.rxidx). If txelts is not specified, populate it
-	with rxelts. Returns (rxelts, txelts).
+	Validate the contents of rxelts and txelts. If rxelts is not specified,
+	populate it with sorted(wset.rxidx). If txelts is not specified,
+	populate it with rxelts. Returns (rxelts, txelts).
 	'''
-	# Pull the rxelts list
-	rxelts = kwargs.get('rxelts', None)
-
 	if rxelts is None: rxelts = sorted(wset.rxidx)
 	else: rxelts = sorted(set(rxelts).intersection(wset.rxidx))
 
 	# Pull the txelts list
-	txelts = kwargs.get('txelts', None)
 	if txelts is None: txelts = list(rxelts)
 
 	if not set(txelts).issubset(wset.txidx):
@@ -46,43 +41,35 @@ def validatechans(wset, kwargs):
 	return rxelts, txelts
 
 
-def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
+def finddelays(nproc=1, *args, **kwargs):
 	'''
-	Compute the delay matrix for a habis.formats.WaveformSet stored in
-	datafile. If delayfile is specified and has the form
+	Distribute, among nproc processes, delay analysis for waveforms using
+	calcdelays(). All *args and **kwargs, are passed to calcdelays on each
+	participating process. This function explicitly sets the "queue",
+	"start", "stride", and "delaycache" arguments of calcdelays, so *args
+	and **kwargs should not contain these values.
 
-		[[t, r, delay] for t in txelts for r in rxelts],
-
-	the delays are read from that file. Otherwise, the WaveformSet is read
-	directly and delays are determined through delay analysis.
-
-	Delay analysis for individual waveforms is farmed out to calcdelays()
-	among nproc processes. The datafile argument, along with *args and
-	**kwargs, are passed to calcdelays on each participating process. This
-	function explicitly sets the "queue", "start", and "stride" arguments
-	of calcdelays, so *args and **kwargs should not contain these values.
-
-	If delayfile is specified but computation is still required, the
-	computed delays will be saved to delayfile. Any existing content will
-	be overwritten.
+	The delaycache argument is built from an optional file specified in
+	cachefile, which should be a three-column text matrix with rows of the
+	form [t, r, delay] representing a precomputed delay for
+	transmit-receive pair (t, r).
 	'''
-	# Grab the participating channels
-	rxelts, txelts = validatechans(WaveformSet.fromfile(datafile), kwargs)
+	if 'queue' in kwargs: 
+		raise TypeError("Invalid keyword argument 'queue'")
+	if 'stride' in kwargs:
+		raise TypeError("Invalid keyword argument 'stride'")
+	if 'start' in kwargs:
+		raise TypeError("Invalid keyword argument 'start'")
+	if 'delaycache' in kwargs:
+		raise TypeError("Invalid keyword argument 'delaycache'")
+
+	cachefile = kwargs.pop('cachefile', None)
 
 	try:
 		# Try to read an existing delay file and convert to a dictionary
-		delays = {(int(t), int(r)): v for (t, r, v) in np.loadtxt(delayfile)}
-		# Ensure the cache contains exactly the right keys
-		keys = set(delays.iterkeys())
-		for t, r in itertools.product(txelts, rxelts):
-			try: keys.remove((t,r))
-			except KeyError: raise ValueError('Missing delay in cache')
-		if len(keys): raise ValueError('Extra delay in cache')
-		return delays
-	except (ValueError, IOError):
-		# ValueError if format is inappropriate or delayfile is None
-		# IOError if delayfile does not point to an existent file
-		pass
+		kwargs['delaycache'] = {(int(t), int(r)): v 
+				for (t, r, v) in np.loadtxt(cachefile)}
+	except (KeyError, ValueError, IOError): pass
 
 	# Create a result queue and a dictionary to accumulate results
 	queue = multiprocessing.Queue(nproc)
@@ -92,8 +79,6 @@ def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 	kwargs['queue'] = queue
 	# Extend the kwargs to include the stride
 	kwargs['stride'] = nproc
-	# Insert the datafile at the beginning of the args
-	args = tuple([datafile] + list(args))
 
 	# Spawn the desired processes to perform the cross-correlation
 	with process.ProcessPool() as pool:
@@ -120,11 +105,10 @@ def finddelays(datafile, delayfile=None, nproc=1, *args, **kwargs):
 
 	try:
 		# Save the computed delays, if desired
-		np.savetxt(delayfile,
+		np.savetxt(cachefile,
 				[[t, r, v] for (t, r), v in delays.iteritems()],
 				fmt='%d %d %16.8f')
-	except (ValueError, IOError):
-		pass
+	except (ValueError, IOError): pass
 
 	return delays
 
@@ -152,6 +136,11 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	The optional kwargs are parsed for the following keys:
 
+	* delaycache: If not None, should be the map from transmit-receive
+	  pairs (t, r) to a precomputed delay d. If a value exists for a given
+	  pair (t, r), the precomputed value will be used in favor of explicit
+	  computation.
+
 	* window: If not None, should be a (start, length, [tailwidth]) tuple
 	  of ints that specifies a temporal window applied to each waveform
 	  before delay analysis. The start should be relative to 0
@@ -162,6 +151,13 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  The optional tailwidth specifies the half-width of a Hann window
 	  passed as the tails argument to Waveform.window.
 
+	* minsnr: If not none, should be a sequence (mindb, noisewin) used to
+	  define the minimum acceptable SNR in dB (mindb) by comparing the peak
+	  signal amplitude to the minimum standard deviation over a sliding
+	  window of width noisewin. SNR for each signal is calculated after
+	  application of an optional window. Delays will not be calculated for
+	  signals fail to exceed the minimum threshold.
+
 	* peaks: If not None, should be a dictionary of kwargs to be passed to
 	  Waveform.envpeaks for every waveform. Additionally, a 'nearmap' key
 	  must be included to specify a list of expected round-trip delays
@@ -171,8 +167,10 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  
 	    0.5 * (nearmap[txelts[j]] + nearmap[rxelts[i]]) - datafile.f2c
 	  
-	  to a width twice the peak width, with no tails. Note: peak windowing
-	  is done after overall windowing.
+	  to a width twice the peak width, with no tails.
+	  
+	  *** NOTE: peak windowing is done after overall windowing and after
+	  possible exclusion by minsnr. ***
 
 	* rxelts and txelts: If not None, should be a lists of element indices
 	  such that entry (i,j) in the delay matrix corresponds to the waveform
@@ -191,16 +189,20 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	ref = Waveform.fromfile(reffile)
 
 	# Determine the elements to include in the delay matrix
-	rxelts, txelts = validatechans(data, kwargs)
+	rxelts, txelts = validatechans(data,
+			kwargs.pop('rxelts', None), kwargs.pop('txelts', None))
 
 	# Use envelopes for delay analysis if desired
-	compenv = kwargs.get('compenv', False)
+	compenv = kwargs.pop('compenv', False)
 	if compenv: ref = ref.envelope()
+
+	# Unpack minimum SNR requirements
+	minsnr, noisewin = kwargs.pop('minsnr', (None, None))
 
 	t, r = len(txelts), len(rxelts)
 
 	# Pull the window and compute optional tails
-	window = kwargs.get('window', None)
+	window = kwargs.pop('window', None)
 	try:
 		window = list(window)
 	except TypeError:
@@ -211,12 +213,21 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		except IndexError: tails = None
 
 	# Pull the optional peak search criteria
-	peaks = kwargs.get('peaks', None)
+	peaks = kwargs.pop('peaks', None)
 	try: nearmap = peaks.pop('nearmap', None)
 	except AttributeError: nearmap = None
 
 	if peaks is not None and nearmap is None:
 		raise KeyError('kwarg "peaks" must be a dictionary with a "nearmap" key')
+
+	# Grab an optional delay cache
+	delaycache = kwargs.pop('delaycache', { })
+
+	# Grab an optional result queue
+	queue = kwargs.pop('queue', None)
+
+	if len(kwargs):
+		raise TypeError("Unrecognized keyword argument '%s'" %  kwargs.iterkeys().next())
 
 	# Compute the strided results
 	result = { }
@@ -224,18 +235,29 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		# Find the transmit and receive indices
 		i, j = np.unravel_index(idx, (t, r), 'C')
 		tid, rid = txelts[i], rxelts[j]
+
+		try:
+			# Use a cahced value if possible
+			result[(tid, rid)] = delaycache[(tid, rid)]
+			continue
+		except KeyError: pass
+
 		# Pull the waveform as float32
 		sig = data.getwaveform(rid, tid, dtype=np.float32)
-		if window: sig = sig.window(window[:2], tails=tails)
+		if window:
+			sig = sig.window(window[:2], tails=tails)
+		if minsnr is not None and noisewin is not None:
+			if sig.snr(noisewin) < minsnr: continue
 		if peaks:
-			# Isolate the peak nearest the expected location
+			# Isolate the peak nearest the expected location (if one exists)
 			exd = 0.5 * (nearmap[tid] + nearmap[rid]) - data.f2c
-			sig = sig.isolatepeak(exd, **peaks)
+			try: sig = sig.isolatepeak(exd, **peaks)
+			except ValueError: continue
 		if compenv: sig = sig.envelope()
 		# Compute and record the delay
 		result[(tid, rid)] = sig.delay(ref, osamp) + data.f2c
 
-	try: kwargs['queue'].put(result)
+	try: queue.put(result)
 	except (KeyError, AttributeError): pass
 
 	return result
@@ -251,6 +273,9 @@ def atimesEngine(config):
 	asec = 'atimes' 
 	msec = 'measurement'
 	ssec = 'sampling'
+
+	kwargs = {}
+
 	try:
 		# Read all target input lists
 		targets = sorted(k for k, v in config.items(asec) if k.startswith('target'))
@@ -302,17 +327,28 @@ def atimesEngine(config):
 
 	try:
 		# Determine the range of elements to use; default to all (as None)
-		txelts = config.getrange(asec, 'txelts', failfunc=lambda: None)
-		rxelts = config.getrange(asec, 'rxelts', failfunc=lambda: None)
+		kwargs['txelts'] = config.getrange(asec, 'txelts', failfunc=lambda: None)
+		kwargs['rxelts'] = config.getrange(asec, 'rxelts', failfunc=lambda: None)
 	except Exception as e:
 		err = 'Invalid specification of optional txelts, rxelts in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		# Determine a temporal window to apply before finding delays
-		window = config.getlist(asec, 'window',
+		# Determine the range of elements to use; default to all (as None)
+		kwargs['minsnr'] = config.getlist(asec, 'minsnr', 
 				mapper=int, failfunc=lambda: None)
-		if window and (len(window) < 2 or len(window) > 3):
+		if kwargs['minsnr'] and len(kwargs['minsnr']) != 2:
+			err = 'SNR specification does not specify appropriate parameters'
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Invalid specification of optional minsnr in [%s]' % asec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine a temporal window to apply before finding delays
+		kwargs['window'] = config.getlist(asec, 'window',
+				mapper=int, failfunc=lambda: None)
+		if kwargs['window'] and not (2 <= len(kwargs['window']) <= 3):
 			err = 'Window does not specify appropriate parameters'
 			raise HabisConfigError(err)
 	except Exception as e:
@@ -337,14 +373,14 @@ def atimesEngine(config):
 				peakargs['minprom'] = float(peaks[3])
 			if len(peaks) > 4:
 				peakargs['prommode'] = peaks[4]
-			peaks = peakargs
+			kwargs['peaks'] = peakargs
 	except Exception as e:
 		err = 'Invalid specification of optional peak in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	usediag = config.getboolean(asec, 'usediag', failfunc=lambda: False)
 	maskoutliers = config.getboolean(asec, 'maskoutliers', failfunc=lambda: False)
-	compenv = config.getboolean(asec, 'compenv', failfunc=lambda: False)
+	kwargs['compenv'] = config.getboolean(asec, 'compenv', failfunc=lambda: False)
 	cachedelay = config.getboolean(asec, 'cachedelay', failfunc=lambda: True)
 
 	try:
@@ -373,10 +409,9 @@ def atimesEngine(config):
 
 		for (dfile, dlayfile) in izip(datafiles, delayfiles):
 			print 'Finding delays for data set', dfile
+			kwargs['cachefile'] = dlayfile
 
-			delays = finddelays(dfile, dlayfile, nproc, reffile,
-					osamp, compenv=compenv, window=window,
-					peaks=peaks, rxelts=rxelts, txelts=txelts)
+			delays = finddelays(nproc, dfile, reffile, osamp, **kwargs)
 
 			# Note the receive channels in this data file
 			lrx = set(k[1] for k in delays.iterkeys())
@@ -414,7 +449,7 @@ def atimesEngine(config):
 
 	# Save the output as a text file
 	# Each data file gets a column
-	np.savetxt(outfile, ctimes, fmt=' '.join(['%d'] + ['%16.8f'] * len(times)))
+	np.savetxt(outfile, ctimes, fmt=['%d'] + ['%16.8f']*len(times))
 
 
 if __name__ == '__main__':

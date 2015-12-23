@@ -240,7 +240,7 @@ def trilaterationEngine(config):
 
 	# Save the element coordinates in the output file
 	relements = np.array([[i] + list(v) for i, v in relements.iteritems()])
-	refmt = ' '.join(['%d'] + ['%16.8f']*(relements.shape[1] - 1))
+	refmt = ['%d'] + ['%16.8f']*(relements.shape[1] - 1)
 	np.savetxt(outelements, relements, fmt=refmt)
 
 

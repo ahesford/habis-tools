@@ -14,7 +14,7 @@ from scipy.stats import linregress
 from operator import itemgetter, add
 from itertools import groupby
 
-from pycwp import cutil, mio, signal
+from pycwp import cutil, mio, signal, stats
 
 
 class Window(tuple):
@@ -1106,6 +1106,20 @@ class Waveform(object):
 		corr = np.exp(-widths * np.sin(theta))
 		sigft = Waveform(signal=self.fft() * corr)
 		return sigft.ifft(real=self.isReal)
+
+
+	def snr(self, noisewin):
+		'''
+		Estimate the signal SNR (in dB) of the signal by comparing the
+		peak envelope amplitude to the minimum standard deviation of
+		the signal over a sliding window of width noisewin.
+		'''
+		if len(self._data) < 2:
+			raise ValueError('Signal data window must have at least 2 samples')
+		# Compute the minimum variance and the peak amplitude
+		mvar = min(stats.rolling_variance(self._data, noisewin))
+		env = max(np.abs(hilbert(self._data)))
+		return 10. * np.log10(env**2 / mvar)
 
 
 def dimcompat(sig, ndim=1):
