@@ -540,19 +540,26 @@ class Waveform(object):
 		return v, i + self._datastart
 
 
-	def window(self, window=None, tails=None):
+	def window(self, window=None, tails=0):
 		'''
 		Return a windowed copy of the waveform where, outside the
 		window (start, length), the signal is zero. If tails is
-		provided, it should be a sequence of length 2N, where the first
-		N values will multiply the signal in the range [start:start+N]
-		and the last N values mull multiply the signal in the range
-		[start+length-N:start+length].
+		provided, it should be a scalar or a 1-D array of length 2N,
+		where the first N values will multiply the signal in the range
+		[start:start+N] and the last N values mull multiply the signal
+		in the range [start+length-N:start+length]. If tails is a
+		scalar, np.hanning(2 * tails) is used.
 		'''
 		if window is None: window = (0, self.nsamp)
 		window = Window(*window)
 
-		if tails is not None and len(tails) > window.length:
+		tails = np.asarray(tails)
+		if tails.ndim < 1:
+			tails = np.hanning(2 * tails)
+		elif tails.ndim > 1:
+			raise TypeError('Tails must be scalar or 1-D array compatible')
+
+		if len(tails) > window.length:
 			raise ValueError('Length of tails should not exceed length of window')
 
 		dwin = self.datawin
@@ -571,7 +578,7 @@ class Waveform(object):
 		data[oend:] = 0.
 
 		# If there are tails, apply them
-		if tails is not None:
+		if len(tails) > 0:
 			def tailer(data, dwin, tail, twin):
 				'''Apply the tail to the data'''
 				try:
@@ -583,9 +590,9 @@ class Waveform(object):
 
 			ltail = len(tails) / 2
 			# Apply the left and right tails in succession
-			lwin = (window[0], ltail)
+			lwin = (window.start, ltail)
 			tailer(data, dwin, tails[:ltail], lwin)
-			rwin = (window[0] + window[1] - ltail, ltail)
+			rwin = (window.end - ltail, ltail)
 			tailer(data, dwin, tails[ltail:], rwin)
 
 		# Return a copy of the signal, cropped to the window
