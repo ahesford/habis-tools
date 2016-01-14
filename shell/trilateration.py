@@ -6,6 +6,8 @@
 import os, sys, itertools, numpy as np
 import multiprocessing
 
+from numpy.linalg import norm
+
 from itertools import izip
 
 from pycwp import process
@@ -175,6 +177,20 @@ def trilaterationEngine(config):
 		err = 'Invalid specification of optional fctsize in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
+	try:
+		# Pull the maximum iteration count
+		maxiter = config.getint(tsec, 'maxiter', failfunc=lambda: 1)
+	except Exception as e:
+		err = 'Invalid specification of optional maxiter in [%s]' % tsec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Pull the itereation stop distance
+		stopdist = config.getfloat(tsec, 'stopdist', failfunc=lambda: 0)
+	except Exception as e:
+		err = 'Invalid specification of optional stopdist in [%s]' % tsec
+		raise HabisConfigError.fromException(err, e)
+
 	if fctsize < 1:
 		raise HabisConfigError('Optional fctsize must be a positive integer')
 
@@ -197,27 +213,8 @@ def trilaterationEngine(config):
 	# Allocate a multiprocessing pool
 	pool = multiprocessing.Pool(processes=nproc)
 
-	# Pull the relevant times and element coordinates
+	# Pull the relevant times
 	ctimes = np.array([times[e] for e in elements])
-	celts = np.array([eltpos[e] for e in elements])
-
-	# Compute the reflector positions in parallel
-	# Use async calls to correctly handle keyboard interrupts
-	result = pool.map_async(getreflpos,
-			((t, celts, g[:-1], radius, g[-1], varc, tol) 
-				for t, g in izip(ctimes.T, guess)))
-	while True:
-		try:
-			reflectors = np.array(result.get(5))
-			break
-		except multiprocessing.TimeoutError:
-			pass
-
-	# Save the reflector positions
-	np.savetxt(outreflector, reflectors, fmt='%16.8f')
-
-	# Skip trilateration of element positions if there is no ouptut file
-	if not outelements: return
 
 	# Build a list of the elements in each facet
 	facets = { }
@@ -226,22 +223,58 @@ def trilaterationEngine(config):
 		try: facets[f].append(e)
 		except KeyError: facets[f] = [e]
 
-	# Compute the element positions in parallel by facet
-	# Use async calls to correctly handle keyboard interrupts
-	result = pool.map_async(geteltpos,
-			((elts, eltpos, times, reflectors, radius, c, tol)
-				for elts in facets.itervalues()))
-	while True:
-		try:
-			relements = dict(kp for r in result.get(5) for kp in r.iteritems())
-			break
-		except multiprocessing.TimeoutError:
-			pass
+	for rnd in range(1, maxiter + 1):
+		# Pull the relevant element coordinates
+		celts = np.array([eltpos[e] for e in elements])
 
-	# Save the element coordinates in the output file
-	relements = np.array([[i] + list(v) for i, v in relements.iteritems()])
-	refmt = ['%d'] + ['%16.8f']*(relements.shape[1] - 1)
-	np.savetxt(outelements, relements, fmt=refmt)
+		# Compute the reflector positions in parallel
+		# Use async calls to correctly handle keyboard interrupts
+		result = pool.map_async(getreflpos,
+				((t, celts, g[:-1], radius, g[-1], varc, tol)
+					for t, g in izip(ctimes.T, guess)))
+		while True:
+			try:
+				reflectors = np.array(result.get(5))
+				break
+			except multiprocessing.TimeoutError:
+				pass
+
+		# Save the reflector positions
+		np.savetxt(outreflector, reflectors, fmt='%16.8f')
+
+		rfldist = norm(reflectors[:,:-1] - guess[:,:-1], axis=-1)
+		print 'Iteration', rnd, 'mean reflector shift', np.mean(rfldist), 'stdev', np.std(rfldist)
+
+		# Skip trilateration of element positions if there is no ouptut file
+		if not outelements: break
+
+		guess = reflectors
+
+		# Compute the element positions in parallel by facet
+		# Use async calls to correctly handle keyboard interrupts
+		result = pool.map_async(geteltpos,
+				((elts, eltpos, times, reflectors, radius, c, tol)
+					for elts in facets.itervalues()))
+		while True:
+			try:
+				relements = dict(kp for r in result.get(5) for kp in r.iteritems())
+				break
+			except multiprocessing.TimeoutError:
+				pass
+
+		reltdist = [norm(v - eltpos[i]) for i, v in relements.iteritems()]
+		print 'Iteration', rnd, 'mean element shift', np.mean(reltdist), 'stdev', np.std(reltdist)
+
+		# Save the element coordinates in the output file
+		reltarr = np.array([[i] + list(v) for i, v in relements.iteritems()])
+		refmt = ['%d'] + ['%16.8f']*(reltarr.shape[1] - 1)
+		np.savetxt(outelements, reltarr, fmt=refmt)
+
+		if max(rfldist) < stopdist and max(reltdist) < stopdist:
+			print 'Convergence achieved'
+			break
+
+		eltpos = relements
 
 
 if __name__ == '__main__':
