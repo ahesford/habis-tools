@@ -411,7 +411,7 @@ class WaveformSet(object):
 
 		*** NOTE: Using this may discard some data when writing. ***
 		'''
-		# Determin if the transmit indices can be inferred
+		# Determine if the transmit indices can be inferred
 		inferTx = True
 		last = -1
 		for tid in self.txidx:
@@ -570,7 +570,8 @@ class WaveformSet(object):
 		if minor in (2, 3):
 			# Read the group configuration
 			count, size = funpack('<2H')
-			size = size or (ntx / _strict_nonnegative_int(count, positive=True))
+			# Default group size, if unspecified, is 10240 / count
+			size = size or (10240 / _strict_nonnegative_int(count, positive=True))
 			self.txgrps = count, size
 			# Read 1024 bytes of TGC parameters
 			self.extrabytes['tgc'] = f.read(1024)
