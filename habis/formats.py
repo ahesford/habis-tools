@@ -11,7 +11,7 @@ import re, os
 import pandas
 import struct
 
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 
 def _strict_int(x):
 	ix = int(x)
@@ -352,6 +352,115 @@ class WaveformSet(object):
 		hdr = (0, [0., 0., 0.], wave.datawin)
 		wset.setrecord(hdr, wave.getsignal(wave.datawin), copy)
 		return wset
+
+
+	@classmethod
+	def fromwsets(cls, *args, **kwargs):
+		'''
+		Create a new WaveformSet object that concatenates all
+		transmit-receive waveforms from the input WaveformSets provided
+		in *args. The concatenated txidx list is always sorted
+		regardless of input ordering.
+
+		By default, the input waveforms must collectively contain
+		exactly one waveform for each transmit-receive product in the
+		output. Setting the sole optional kwarg defzero=True overrides
+		this default to allow missing transmit-receive waveforms to be
+		treated as zero.
+
+		Duplicate transmit-receive waveforms among the inputs is always
+		an error.
+		'''
+		from habis.sigtools import Window
+		if len(args) < 2:
+			raise TypeError('At least two input WaveformSets must be specified')
+
+		defzero = kwargs.pop('defzero', False)
+
+		if len(kwargs):
+			raise TypeError('Unrecognized keyword argument %s' % kwargs.iterkeys().next())
+
+		# Track the number of samples
+		nsamp = 0
+
+		# Map receive channels to transmit-channel lists and receive-channel headers
+		rxtxmap = defaultdict(set)
+		rcvhdrs = { }
+
+		# Ensure all f2c and dtype configurations are compatible
+		f2c = args[0].f2c
+		dtype = args[0].dtype
+		txgrps = args[0].txgrps
+
+		for wset in args:
+			nsamp = max(nsamp, wset.nsamp)
+			ltx = set(wset.txidx)
+
+			if wset.f2c != f2c:
+				raise ValueError('All WaveformSets must have the same f2c value')
+
+			if wset.dtype != dtype:
+				raise TypeError('All WaveformSets must have the same datatype')
+
+			if wset.txgrps != txgrps:
+				raise TypeError('All WaveformSets must have the same Tx-group configuration')
+
+			for hdr in wset.allheaders():
+				rxi = hdr.idx
+
+				if not rxtxmap[rxi].isdisjoint(ltx):
+					raise ValueError('Receive channel %d contains duplicate waveforms for at least one transmission' % rxi)
+
+				try:
+					rhdr = rcvhdrs[rxi]
+				except KeyError:
+					rcvhdrs[rxi] = hdr
+				else:
+					if not np.allclose(rhdr.pos, hdr.pos):
+						raise ValueError('Inconsistent positions for receive channel %d' % rxi)
+					if rhdr.txgrp != hdr.txgrp:
+						raise ValueError('Inconsistent transmit-group configuration for receive channel %d' % rxi)
+					# Find a common data window
+					cwin = Window(start=min(rhdr.win.start, hdr.win.start),
+							end=max(rhdr.win.end, hdr.win.end))
+					rcvhdrs[rxi] = rhdr.copy(win=cwin)
+
+				rxtxmap[rxi].update(ltx)
+
+		# Identify all unique transmit channels
+		txidx = { v for s in rxtxmap.itervalues() for v in s }
+
+		if not defzero:
+			# Check to make sure every waveform is accounted for
+			if not all(v == txidx for v in rxtxmap.itervalues()):
+				raise ValueError('Not all receive channels specify waveforms for all transmissions')
+
+		# Build the transmit-index list and map to record rows
+		txidx = sorted(txidx)
+		txmap = { v: i for i, v in enumerate(txidx) }
+		ntx = len(txidx)
+
+		# Create and populate the output WaveformSet
+		outset = cls(txidx, nsamp, f2c, dtype, txgrps)
+
+		for rxi in sorted(rxtxmap.iterkeys()):
+			hdr = rcvhdrs[rxi]
+			win = hdr.win
+			rec = np.zeros((ntx, win.length), dtype=outset.dtype)
+
+			for wset in args:
+				try: _, dat = wset.getrecord(rxi, window=win)
+				except KeyError: continue
+
+				# Map local rows to global record rows
+				recrows = [txmap[txi] for txi in wset.txidx]
+				# Copy the data
+				rec[recrows,:] = dat
+
+			# No need to copy the new record array
+			outset.setrecord(hdr, rec, copy=False)
+
+		return outset
 
 
 	@classmethod
@@ -841,6 +950,9 @@ class WaveformSet(object):
 		To force a copy without knowing or changing the window and
 		dtype, pass dtype=0.
 		'''
+		# Grab receive record, copy header to avoid corruption
+		hdr, waveforms = self._records[rid]
+
 		# With no tid, pull all transmissions
 		if tid is None: tid = self.txidx
 
@@ -852,9 +964,6 @@ class WaveformSet(object):
 			# Handle mapping for a scalar tid
 			tcidx = self.tx2row(tid)
 			singletx = True
-
-		# Grab receive record, copy header to avoid corruption
-		hdr, waveforms = self._records[rid]
 
 		# If the data is not changed, just return a view of the waveforms
 		if window is None and dtype is None:
@@ -1023,3 +1132,12 @@ class WaveformSet(object):
 		'''
 		for rid in sorted(self.rxidx):
 			yield self.getrecord(rid, *args, **kwargs)
+
+
+	def allheaders(self, *args, **kwargs):
+		'''
+		Return a generator that fetches, in channel-index order, only
+		the receive-channel record headers.
+		'''
+		for rid in sorted(self.rxidx):
+			yield self._records[rid][0]
