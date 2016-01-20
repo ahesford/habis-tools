@@ -355,7 +355,7 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def fromwsets(cls, *args, **kwargs):
+	def concatenate(cls, *args, **kwargs):
 		'''
 		Create a new WaveformSet object that concatenates all
 		transmit-receive waveforms from the input WaveformSets provided
@@ -380,24 +380,23 @@ class WaveformSet(object):
 		if len(kwargs):
 			raise TypeError('Unrecognized keyword argument %s' % kwargs.iterkeys().next())
 
-		# Track the number of samples
-		nsamp = 0
+		# Map the nsamp and f2c for each file to a global range
+		lsamp = 0
+		f2c = args[0].f2c
 
 		# Map receive channels to transmit-channel lists and receive-channel headers
 		rxtxmap = defaultdict(set)
 		rcvhdrs = { }
 
-		# Ensure all f2c and dtype configurations are compatible
-		f2c = args[0].f2c
+		# Ensure dtype and transmit-group configurations are compatible
 		dtype = args[0].dtype
 		txgrps = args[0].txgrps
 
 		for wset in args:
-			nsamp = max(nsamp, wset.nsamp)
-			ltx = set(wset.txidx)
+			f2c = min(f2c, wset.f2c)
+			lsamp = max(lsamp, wset.nsamp + wset.f2c)
 
-			if wset.f2c != f2c:
-				raise ValueError('All WaveformSets must have the same f2c value')
+			ltx = set(wset.txidx)
 
 			if wset.dtype != dtype:
 				raise TypeError('All WaveformSets must have the same datatype')
@@ -411,18 +410,24 @@ class WaveformSet(object):
 				if not rxtxmap[rxi].isdisjoint(ltx):
 					raise ValueError('Receive channel %d contains duplicate waveforms for at least one transmission' % rxi)
 
+				# Map this record to a data window with 0 f2c
+				hwin = Window(hdr.win.start + wset.f2c, hdr.win.length)
+
 				try:
 					rhdr = rcvhdrs[rxi]
 				except KeyError:
-					rcvhdrs[rxi] = hdr
+					# Make the data window relative to 0 f2c
+					rcvhdrs[rxi] = hdr.copy(win=hwin)
 				else:
 					if not np.allclose(rhdr.pos, hdr.pos):
 						raise ValueError('Inconsistent positions for receive channel %d' % rxi)
 					if rhdr.txgrp != hdr.txgrp:
 						raise ValueError('Inconsistent transmit-group configuration for receive channel %d' % rxi)
-					# Find a common data window
-					cwin = Window(start=min(rhdr.win.start, hdr.win.start),
-							end=max(rhdr.win.end, hdr.win.end))
+
+					# Find encompassing window for this channel
+					rwin = rhdr.win
+					cwin = Window(min(rwin.start, hwin.start),
+							end=max(rwin.end, hwin.end))
 					rcvhdrs[rxi] = rhdr.copy(win=cwin)
 
 				rxtxmap[rxi].update(ltx)
@@ -441,24 +446,28 @@ class WaveformSet(object):
 		ntx = len(txidx)
 
 		# Create and populate the output WaveformSet
-		outset = cls(txidx, nsamp, f2c, dtype, txgrps)
+		outset = cls(txidx, lsamp - f2c, f2c, dtype, txgrps)
 
-		for rxi in sorted(rxtxmap.iterkeys()):
-			hdr = rcvhdrs[rxi]
-			win = hdr.win
+		for rxi, rhdr in sorted(rcvhdrs.iteritems()):
+			# Subtract the global f2c from the data window
+			win = Window(rhdr.win.start - outset.f2c, rhdr.win.length)
 			rec = np.zeros((ntx, win.length), dtype=outset.dtype)
 
 			for wset in args:
-				try: _, dat = wset.getrecord(rxi, window=win)
+				try: lhdr, dat = wset.getrecord(rxi)
 				except KeyError: continue
 
 				# Map local rows to global record rows
 				recrows = [txmap[txi] for txi in wset.txidx]
-				# Copy the data
-				rec[recrows,:] = dat
 
-			# No need to copy the new record array
-			outset.setrecord(hdr, rec, copy=False)
+				# Map the local data window to the global data window
+				lwin = Window(lhdr.win.start + wset.f2c - outset.f2c, lhdr.win.length)
+
+				# Copy the data
+				rec[recrows,lwin.start:lwin.end] = dat
+
+			# Correct the data window in the record header
+			outset.setrecord(rhdr.copy(win=win), rec, copy=False)
 
 		return outset
 
