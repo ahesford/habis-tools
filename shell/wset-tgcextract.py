@@ -17,6 +17,7 @@ if __name__ == '__main__':
 	try: files = matchfiles(sys.argv[1:])
 	except IOError as e:
 		print >> sys.stderr, 'ERROR:', e
+		usage(sys.argv[0], True)
 
 	for f in files:
 		wset = WaveformSet.fromfile(f)
