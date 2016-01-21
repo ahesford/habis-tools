@@ -209,6 +209,83 @@ def readfiresequence(fmt, findx, reducer=None):
 	return np.concatenate(data, axis=0)
 
 
+# Define a named tuple that represents a format-enforced transmit group configuration
+class TxGroupIndex(tuple):
+	'''
+	A class to encapsulate and type-check transmit-index pairs.
+	'''
+	def __new__(cls, lidx, gidx):
+		'''
+		Create a new TxGroupIndex with local index lidx and
+		group index gidx.
+		'''
+		lidx = _strict_nonnegative_int(lidx)
+		gidx = _strict_nonnegative_int(gidx)
+		return tuple.__new__(cls, (lidx, gidx))
+	@property
+	def idx(self): return self[0]
+	@property
+	def grp(self): return self[1]
+
+	def signForTx(self, transmission, group):
+		'''
+		Return the sign (-1, 0, 1) of the given transmission
+		number and group for this transmit and group index.
+		'''
+		# If the groups don't match, the sign is zero
+		if group != self.grp: return 0
+
+		# Count number of common bits in transmission and idx
+		txcom = _strict_nonnegative_int(transmission) & self.idx
+		count = 0
+		while txcom:
+			txcom &= txcom - 1
+			count += 1
+
+		# Sign is +1 for even number of common bits
+		return 1 - 2 * (count % 2)
+
+
+# Define a named tuple that represents a format-enforced channel header
+class RxChannelHeader(tuple):
+	'''
+	A class to encapsulate and type-check receive-channel headers
+	in WaveformSet files.
+	'''
+	def __new__(cls, idx, pos, win, txgrp=None):
+		'''
+		Create a new header for receive channel idx,
+		element location pos = (px, py, pz), and data window
+		win = (start, length). The transmit group txgrp may
+		either be None or (index, group).
+		'''
+		from .sigtools import Window
+		idx = _strict_nonnegative_int(idx)
+		px, py, pz = pos
+		pos = tuple(float(p) for p in (px, py, pz))
+		win = Window(*win)
+		if txgrp is not None: txgrp = TxGroupIndex(*txgrp)
+		return tuple.__new__(cls, (idx, pos, win, txgrp))
+	@property
+	def idx(self): return self[0]
+	@property
+	def pos(self): return self[1]
+	@property
+	def win(self): return self[2]
+	@property
+	def txgrp(self): return self[3]
+
+	def copy(self, **kwargs):
+		"Copy the header, optionally replacing certain properties."
+		keys = ['idx', 'pos', 'win', 'txgrp']
+		props = dict((key, kwargs.pop(key, getattr(self, key))) for key in keys)
+		if len(kwargs):
+			raise TypeError("Unrecognized keyword argument '%s'" % (kwargs.iterkeys().next()))
+		return type(self)(**props)
+
+
+
+
 class WaveformSet(object):
 	'''
 	A class to encapsulate a (possibly multi-facet) set of pulse-echo
@@ -219,81 +296,6 @@ class WaveformSet(object):
 	typecodes = bidict(I2 = 'int16', I4 = 'int32', I8 = 'int64',
 			F2 = 'float16', F4 = 'float32', F8 = 'float64',
 			C4 = 'complex64', C8 = 'complex128')
-
-	# Define a named tuple that represents a format-enforced transmit group configuration
-	class TxGroupIndex(tuple):
-		'''
-		A class to encapsulate and type-check transmit-index pairs.
-		'''
-		def __new__(cls, lidx, gidx):
-			'''
-			Create a new TxGroupIndex with local index lidx and
-			group index gidx.
-			'''
-			lidx = _strict_nonnegative_int(lidx)
-			gidx = _strict_nonnegative_int(gidx)
-			return tuple.__new__(cls, (lidx, gidx))
-		@property
-		def idx(self): return self[0]
-		@property
-		def grp(self): return self[1]
-
-		def signForTx(self, transmission, group):
-			'''
-			Return the sign (-1, 0, 1) of the given transmission
-			number and group for this transmit and group index.
-			'''
-			# If the groups don't match, the sign is zero
-			if group != self.grp: return 0
-
-			# Count number of common bits in transmission and idx
-			txcom = _strict_nonnegative_int(transmission) & self.idx
-			count = 0
-			while txcom:
-				txcom &= txcom - 1
-				count += 1
-
-			# Sign is +1 for even number of common bits
-			return 1 - 2 * (count % 2)
-
-
-	# Define a named tuple that represents a format-enforced channel header
-	class ChannelHeader(tuple):
-		'''
-		A class to encapsulate and type-check receive-channel headers
-		in WaveformSet files.
-		'''
-		def __new__(cls, idx, pos, win, txgrp=None):
-			'''
-			Create a new header for receive channel idx,
-			element location pos = (px, py, pz), and data window
-			win = (start, length). The transmit group txgrp may
-			either be None or (index, group).
-			'''
-			from .sigtools import Window
-			idx = _strict_nonnegative_int(idx)
-			px, py, pz = pos
-			pos = tuple(float(p) for p in (px, py, pz))
-			win = Window(*win)
-			if txgrp is not None: txgrp = WaveformSet.TxGroupIndex(*txgrp)
-			return tuple.__new__(cls, (idx, pos, win, txgrp))
-		@property
-		def idx(self): return self[0]
-		@property
-		def pos(self): return self[1]
-		@property
-		def win(self): return self[2]
-		@property
-		def txgrp(self): return self[3]
-
-		def copy(self, **kwargs):
-			"Copy the header, optionally replacing certain properties."
-			keys = ['idx', 'pos', 'win', 'txgrp']
-			props = dict((key, kwargs.pop(key, getattr(self, key))) for key in keys)
-			if len(kwargs):
-				raise TypeError("Unrecognized keyword argument '%s'" % (kwargs.iterkeys().next()))
-			return type(self)(**props)
-
 
 	@staticmethod
 	def _verify_file_version(version, write=False):
@@ -604,7 +606,9 @@ class WaveformSet(object):
 			f.write(hbytes)
 
 		# Write each record in turn
-		for idx, (hdr, waveforms) in self._records.iteritems():
+		for idx in sorted(self.rxidx):
+			hdr, waveforms = self._get_record_raw(idx)
+
 			if idx != hdr.idx:
 				raise ValueError('Record index does not match receive-channel index')
 
@@ -913,11 +917,32 @@ class WaveformSet(object):
 		self._f2c = _strict_nonnegative_int(val)
 
 
+	def rid2tx(self, rid):
+		'''
+		Convert a receive-channel index rid (which must be stored in
+		the WaveformSet) into a transmit index according to the
+		transmit-group configuration specified in the set. If the
+		configuration is None, this is an identity map.
+		'''
+		try: _, gsize = self.txgrps
+		except TypeError: return _strict_nonnegative_int(rid)
+
+		try: txgrp = self.getheader(rid).txgrp
+		except KeyError:
+			raise KeyError('WaveformSet does not contain receive channel %d' % rid)
+
+		try: idx, grp = txgrp
+		except TypeError:
+			raise TypeError('WaveformSet specifies group config, but receive channel does not')
+
+		return grp * gsize + idx
+
+
 	def tx2row(self, tid):
 		'''
 		Convert a transmit-channel index into a waveform-array row index.
 		'''
-		return self._txmap[tid]
+		return self._txmap[_strict_nonnegative_int(tid)]
 
 
 	def row2tx(self, row):
@@ -926,6 +951,21 @@ class WaveformSet(object):
 		'''
 		# Use the ordered keys in the txmap to pull out the desired row
 		return self._txmap.keys()[row]
+
+
+	def _get_record_raw(self, rid):
+		'''
+		Return the raw (header, data) record for a given receive
+		channel rid, with only sanity checks on rid.
+		'''
+		return self._records[_strict_nonnegative_int(rid)]
+
+
+	def getheader(self, rid):
+		'''
+		Return the channel header for receive channel rid.
+		'''
+		return self._get_record_raw(rid)[0]
 
 
 	def getrecord(self, rid, tid=None, window=None, dtype=None):
@@ -960,7 +1000,7 @@ class WaveformSet(object):
 		dtype, pass dtype=0.
 		'''
 		# Grab receive record, copy header to avoid corruption
-		hdr, waveforms = self._records[rid]
+		hdr, waveforms = self._get_record_raw(rid)
 
 		# With no tid, pull all transmissions
 		if tid is None: tid = self.txidx
@@ -1036,24 +1076,29 @@ class WaveformSet(object):
 
 	def __getitem__(self, key):
 		'''
-		A convenience method to call getwaveform(rid, tid) for provided
-		receive and transmit indices. Only a key of the form (rid, tid)
-		is supported.
-		'''
-		try:
-			# Split the indices
-			rid, tid = key
-		except (TypeError, ValueError):
-			raise TypeError('Item key should be a sequence of two integer values')
+		For a scalar key, return self.record(key).
 
-		return self.getwaveform(_strict_int(rid), _strict_int(tid))
+		For a key (rid, tid), return self.getwaveform(rid, tid).
+
+		All other inputs are invalid.
+		'''
+		# Handle a single-integer index
+		try: len(key)
+		except TypeError: return self.getrecord(rid)
+
+		# Split two-integer indices
+		try: rid, tid = key
+		except ValueError:
+			raise TypeError('Item key should be exactly one or two integers')
+
+		return self.getwaveform(rid, tid)
 
 
 	def delrecord(self, rid):
 		'''
 		Delete the waveform record for the receive-channel index rid.
 		'''
-		del self._records[rid]
+		del self._records[_strict_nonnegative_int(rid)]
 
 
 	def clearall(self):
@@ -1080,7 +1125,7 @@ class WaveformSet(object):
 		local copy of the waveform array, cast to this set's dtype,
 		will always be made.
 		'''
-		hdr = self.ChannelHeader(*hdr)
+		hdr = RxChannelHeader(*hdr)
 
 		if hdr.txgrp is not None and self.txgrps is None:
 			raise ValueError('Record specifies Tx-group parameters, but set has no Tx-group configuration')
@@ -1128,7 +1173,7 @@ class WaveformSet(object):
 		tcidx = self.tx2row(tid)
 
 		# Pull the existing record
-		hdr, wfrec = self._records[rid]
+		hdr, wfrec = self._get_record_raw(rid)
 
 		# Overwrite the transmit row with the input waveform
 		wfrec[tcidx,:] = wave.getsignal(window=hdr.win, dtype=wfrec.dtype)
@@ -1149,4 +1194,4 @@ class WaveformSet(object):
 		the receive-channel record headers.
 		'''
 		for rid in sorted(self.rxidx):
-			yield self._records[rid][0]
+			yield self.getheader(rid)

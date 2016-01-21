@@ -21,7 +21,16 @@ if __name__ == '__main__':
 
 	for f in files:
 		wset = WaveformSet.fromfile(f)
+
+		try: _, gsize = wset.txgrps
+		except TypeError: gsize = None
+
 		obase = os.path.splitext(f)[0]
 		print 'Extracting backscatter waves from file', f
 		for rx in wset.rxidx:
-			wset[rx,rx].store(obase + '.Element%05d.backscatter' % rx)
+			tx = wset.rid2tx(rx)
+
+			try: wf = wset[rx, tx]
+			except KeyError: continue
+
+			wf.store(obase + '.Element%05d.backscatter' % rx)
