@@ -965,53 +965,122 @@ class Waveform(object):
 		return ((t, s) if negcorr else t)
 
 
-	def envpeaks(self, *args, **kwargs):
+	def envpeaks(self):
 		'''
 		Return the output of pycwp.signal.findpeaks for self.envelope().
-		The args and kwargs are passed on to findpeaks().
 		'''
 		# Find peaks in the data window
-		start, length = self.datawin
-		envelope = self.envelope().getsignal((start, length), forcecopy=False)
-		peaks = signal.findpeaks(envelope, *args, **kwargs)
-		# Map indices to full sample window
-		return [(v[0] + start, v[1], v[2], v[3]) for v in peaks]
+		st, ln = self.datawin
+		envelope = self.envelope().getsignal((st, ln), forcecopy=False)
+		peaks = signal.findpeaks(envelope)
+		# Map peak and keycol indices to global window
+		return [ { k: (v and (v[0] + st, v[1]) or None)
+			   for k, v in pk.iteritems() } for pk in peaks ]
 
 
 	def isolatepeak(self, index=None, **kwargs):
 		'''
 		Use self.envpeaks() to identify the peak nearest the provided
-		index that also matches any filtering criteria specified
-		in the arguments. A copy of the signal, which is windowed to
-		+/- 1 peak width around the identified peak, is returned.
+		index that also matches any filtering criteria specified in the
+		kwargs. A copy of the signal, windowed (by default) to +/-1
+		peak width around the identified peak, is returned.
 
 		If index is None, the most prominent peak in the signal is
 		returned.
 
-		If kwargs contains "tails" or "window" arguments, they are
-		stripped from the arguments and passed to self.window when
-		windowing the peak. The window is relative to the position of
-		the isolated peak; its starting index is added to the peak
-		index to determine a true starting index.
+		The kwargs can contain several filtering options:
 
-		If kwargs contains no "window" argument, a default relative
-		window of (-width, 2 * width) is assumed, where width is the
-		width of the isolated peak.
+		* minprom: Only peaks with a prominence greater than the
+		  specified value are considered (default: 0).
 
-		Any remaining **kwargs are passed to envpeaks.
+		* prommode: One of 'absolute' (default), 'relative', or
+		  'noisedb', changes the interpretation of minprom. For
+		  'absolute', the minprom value is interpreted as an absolute
+		  threshold. For 'relative', the minprom threshold is specified
+		  as a fraction of the prominence of the most prominent peak.
+		  For 'noisedb', the minprom threshold specifies a ratio, in
+		  dB, between the peak prominence and the noise standard
+		  deviation (computed using pycwp.stats.rolling_variance; see
+		  the 'noisewin' kwarg).
+
+		* noisewin: If prommode is 'noisedb', this optional kwarg
+		  specifies the width of the pycwp.stats.rolling_variance
+		  window used to estimate noise standard deviation. Defaults to
+		  100 and is ignored when prommode is not 'noisedb'.
+
+		* minwidth: Only peaks with a width (the distance between the
+		  index of the peak and the index of its key col) no less than
+		  the specified value are considered.
+
+		The highest peak, which has no key col has a width that reaches
+		to the far end of the signal's data window and a prominence
+		that equals its envelope amplitude.
+
+		Two additional kwargs control the isolation window:
+
+		* window: A tuple of the form (relstart, length). The actual
+		  isolation window is (relstart + pidx, length), where pidx is
+		  the index of the isolated peak. For a peak with a width
+		  "width", the default window is (-width, 2 * width).
+
+		* tails: Passed through as the "tails" argument to
+		  self.window() without further processing.
 		'''
 		# Pull the tails and window arguments for the window function
-		tails = kwargs.pop('tails', None)
+		tails = kwargs.pop('tails', 0)
 		window = kwargs.pop('window', None)
 
+		# Pull filtering options
+		minprom = kwargs.pop('minprom', 0)
+		prommode = kwargs.pop('prommode', 'absolute')
+		noisewin = kwargs.pop('noisewin', 100)
+		minwidth = kwargs.pop('minwidth', 0)
+
+		if len(kwargs):
+			raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
+
+		if prommode not in ('absolute', 'noisedb', 'relative'):
+			raise ValueError("Keyword argument 'prommode' must be one of 'absolute', 'noisedb' or 'relative'")
+
 		# Find the peak nearest the index
-		peaks = self.envpeaks(**kwargs)
-		if len(peaks) < 1: raise ValueError('No peaks found')
+		peaks = self.envpeaks()
+
+		# Adjust the minimum prominence for relative thresholds
+		if prommode == 'noisedb':
+			# Compute the noise standard deviation
+			nvar = stats.rolling_variance(self._data, noisewin)
+			minprom = 10.**(minprom / 20.) * math.sqrt(nvar)
+		elif prommode == 'relative':
+			try:
+				minprom = minprom * max(pk['peak'][1] for pk in peaks)
+			except ValueError:
+				raise ValueError('No peaks found')
+
+		# Rework the peaks list to take the desired form
+		fpeaks = []
+		for pk in peaks:
+			i, v = pk['peak']
+
+			try:
+				ki, kv = pk['keycol']
+			except TypeError:
+				# Width of dominant peak is to far end of data window
+				width = max(i, self.datawin.length - i)
+				# Prominence of dominant peak is its height
+				prom = v
+			else:
+				width = abs(i - ki)
+				prom = v - kv
+
+			if width >= minwidth and prom >= minprom:
+				fpeaks.append((i, prom, width))
+
+		if len(fpeaks) < 1: raise ValueError('No peaks found')
 
 		if index is not None:
-			ctr, _, width, _ = min(peaks, key=lambda pk: abs(pk[0] - index))
+			ctr, _, width = min(fpeaks, key=lambda pk: abs(pk[0] - index))
 		else:
-			ctr, _, width, _ = max(peaks, key=lambda pk: pk[3])
+			ctr, _, width = max(fpeaks, key=lambda pk: pk[1])
 
 		# The default window is +/- 1 peak width
 		if window is None: window = (-width, 2 * width)
