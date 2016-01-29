@@ -1048,7 +1048,10 @@ class Waveform(object):
 		# Adjust the minimum prominence for relative thresholds
 		if prommode == 'noisedb':
 			# Compute the noise standard deviation
-			nvar = stats.rolling_variance(self._data, noisewin)
+			try:
+				nvar = min(stats.rolling_variance(self._data, noisewin))
+			except ValueError:
+				raise ValueError('Noise window %d too wide to compute variance' % noisewin)
 			minprom = 10.**(minprom / 20.) * math.sqrt(nvar)
 		elif prommode == 'relative':
 			try:
