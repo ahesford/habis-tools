@@ -15,7 +15,7 @@ from collections import OrderedDict
 from pycwp import process, stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles, buildpaths
-from habis.formats import WaveformSet
+from habis.formats import WaveformSet, loadkeymat, savekeymat
 from habis.sigtools import Waveform
 
 
@@ -67,8 +67,7 @@ def finddelays(nproc=1, *args, **kwargs):
 
 	try:
 		# Try to read an existing delay file and convert to a dictionary
-		kwargs['delaycache'] = {(int(t), int(r)): v 
-				for (t, r, v) in np.loadtxt(cachefile)}
+		kwargs['delaycache'] = loadkeymat(cachefile, nkeys=2)
 	except (KeyError, ValueError, IOError): pass
 
 	# Create a result queue and a dictionary to accumulate results
@@ -105,9 +104,7 @@ def finddelays(nproc=1, *args, **kwargs):
 
 	try:
 		# Save the computed delays, if desired
-		np.savetxt(cachefile,
-				[[t, r, v] for (t, r), v in delays.iteritems()],
-				fmt='%d %d %16.8f')
+		savekeymat(cachefile, delays, fmt='%d %d %16.8f')
 	except (ValueError, IOError): pass
 
 	return delays
@@ -159,15 +156,17 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  signals fail to exceed the minimum threshold.
 
 	* peaks: If not None, should be a dictionary of kwargs to be passed to
-	  Waveform.envpeaks for every waveform. Additionally, a 'nearmap' key
-	  must be included to specify a list of expected round-trip delays
-	  (relative to zero f2c) for each element. The waveform (i,j) for a
-	  delay entry (j,i) will be windowed about the peak closest to a delay
-	  given by
+	  Waveform.isolatepeak for every waveform. An additional 'nearmap' key
+	  may be included to specify a mapping between element indices and
+	  expected round-trip delays (relative to zero f2c). The waveform (i,j)
+	  for a delay entry (j,i) will be windowed about the peak closest to a
+	  delay given by
 	  
 	    0.5 * (nearmap[txelts[j]] + nearmap[rxelts[i]]) - datafile.f2c
 	  
-	  to a width twice the peak width, with no tails.
+	  to a width twice the peak width, with no tails. If the nearmap is not
+	  defined for either element (or at all), the nearmap value will be
+	  "None" to isolate the dominant peak.
 	  
 	  *** NOTE: peak windowing is done after overall windowing and after
 	  possible exclusion by minsnr. ***
@@ -215,10 +214,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Pull the optional peak search criteria
 	peaks = kwargs.pop('peaks', None)
 	try: nearmap = peaks.pop('nearmap', None)
-	except AttributeError: nearmap = None
-
-	if peaks is not None and nearmap is None:
-		raise KeyError('kwarg "peaks" must be a dictionary with a "nearmap" key')
+	except (AttributeError, KeyError): nearmap = { }
 
 	# Grab an optional delay cache
 	delaycache = kwargs.pop('delaycache', { })
@@ -248,9 +244,10 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			sig = sig.window(window[:2], tails=tails)
 		if minsnr is not None and noisewin is not None:
 			if sig.snr(noisewin) < minsnr: continue
-		if peaks:
+		if peaks is not None:
 			# Isolate the peak nearest the expected location (if one exists)
-			exd = 0.5 * (nearmap[tid] + nearmap[rid]) - data.f2c
+			try: exd = 0.5 * (nearmap[tid] + nearmap[rid]) - data.f2c
+			except (KeyError, IndexError): exd = None
 			try: sig = sig.isolatepeak(exd, **peaks)
 			except ValueError: continue
 		if compenv: sig = sig.envelope()
@@ -357,25 +354,12 @@ def atimesEngine(config):
 
 	try:
 		# Determine peak-selection criteria
-		peaks = config.getlist(asec, 'peak', failfunc=lambda: None)
+		peaks = config.get(asec, 'peaks', failfunc = lambda: None)
 		if peaks:
-			if len(peaks) < 2 or len(peaks) > 5:
-				err = 'Peak does not specify appropriate parameters'
-				raise HabisConfigError(err)
-			if peaks[0].lower() != 'nearest':
-				err = 'Peak specification must start with "nearest"'
-				raise HabisConfigError(err)
-			# Build the peak-selection options dictionary
-			peakargs = { 'nearfile': peaks[1] }
-			if len(peaks) > 2:
-				peakargs['minwidth'] = float(peaks[2])
-			if len(peaks) > 3:
-				peakargs['minprom'] = float(peaks[3])
-			if len(peaks) > 4:
-				peakargs['prommode'] = peaks[4]
-			kwargs['peaks'] = peakargs
+			import yaml
+			kwargs['peaks'] = yaml.safe_load(peaks)
 	except Exception as e:
-		err = 'Invalid specification of optional peak in [%s]' % asec
+		err = 'Invalid specification of optional peaks in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	usediag = config.getboolean(asec, 'usediag', failfunc=lambda: False)
@@ -384,21 +368,22 @@ def atimesEngine(config):
 	cachedelay = config.getboolean(asec, 'cachedelay', failfunc=lambda: True)
 
 	try:
-		# If a delay guess was specified, read the delay matrix
-		# Also remove the 'nearfile' key
-		guesses = np.loadtxt(peaks.pop('nearfile'))
-		# Convert from times to samples
-		guesses = (guesses - t0) / dt
-	except (KeyError, TypeError, IOError, AttributeError):
+		# Remove the nearmap file key
+		guesses = loadkeymat(kwargs['peaks'].pop('nearmap'))
+	except (KeyError, TypeError, IOError, AttributeError) as e:
 		guesses = None
+	else:
+		# Adjust delay time scales
+		guesses = { k: (v - t0) / dt for k, v in guesses.iteritems() }
 
 	times = OrderedDict()
 
 	# Process each target in turn
 	for i, (target, datafiles) in enumerate(targetfiles.iteritems()):
-		# Set the peaks nearmap to the appropriate guess column
-		try: peaks['nearmap'] = guesses[:,i]
-		except TypeError: pass
+		if guesses is not None and 'peaks' in kwargs:
+			# Set the nearmap for this target to the appropriate column
+			nearmap = { k: v[i] for k, v in guesses.iteritems() }
+			kwargs['peaks']['nearmap'] = nearmap
 
 		if cachedelay:
 			delayfiles = buildpaths(datafiles, extension='delays.txt')
@@ -445,11 +430,11 @@ def atimesEngine(config):
 	if not len(rxset):
 		raise ValueError('Different targets have no common receive-channel indices')
 
-	ctimes = [[i] + [t[i] for t in times.itervalues()] for i in sorted(rxset)]
+	ctimes = { i: [t[i] for t in times.itervalues()] for i in sorted(rxset) }
 
 	# Save the output as a text file
 	# Each data file gets a column
-	np.savetxt(outfile, ctimes, fmt=['%d'] + ['%16.8f']*len(times))
+	savekeymat(outfile, ctimes, fmt=['%d'] + ['%16.8f']*len(times))
 
 
 if __name__ == '__main__':

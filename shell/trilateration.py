@@ -14,15 +14,7 @@ from pycwp import process
 
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
-
-def dictload(f):
-	'''
-	Use np.loadtxt(f) to read a 2-D text matrix file, then encode the
-	matrix using the first column as integer keys and the remaining columns
-	as corresponding values.
-	'''
-	return { int(t[0]): t[1:] for t in np.loadtxt(f, ndmin=2) }
-
+from habis.formats import savekeymat, loadkeymat
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -196,9 +188,9 @@ def trilaterationEngine(config):
 
 	# Accumulate all element coordinates and arrival times
 	eltpos = dict(kp for efile in inelements
-			for kp in dictload(efile).iteritems())
+			for kp in loadkeymat(efile).iteritems())
 	times = dict(kp for tfile in timefiles
-			for kp in dictload(tfile).iteritems())
+			for kp in loadkeymat(tfile).iteritems())
 	# Only consider elements in both sets
 	elements = sorted(set(eltpos.iterkeys()).intersection(times.iterkeys()))
 
@@ -266,9 +258,8 @@ def trilaterationEngine(config):
 		print 'Iteration', rnd, 'mean element shift', np.mean(reltdist), 'stdev', np.std(reltdist)
 
 		# Save the element coordinates in the output file
-		reltarr = np.array([[i] + list(v) for i, v in relements.iteritems()])
-		refmt = ['%d'] + ['%16.8f']*(reltarr.shape[1] - 1)
-		np.savetxt(outelements, reltarr, fmt=refmt)
+		refmt = ['%d'] + ['%16.8f']*(len(relements.itervalues().next()))
+		savekeymat(outelements, relements, fmt=refmt)
 
 		if max(rfldist) < stopdist and max(reltdist) < stopdist:
 			print 'Convergence achieved'

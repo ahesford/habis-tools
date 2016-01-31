@@ -7,6 +7,7 @@ import os, sys, ConfigParser, numpy as np
 from numpy.linalg import norm
 
 from habis.habiconf import HabisConfigError, HabisConfigParser
+from habis.formats import savekeymat, loadkeymat
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -39,22 +40,24 @@ def exdelayEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	# Read the element and reflector positions
-	eltspos = np.concatenate([np.loadtxt(efile) for efile in eltfiles], axis=0)
+	eltspos = dict(kp for efile in eltfiles
+			for kp in loadkeymat(efile).iteritems())
 	reflpos = np.loadtxt(rflfile)
+	nrefl, nrdim = reflpos.shape
 
-	_, nedim = eltspos.shape
-	_, nrdim = reflpos.shape
-	if nedim != nrdim != nedim + 1:
-		raise ValueError('Reflector and element dimensionalities are incompatible')
-
-	# Determine the one-way distances between elements and reflector centers
-	# Ignore an extra dimension (wave speed) in reflector coordinates
-	dx = norm(eltspos[:,np.newaxis,:] - reflpos[np.newaxis,:,:nedim], axis=-1)
-	# Convert distances to round-trip arrival times
-	times = 2 * (dx - r) / c
+	times = {}
+	for elt, epos in eltspos.iteritems():
+		nedim = len(epos)
+		if nedim != nrdim != nedim + 1:
+			raise ValueError('Reflector and element dimensionalities are incompatible')
+		# Determine one-way distances between element and reflector centers
+		# Ignore an extra dimension (wave speed) in reflector coordinates
+		dx = norm(epos[np.newaxis,:] - reflpos[:,:nedim], axis=-1)
+		# Convert distances to round-trip arrival times
+		times[elt] = 2 * (dx - r) / c
 
 	# Save the estimated arrival times
-	np.savetxt(timefile, times, fmt='%16.8f')
+	savekeymat(timefile, times, fmt=['%d'] + ['%16.8f']*nrefl)
 
 
 if __name__ == '__main__':

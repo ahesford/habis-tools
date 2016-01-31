@@ -28,6 +28,75 @@ def _strict_nonnegative_int(x, positive=False):
 	return _strict_int(x)
 
 
+def loadkeymat(*args, **kwargs):
+	'''
+	Loads a textual Numpy matrix by calling numpy.loadtxt(*args, **kwargs),
+	then converts the output to a dictionary mapping integers in some
+	positive number of leading columns to Numpy arrays composed of the
+	remaining columns. If the number of remaining columns is 1, the Numpy
+	array will be collapsed to a scalar.
+
+	The dimensionality of the text matrix will be forced to 2 by adding
+	ndmin=2 to the kwargs. Therefore, this value should not be specified in
+	args or kwargs.
+
+	An optional keyword argument, nkeys (default: 1), will be stripped from
+	kwargs to determine the number of leading columns to use as keys. If
+	nkeys is 1, the keys will be single integers. For nkeys > 1, the keys
+	will be tuples of integers.
+	'''
+	nkeys = _strict_nonnegative_int(kwargs.pop('nkeys', 1), positive=True)
+	# Ensure the dimensionality is correctly specified
+	kwargs['ndmin'] = 2
+	mat = np.loadtxt(*args, **kwargs)
+
+	_, ncol = mat.shape
+
+	if nkeys >= ncol:
+		raise ValueError('Number of key columns must be less than number of columns in matrix')
+
+	def kvmaker(g):
+		k = tuple(_strict_int(gv) for gv in g[:nkeys])
+		v = g[nkeys:]
+		if len(k) < 2: k = k[0]
+		if len(v) < 2: v = v[0]
+		return k, v
+
+	return dict(kvmaker(g) for g in mat)
+
+
+def savekeymat(*args, **kwargs):
+	'''
+	Stores a dictionary mapping integers to sequences as a textual Numpy
+	matrix using numpy.savetxt(*args, **kwargs), where the keys become the
+	leading columns of the matrix and the remaining columns are populated
+	by the corresponding values.
+
+	If a format is specified as the 'fmt' argument to savetxt, it must
+	account for the extra columns populated by the keys.
+	'''
+	# Pull the map
+	if len(args) > 1:
+		x = args[1]
+	else:
+		x = kwargs.pop('X')
+
+	def aslist(x):
+		try: return list(x)
+		except TypeError: return list([x])
+
+	# Convert the dictionary to a list of lists
+	mat = [ aslist(k) + aslist(v) for k, v in sorted(x.iteritems()) ]
+
+	# Overwrite the input argument for the matrix
+	if len(args) > 1:
+		args = tuple(a if i != 1 else mat for i, a in enumerate(args))
+	else:
+		kwargs['X'] = mat
+
+	np.savetxt(*args, **kwargs)
+
+
 def findenumfiles(dir, prefix='.*?', suffix='', ngroups=1):
 	'''
 	Find all files in the directory dir with a name matching the regexp
