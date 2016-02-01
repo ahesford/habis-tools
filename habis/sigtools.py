@@ -973,7 +973,7 @@ class Waveform(object):
 		st, ln = self.datawin
 		envelope = self.envelope().getsignal((st, ln), forcecopy=False)
 		peaks = signal.findpeaks(envelope)
-		# Map peak and keycol indices to global window
+		# Map peak and col indices to global window
 		return [ { k: (v and (v[0] + st, v[1]) or None)
 			   for k, v in pk.iteritems() } for pk in peaks ]
 
@@ -1078,8 +1078,17 @@ class Waveform(object):
 				# Prominence of dominant peak is its height
 				prom = v
 			else:
-				width = abs(i - ki)
+				# Prominence is height above key col
 				prom = v - kv
+
+				try:
+					si, sv = pk['subcol']
+				except TypeError:
+					# Width is to key col (only one)
+					width = abs(i - ki)
+				else:
+					# Width is to closer of key and sub col
+					width = min(abs(i - ki), abs(i - si))
 
 			if width >= minwidth and prom >= minprom:
 				fpeaks.append((i, prom, width))
@@ -1089,7 +1098,7 @@ class Waveform(object):
 		if index is not None:
 			ctr, _, width = min(fpeaks, key=lambda pk: abs(pk[0] - index))
 			if maxshift is not None and abs(ctr - index) > maxshift:
-				raise ValueError('Identified peak is too far from expected location')
+				raise ValueError('Identified peak %d is too far from expected location %d' % (ctr, index))
 		else:
 			ctr, _, width = max(fpeaks, key=lambda pk: pk[1])
 
@@ -1098,7 +1107,7 @@ class Waveform(object):
 
 		# Find the first and last samples of the absolute window
 		fs = max(0, window[0] + ctr)
-		ls = min(fs + window[1], self.nsamp)
+		ls = min(window[0] + window[1] + ctr, self.nsamp)
 
 		# Window the signal around the identified peak
 		return self.window(Window(fs, end=ls), tails=tails)

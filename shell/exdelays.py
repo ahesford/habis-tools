@@ -51,10 +51,12 @@ def exdelayEngine(config):
 		if nedim != nrdim != nedim + 1:
 			raise ValueError('Reflector and element dimensionalities are incompatible')
 		# Determine one-way distances between element and reflector centers
-		# Ignore an extra dimension (wave speed) in reflector coordinates
 		dx = norm(epos[np.newaxis,:] - reflpos[:,:nedim], axis=-1)
+		# Use encoded sound speeds if possible, otherwise use global speed
+		try: lc = reflpos[:,nedim]
+		except IndexError: lc = c
 		# Convert distances to round-trip arrival times
-		times[elt] = 2 * (dx - r) / c
+		times[elt] = 2 * (dx - r) / lc
 
 	# Save the estimated arrival times
 	savekeymat(timefile, times, fmt=['%d'] + ['%16.8f']*nrefl)

@@ -456,4 +456,6 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Call the calculation engine
-	atimesEngine(config)
+	try: atimesEngine(config)
+	except Exception as e:
+		print >> sys.stderr, "Unable to complete arrival-time estimation;", e
