@@ -204,17 +204,19 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	window = kwargs.pop('window', None)
 	try:
 		window = list(window)
+		if not (1 < len(window) < 4):
+			raise ValueError('Invalid window specification')
 	except TypeError:
 		pass
 	else:
-		window[0] -= data.f2c
 		try: tails = np.hanning(2 * window[2])
 		except IndexError: tails = None
+		window = Window(window[:2])
 
 	# Pull the optional peak search criteria
 	peaks = kwargs.pop('peaks', None)
-	try: nearmap = peaks.pop('nearmap', None)
-	except (AttributeError, KeyError): nearmap = { }
+	if peaks is not None:
+		nearmap = peaks.pop('nearmap', { })
 
 	# Grab an optional delay cache
 	delaycache = kwargs.pop('delaycache', { })
@@ -238,21 +240,25 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			continue
 		except KeyError: pass
 
-		# Pull the waveform as float32
-		sig = data.getwaveform(rid, tid, dtype=np.float32)
+		# Pull the waveform as float32 and reinterpret f2c
+		sig = data.getwaveform(rid, tid)
+		dwin = sig.datawin
+		sig = Waveform(sig.nsamp + data.f2c,
+				sig.getsignal(dwin, dtype=np.float32),
+				dwin.start + data.f2c)
 		if window:
-			sig = sig.window(window[:2], tails=tails)
+			sig = sig.window(window, tails=tails)
 		if minsnr is not None and noisewin is not None:
 			if sig.snr(noisewin) < minsnr: continue
 		if peaks is not None:
 			# Isolate the peak nearest the expected location (if one exists)
-			try: exd = 0.5 * (nearmap[tid] + nearmap[rid]) - data.f2c
+			try: exd = 0.5 * (nearmap[tid] + nearmap[rid])
 			except (KeyError, IndexError): exd = None
 			try: sig = sig.isolatepeak(exd, **peaks)
 			except ValueError: continue
 		if compenv: sig = sig.envelope()
 		# Compute and record the delay
-		result[(tid, rid)] = sig.delay(ref, osamp) + data.f2c
+		result[(tid, rid)] = sig.delay(ref, osamp)
 
 	try: queue.put(result)
 	except (KeyError, AttributeError): pass

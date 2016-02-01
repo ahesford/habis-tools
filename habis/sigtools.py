@@ -1012,6 +1012,11 @@ class Waveform(object):
 		  index of the peak and the index of its key col) no less than
 		  the specified value are considered.
 
+		* maxshift: If specified, limits the maximum number of samples
+		  the peak to isolate is allowed to fall from the provided
+		  index. If the distance exceeds maxshift, a ValueError is
+		  raised. Ignored when index is None.
+
 		The highest peak, which has no key col has a width that reaches
 		to the far end of the signal's data window and a prominence
 		that equals its envelope amplitude.
@@ -1035,6 +1040,7 @@ class Waveform(object):
 		prommode = kwargs.pop('prommode', 'absolute')
 		noisewin = kwargs.pop('noisewin', 100)
 		minwidth = kwargs.pop('minwidth', 0)
+		maxshift = kwargs.pop('maxshift', None)
 
 		if len(kwargs):
 			raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
@@ -1082,6 +1088,8 @@ class Waveform(object):
 
 		if index is not None:
 			ctr, _, width = min(fpeaks, key=lambda pk: abs(pk[0] - index))
+			if maxshift is not None and abs(ctr - index) > maxshift:
+				raise ValueError('Identified peak is too far from expected location')
 		else:
 			ctr, _, width = max(fpeaks, key=lambda pk: pk[1])
 
