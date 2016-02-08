@@ -15,7 +15,7 @@ from pycwp import process
 
 from habis.formats import WaveformSet
 from habis.sigtools import Waveform
-from habis.habiconf import HabisConfigError, HabisConfigParser
+from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -209,7 +209,7 @@ def equalizerEngine(config):
 
 	try:
 		# Determine the sampling frequency
-		per = config.getfloat(ssec, 'period')
+		per = config.get(ssec, 'period', mapper=float)
 		fs = 1. / per
 	except Exception as e:
 		err = 'Configuration must specify period in [%s]' % ssec
@@ -217,7 +217,7 @@ def equalizerEngine(config):
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = config.getint('general', 'nproc',
+		nproc = config.get('general', 'nproc', mapper=int, 
 				failfunc=process.preferred_process_count)
 	except Exception as e:
 		err = 'Invalid specification of optional nproc in [general]'
@@ -225,26 +225,22 @@ def equalizerEngine(config):
 
 	try:
 		# Grab the oversampling rate and sample count (optional)
-		osamp = config.getint(ssec, 'osamp', failfunc=lambda: 1)
-		nsamp = config.getint(ssec, 'nsamp', failfunc=lambda: None)
+		osamp = config.get(ssec, 'osamp', mapper=int, default=1)
+		nsamp = config.get(ssec, 'nsamp', mapper=int, default=None)
 	except Exception as e:
 		err = 'Invalid specification of optional osamp or nsamp in [%s]' % ssec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the peak window (optional)
-		window = config.getlist(esec, 'window',
-				mapper=int, failfunc=lambda: None)
-		if window and (len(window) < 2 or len(window) > 3):
-			err = 'Window does not specify appropriate parameters'
-			raise HabisConfigError(err)
+		window = config.getlist(esec, 'window', mapper=int, default=None)
 	except Exception as e:
 		err = 'Invalid specification of optional window in [%s]' % esec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine peak-selection criteria
-		peaks = config.getlist(esec, 'peak', failfunc=lambda: None)
+		peaks = config.getlist(esec, 'peak', default=None)
 		if peaks:
 			if len(peaks) < 2 or len(peaks) > 5:
 				err = 'Peak does not specify appropriate parameters'
@@ -254,8 +250,8 @@ def equalizerEngine(config):
 				raise HabisConfigError(err)
 			# Sampling period and offset are necessary here
 			try:
-				samper = config.getfloat(ssec, 'period')
-				samoff = config.getfloat(ssec, 'offset')
+				samper = config.get(ssec, 'period', mapper=float)
+				samoff = config.get(ssec, 'offset', mapper=float)
 			except Exception as e:
 				err = 'Peak selection requires period, offset in [%s]' % ssec
 				raise HabisConfigError.fromException(err, e)
@@ -277,7 +273,7 @@ def equalizerEngine(config):
 
 	try:
 		# Grab the channels on which to pull waveforms
-		channels = config.getrange(esec, 'channels', failfunc=lambda: None)
+		channels = config.getrange(esec, 'channels', default=None)
 	except Exception as e:
 		err = 'Invalid specification of optional channels in [%s]' % esec
 		raise HabisConfigError.fromException(err, e)
@@ -334,7 +330,7 @@ if __name__ == '__main__':
 
 	# Read the configuration file
 	try:
-		config = HabisConfigParser.fromfile(sys.argv[1])
+		config = HabisConfigParser(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])

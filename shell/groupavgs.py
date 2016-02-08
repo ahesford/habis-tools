@@ -236,13 +236,13 @@ def averageEngine(config):
 		raise HabisConfigError(err)
 
 	try:
-		osamp = config.getint(avgsect, 'osamp')
+		osamp = config.get(avgsect, 'osamp', mapper=int)
 	except Exception as e:
 		err = 'Invalid specification of osamp in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		nproc = config.getint('general', 'nproc',
+		nproc = config.get('general', 'nproc', mapper=int
 				failfunc=process.preferred_process_count)
 	except Exception as e:
 		err = 'Invalid specification of optional nproc in [general]'
@@ -259,14 +259,13 @@ def averageEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		offset = config.getfloat(avgsect, 'offset', failfunc=lambda: 0)
+		offset = config.get(avgsect, 'offset', mapper=float, default=0)
 	except Exception as e:
 		err = 'Invalid specification of optional offset in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		window = config.getlist(avgsect, 'window',
-				mapper=int, failfunc=lambda:None)
+		window = config.getlist(avgsect, 'window', mapper=int, default=None)
 		if 3 < len(window) < 2:
 			err = 'Key window does not contain proper parameters'
 			raise HabisConfigError(err)
@@ -275,7 +274,7 @@ def averageEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		grouplen = config.getint(avgsect, 'grouplen')
+		grouplen = config.get(avgsect, 'grouplen', mapper=int)
 	except Exception as e:
 		err = 'Invalid specification of grouplen in [%s]' % avgsect
 		raise HabisConfigError.fromException(err, e)
@@ -304,7 +303,7 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	try: config = HabisConfigParser.fromfile(sys.argv[1])
+	try: config = HabisConfigParser(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])

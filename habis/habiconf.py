@@ -5,8 +5,10 @@ Tools for manipulating and accessing HABIS configuration files.
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import ConfigParser
 import shlex
+import yaml
+
+from itertools import izip
 
 
 def matchfiles(files, forcematch=True):
@@ -64,7 +66,7 @@ def buildpaths(files, outpath=None, extension=None):
 	return files
 
 
-class HabisConfigError(ConfigParser.Error): 
+class HabisConfigError(Exception):
 	'''
 	This generic exception is raised to identify improper HABIS configurations.
 	'''
@@ -78,72 +80,90 @@ class HabisConfigError(ConfigParser.Error):
 		return cls(str(msg) + ', underlying error: ' + str(e))
 
 
-class HabisConfigParser(ConfigParser.SafeConfigParser):
+class HabisNoOptionError(HabisConfigError):
 	'''
-	This descendant of ConfigParser.SafeConfigParser provides convenience
-	methods for manipulating and accessing HABIS configuration files.
+	This exception is raised when an option-get method is called, but the
+	option does not exist.
 	'''
-	@classmethod
-	def fromfile(cls, f, procincludes=True):
-		'''
-		Instantiate a configuration parser with contents specified in
-		f, a file-like object or string specifying a file name.
+	pass
 
-		If procincludes is True, the procincludes() method is called
-		with no arguments on the created instance. If this must be
-		customized, pass procincludes=False and call procincludes()
-		manually. The return value of procincludes() is ignored.
+
+class HabisNoSectionError(HabisConfigError):
+	'''
+	This exception is raised when an option-get method is called, but the
+	section does not exist.
+	'''
+	pass
+
+
+class HabisConfigParser(object):
+	'''
+	This provides convenience methods for manipulating and accessing HABIS
+	configuration files with an underlying YAML representation.
+
+	Dynamism is supported through an optional Mako preprocessor.
+	'''
+	def __init__(self, f=None, procincludes=True, **kwargs):
 		'''
-		# Open a named file
+		Instantiate a configuration object with contents specified in
+		f, a file-like object or string specifying a file name. If f is
+		None, create an empty configuration. If procincludes is True,
+		all entries in the 'include' directive of the 'general' section
+		will be processed, in reverse order, to populate options not
+		present in the file f.
+
+		The file contents can include Mako template commands, which
+		will be interpreted if the Mako template engine is installed.
+		All extra kwargs are passed to mako.template.Template.render().
+		'''
 		if isinstance(f, basestring): f = open(f)
 
-		# Initialize the configuration
-		config = cls()
-		config.readfp(f)
-		if procincludes:
-			config.procincludes()
-		return config
-
-
-	def procincludes(self, section='general', option='include', *args, **kwargs):
-		'''
-		Attempt to search the specified section for the named option
-		which contains a list of configuration file names. These names,
-		if found, will be read by this object in sequence to alter the
-		configuration.
-
-		Failure to find the section or option is silently ignored.
-		Failure to parse an include file is also silently ignored.
-
-		The args and kwargs are passed to self.getlist() when pulling
-		the list of names.
-		'''
-		try:
-			includes = self.getlist(section, option, *args, **kwargs)
-		except (ConfigParser.NoOptionError, ConfigParser.NoSectionError):
+		if f is None:
+			# If there is no file, just create an empty 
+			self._config = { }
 			return
 
-		# Pull includes in reverse order so later files supersede earlier ones
+		try:
+			# Otherwise, parse the file as YAML or a Mako-templated YAML
+			confbytes = f.read()
+			try:
+				from mako.template import Template
+			except ImportError:
+				if len(kwargs):
+					raise TypeError('Extra keyword arguments require the Mako template engine')
+				self._config = yaml.safe_load(confbytes)
+			else:
+				cnftmpl = Template(text=confbytes, strict_undefined=True)
+				self._config = yaml.safe_load(cnftmpl.render(**kwargs))
+		except Exception as e:
+			err = 'Unable to parse file %s' % f.name
+			raise HabisConfigError.fromException(err, e)
+
+		# Validate the two-level structure of the configuration
+		for k, v in self._config.iteritems():
+			if not (hasattr(v, 'keys') and hasattr(v, 'values')):
+				raise HabisConfigError('Section %s must be dictionary-like' % k)
+
+		if not procincludes: return
+
+		# Process the includes, if specified
+		try: includes = self.getlist('general', 'include')
+		except (HabisNoOptionError, HabisNoSectionError): return
+
 		for include in reversed(includes):
-			try: other = self.__class__.fromfile(include)
+			try: other = type(self)(include, True, **kwargs)
 			except IOError: continue
-			self.merge(other)
+			self.merge(other, overwrite=False)
 
 
 	def merge(self, other, overwrite=False):
 		'''
 		Pull the sections and options from other into self, optionally
 		overwriting existing options in self.
-
-		DEFAULT sections from included files are ignored.
-
-		Any interpolation is done before importing options to avoid
-		potentially confusing behavior as dependencies are altered.
 		'''
 		for section in other.sections():
 			# Add the section, if it does not exist
-			try: self.add_section(section)
-			except ConfigParser.DuplicateSectionError: pass
+			self.add_section(section)
 
 			for option in other.options(section):
 				if not overwrite and self.has_option(section, option):
@@ -151,97 +171,216 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 				self.set(section, option, other.get(section, option))
 
 
-	def getboolean(self, *args, **kwargs):
+	def sections(self):
 		'''
-		Overrid super.getboolean() to process failfunc argument as in
-		self.get().
+		Return the list of section names in the configuration.
+		'''
+		return self._config.keys()
 
-		*** NOTE ***
-		The output of failfunc() is not guaranteed to be a Boolean.
+
+	def has_section(self, section):
 		'''
-		failfunc = kwargs.pop('failfunc', None)
+		Check the existence of section in the configuration.
+		'''
+		return section in self._config
+
+
+	def has_option(self, section, option):
+		'''
+		Check the existing of option in the given configuration section.
+		'''
 		try:
-			return ConfigParser.SafeConfigParser.getboolean(self, *args, **kwargs)
-		except ConfigParser.NoOptionError: 
-			if failfunc is not None: return failfunc()
-			raise
+			return option in self._config[section]
+		except KeyError:
+			raise HabisNoSectionError('The section %s does not exist' % section)
 
 
-	def getlist(self, *args, **kwargs):
+	def options(self, section):
 		'''
-		Read the string value for the provided section and option, then
-		return map(mapper, shlex.split(value, comments=True)) for
-		mapper=kwargs['mapper'] (or None if the kwarg does not exist).
-
-		The args and kwargs are passed through to self.get()
+		Return the list of options for a given section.
 		'''
-		mapper = kwargs.pop('mapper', None)
-		# Handle failfunc here to avoid processing failfunc() output
-		failfunc = kwargs.pop('failfunc', None)
-
 		try:
-			value = self.get(*args, **kwargs)
-		except ConfigParser.NoOptionError:
-			if failfunc is not None: return failfunc()
-			raise
-
-		return map(mapper, shlex.split(value, comments=True))
+			return self._config[section].keys()
+		except KeyError:
+			raise HabisNoSectionError('The section %s does not exist' % section)
 
 
-	def get(self, *args, **kwargs):
+	def add_section(self, section):
 		'''
-		Attempt to return super.get(*args, **kwargs).
-
-		If kwargs contains a 'failfunc' argument, and the get raises
-		ConfigParser.NoOptionError, return the result of failfunc().
+		If section exists in the current configuration, do nothing.
+		Otherwise, create an empty section with the specified name.
 		'''
-		failfunc = kwargs.pop('failfunc', None)
+		if section not in self._config:
+			self._config[section] = { }
 
+
+	def set(self, section, option, value):
+		'''
+		Associates the given value with the given section and option.
+		'''
 		try:
-			return ConfigParser.SafeConfigParser.get(self, *args, **kwargs)
-		except ConfigParser.NoOptionError:
-			if failfunc is not None: return failfunc()
-			raise
+			self._config[section][option] = value
+		except KeyError:
+			raise HabisNoSectionError('The section %s does not exist' % section)
 
 
-	def getint(self, *args, **kwargs):
+	def _get_optargs(self, *args, **kwargs):
 		'''
-		Override super.getint() to process a failfunc argument as in
-		self.get(). 
-		
-		*** NOTE ***
-		The output of failfunc() is not guaranteed to be an int.
+		Helper function to process the args and kwargs for "mapper",
+		"default", "failfunc", and "checkmap" arguments. Returns a
+		dictionary with keys corresponding to these argument names when
+		specified.
 		'''
-		failfunc = kwargs.pop('failfunc', None)
+		optargs = { }
 
-		try:
-			return ConfigParser.SafeConfigParser.getint(self, *args, **kwargs)
-		except ConfigParser.NoOptionError:
-			if failfunc is not None: return failfunc()
-			raise
-
-
-	def getfloat(self, *args, **kwargs):
-		'''
-		Override super.getfloat() to process a failfunc argument as in
-		self.get().
-		
-		*** NOTE ***
-		The output of failfunc() is not guaranteed to be a float.
-		'''
-		failfunc = kwargs.pop('failfunc', None)
+		if len(args) + len(kwargs) > 4:
+			raise TypeError('Total number of arguments must not exceed 4')
 
 		try:
-			return ConfigParser.SafeConfigParser.getfloat(self, *args, **kwargs)
-		except ConfigParser.NoOptionError:
-			if failfunc is not None: return failfunc()
-			raise
+			optargs['mapper'] = args[0]
+		except IndexError:
+			try: optargs['mapper'] = kwargs.pop('mapper')
+			except KeyError: pass
+
+		try:
+			optargs['default'] = args[1]
+		except IndexError:
+			try: optargs['default'] = kwargs.pop('default')
+			except KeyError: pass
+
+		try:
+			optargs['failfunc'] = args[2]
+		except IndexError:
+			try: optargs['failfunc'] = kwargs.pop('failfunc')
+			except KeyError: pass
+
+		if 'failfunc' in optargs and 'default' in optargs:
+			raise TypeError('Arguments "default" and "failfunc" are mutually exclusive')
+
+		try:
+			optargs['checkmap'] = args[3]
+		except IndexError:
+			try: optargs['checkmap'] = kwargs.pop('checkmap')
+			except KeyError: pass
+
+		if len(kwargs):
+			raise TypeError('Unrecognized keyword argument %s' % kwargs.iterkeys().next())
+
+		return optargs
 
 
-	def getrange(self, *args, **kwargs):
+	def get(self, section, option, *args, **kwargs):
 		'''
-		Parse and return a configured range or explicit list of
-		integers from the provided section and option.
+		Return the value associated with the given option in the given
+		section. The section must exist.
+
+		The args and kwargs can contain the following three additional
+		arguments (this order is expected for args):
+
+		* mapper: If provided, return mapper(value) if value exists.
+		* default: If provided, return default if value does not exist.
+		* failfunc: If provided, call failfunc() if value does not
+		  exist. Must not be specified if default is specified.
+		* checkmap: If True (default) , and mapper is provided, an
+		  error is raised if mapper(value) != value. If False, this
+		  check is not performed.
+
+		If a value is not found, the mapper and failfunc arguments are
+		ignored regardless of any default or failfunc arguments.
+		'''
+		try:
+			sec = self._config[section]
+		except KeyError:
+			raise HabisNoSectionError('The section %s does not exist' % section)
+
+		# Process the optional arguments
+		optargs = self._get_optargs(*args, **kwargs)
+
+		try:
+			val = sec[option]
+		except KeyError:
+			try:
+				return optargs['default']
+			except KeyError:
+				try: return optargs['failfunc']()
+				except KeyError: pass
+			# Fall through to failure with no default or failfunc
+			raise HabisNoOptionError('Option %s does not exist in section %s' % (option, section))
+
+		# Return an appropriately mapped value
+		try: mval = optargs['mapper'](val)
+		except KeyError: return val
+
+		# Ensure that the mapped value conforms to expectations
+		if optargs.get('checkmap', True) and mval != val:
+			raise TypeError('Option is not of the prescribed type')
+
+		return mval
+
+
+	def getlist(self, section, option, *args, **kwargs):
+		'''
+		Behaves exactly like self.get(section, option), but ensures
+		that the returned value (if it exists) is a list.
+
+		If the value stored in the given section and option is a
+		string, it will be split using shlex.split() to produce the
+		return list. Otherwise, the value identified by
+		self.get(section, option) should be a native list.
+
+		Optional arguments to get() are consumed by this function to
+		override default behavior.
+
+		The "mapper" and "checkmap" options behave as in get(), except
+		they apply to each element in the list individually rather than
+		to the list as a whole.
+
+		The "default" and "failfunc" options behave exactly as in
+		get(). These default values are not guaranteed to be lists.
+		'''
+		# Process optional arguments
+		optargs = self._get_optargs(*args, **kwargs)
+
+		try:
+			val = self.get(section, option)
+		except HabisNoOptionError as e:
+			try:
+				return optargs['default']
+			except KeyError:
+				try: return optargs['failfunc']()
+				except KeyError: pass
+			raise e
+
+		if (hasattr(val, 'keys') or hasattr(val, 'values')):
+			raise TypeError('Option is dictionary-like rather than list-like')
+
+		# Split a string into a list
+		if isinstance(val, basestring):
+			val = shlex.split(val, comments=True)
+
+		try: mapper = optargs['mapper']
+		except KeyError: return val
+
+		# Map the items of the list
+		mval = [mapper(v) for v in val]
+
+		# Ensure that types are right
+		if (optargs.get('checkmap', True) and
+				any(v != mv for v, mv in izip(val, mval))):
+			raise TypeError('List items are not of the prescribed type')
+
+		return mval
+
+
+	def getrange(self, section, option, *args, **kwargs):
+		'''
+		Parse a value for the given section and option as either a
+		range or an explicit list of integers. The value is fetched
+		using self.get(section, option).
+
+		The "mapper" and "checkmap" arguments are not supported.
+		Optional arguments "default" and "failfunc" are consumed by
+		this function and behave as they do with self.getlist().
 
 		A configured range is specifed as a value
 
@@ -251,21 +390,34 @@ class HabisConfigParser(ConfigParser.SafeConfigParser):
 		range(). The ints are processed by int(), so non-integer
 		arguments will be clipped instead of throwing a TypeError.
 
+		If an explicit list of integers is desired, the value should
+		take the form
+
+			int1 [...]
+
+		Again, int() will be used to convert non-integer arguments.
+
 		The function shlex.split(value, comments=True) is used to parse
 		the value string.
-
-		The args and kwargs are passed through to self.get()
 		'''
-		# Process failfunc here to avoid parsing its output
-		failfunc = kwargs.pop('failfunc', None)
+		# Process optional arguments
+		optargs = self._get_optargs(*args, **kwargs)
+
+		if 'mapper' in optargs or 'checkmap' in kwargs:
+			raise TypeError("Arguments 'mapper' and 'checkmap' are not supported")
+
 		try:
-			value = self.get(*args, **kwargs)
-		except ConfigParser.NoOptionError:
-			if failfunc is not None: return failfunc()
-			raise
+			# Grab the value explicitly as a string
+			val = self.get(section, option, mapper=str)
+		except HabisNoOptionError as e:
+			try:
+				return optargs['default']
+			except KeyError:
+				try: return optargs['failfunc']()
+				except KeyError: pass
+			raise e
 
-		items = shlex.split(value, comments=True)
-
+		items = shlex.split(val, comments=True)
 		if len(items) < 1: return []
 
 		if items[0].lower() == 'range':

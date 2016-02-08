@@ -127,14 +127,14 @@ def trilaterationEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		outelements = config.get(tsec, 'outelements', failfunc=lambda: None)
+		outelements = config.get(tsec, 'outelements', default=None)
 	except Exception as e:
 		err = 'Invalid specification of optional outelements in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = config.getint('general', 'nproc',
+		nproc = config.get('general', 'nproc', mapper=int,
 				failfunc=process.preferred_process_count)
 	except Exception as e:
 		err = 'Invalid specification of optional nproc in [general]'
@@ -142,43 +142,43 @@ def trilaterationEngine(config):
 
 	try:
 		# Grab the sound speed and radius
-		c = config.getfloat(msec, 'c')
-		radius = config.getfloat(msec, 'radius')
+		c = config.get(msec, 'c', mapper=float)
+		radius = config.get(msec, 'radius', mapper=float)
 	except Exception as e:
 		err = 'Configuration must specify c and radius in [%s]' % msec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Grab the convergence tolerance
-		tol = config.getfloat(tsec, 'tolerance', failfunc=lambda: 1e-6)
+		tol = config.get(tsec, 'tolerance', mapper=float, default=1e-6)
 	except Exception as e:
 		err = 'Invalid specification of optional tolerance in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine whether variable sound speeds are allowed
-		varc = config.getboolean(tsec, 'varc', failfunc=lambda: False)
+		varc = config.get(tsec, 'varc', mapper=bool, default=False)
 	except Exception as e:
 		err = 'Invalid specification of optional varc in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Pull the facet (coplanar element groups) size
-		fctsize = config.getint(tsec, 'fctsize', failfunc=lambda: 1)
+		fctsize = config.get(tsec, 'fctsize', mapper=int, default=1)
 	except Exception as e:
 		err = 'Invalid specification of optional fctsize in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Pull the maximum iteration count
-		maxiter = config.getint(tsec, 'maxiter', failfunc=lambda: 1)
+		maxiter = config.get(tsec, 'maxiter', mapper=int, default=1)
 	except Exception as e:
 		err = 'Invalid specification of optional maxiter in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Pull the itereation stop distance
-		stopdist = config.getfloat(tsec, 'stopdist', failfunc=lambda: 0)
+		stopdist = config.get(tsec, 'stopdist', mapper=float, default=0)
 	except Exception as e:
 		err = 'Invalid specification of optional stopdist in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
@@ -275,7 +275,7 @@ if __name__ == '__main__':
 
 	# Read the configuration file
 	try:
-		config = HabisConfigParser.fromfile(sys.argv[1])
+		config = HabisConfigParser(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])

@@ -14,9 +14,9 @@ from collections import OrderedDict
 
 from pycwp import process, stats
 from habis import trilateration
-from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles, buildpaths
+from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat, savekeymat
-from habis.sigtools import Waveform
+from habis.sigtools import Waveform, Window
 
 
 def usage(progname):
@@ -138,15 +138,40 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  pair (t, r), the precomputed value will be used in favor of explicit
 	  computation.
 
-	* window: If not None, should be a (start, length, [tailwidth]) tuple
-	  of ints that specifies a temporal window applied to each waveform
-	  before delay analysis. The start should be relative to 0
-	  fire-to-capture delay; the actual window used will be
+	* window: If not None, should be a dictionary containing exactly two of
+	  the keys 'start', 'length' or 'end' that specify integer values
+	  corresponding to the start, length or end of a temporal window
+	  applied to each waveform before delay analysis.
 
-	  	(start - datafile.f2c, length, [tailwidth]).
+	  Two additional keys may be included in the dictionary:
+	  
+	  - tails: A value passed to the 'tails' argument of the method
+	    Waveform.window(), and is either 1) an integer half-width of a Hann
+	    window applied to each side, or 2) a list consisting of the
+	    concatenation of the start-side and end-side window profiles.
 
-	  The optional tailwidth specifies the half-width of a Hann window
-	  passed as the tails argument to Waveform.window.
+	  - relative: A string that is either 'acquisition' or 'datawin'.
+	    Without specifying 'relative', the window start and end are always
+	    specified relative to 0 f2c, and the the applied window becomes:
+
+	      start -> start - datafile.f2c
+	      end   -> end - datafile.f2c
+
+	    If 'relative' is 'acquisition', the start and end are always
+	    specified relative to the datafile acquisition window, and the
+	    applied window becomes:
+
+	      start -> start
+	      end   -> end + datafile.nsamp
+
+	    If 'relative' is 'datawin', the start and end are always specified
+	    relative to the data window for each signal in the datafile, and
+	    the applied window becomes:
+
+	      start -> start + signal.datawin.start
+	      end   -> end + signal.datawin.end
+
+	    Any 'length' parameter is unchanged regardless of 'relative'.
 
 	* minsnr: If not none, should be a sequence (mindb, noisewin) used to
 	  define the minimum acceptable SNR in dB (mindb) by comparing the peak
@@ -200,18 +225,27 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	t, r = len(txelts), len(rxelts)
 
-	# Pull the window and compute optional tails
-	window = kwargs.pop('window', None)
 	try:
-		window = list(window)
-		if not (1 < len(window) < 4):
-			raise ValueError('Invalid window specification')
-	except TypeError:
-		pass
+		# Pull a copy of the windowing configuration
+		window = dict(kwargs.pop('window'))
+	except KeyError:
+		window, relwin = None, None
 	else:
-		try: tails = np.hanning(2 * window[2])
-		except IndexError: tails = None
-		window = Window(window[:2])
+		tails = window.pop('tails', 0)
+		relwin = window.pop('relative', None)
+
+		if relwin is 'acquisition':
+			# Acquisition-relative windows should be shifted to 0 f2c
+			try: window['start'] += data.f2c
+			except KeyError: pass
+			try: window['end'] += data.f2c + data.nsamp
+			except KeyError: pass
+		elif relwin not in { None, 'datawin' }:
+			raise ValueError("Parameter 'relative' must be absent or one of 'acquisition' or 'datawin'")
+
+		# Only the datawin-relative windows are not static at this point
+		relwin = (relwin == 'datawin')
+		if not relwin: window = Window(**window)
 
 	# Pull the optional peak search criteria
 	peaks = kwargs.pop('peaks', None)
@@ -229,9 +263,13 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	# Compute the strided results
 	result = { }
+
+	# Cache a receive-channel record for faster access
+	hdr, wforms = None, None
+
 	for idx in range(start, t * r, stride):
-		# Find the transmit and receive indices
-		i, j = np.unravel_index(idx, (t, r), 'C')
+		# Find the transmit and receive indices (vary transmit most rapidly)
+		i, j = np.unravel_index(idx, (t, r), 'F')
 		tid, rid = txelts[i], rxelts[j]
 
 		try:
@@ -240,14 +278,29 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			continue
 		except KeyError: pass
 
-		# Pull the waveform as float32 and reinterpret f2c
-		sig = data.getwaveform(rid, tid)
-		dwin = sig.datawin
-		sig = Waveform(sig.nsamp + data.f2c,
-				sig.getsignal(dwin, dtype=np.float32),
-				dwin.start + data.f2c)
-		if window:
-			sig = sig.window(window, tails=tails)
+		# Use a cached receive-channel block if possible
+		try: lidx = hdr.idx
+		except (TypeError, AttributeError): lidx = None
+		if lidx != rid:
+			# Pull the waveforms for the whole transmit set
+			hdr, wforms = data.getrecord(rid, tid=txelts)
+
+		# Grab the raw waveform data on expanded (0 f2c) window
+		sig = Waveform(data.nsamp + data.f2c,
+				wforms[i].astype(np.float32), hdr.win.start + data.f2c)
+
+		# Pull the waveform as float32
+		sig = data.getwaveform(rid, tid, dtype=np.float32)
+		if window is not None:
+			if relwin:
+				dwin = sig.datawin
+				rwin = dict(window)
+				try: rwin['start'] += sig.datawin.start
+				except KeyError: pass
+				try: rwin['end'] += sig.datawin.end
+				except KeyError: pass
+				sig = sig.window(Window(*rwin), tails)
+			else: sig = sig.window(window, tails)
 		if minsnr is not None and noisewin is not None:
 			if sig.snr(noisewin) < minsnr: continue
 		if peaks is not None:
@@ -261,7 +314,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		result[(tid, rid)] = sig.delay(ref, osamp)
 
 	try: queue.put(result)
-	except (KeyError, AttributeError): pass
+	except AttributeError: pass
 
 	return result
 
@@ -281,7 +334,7 @@ def atimesEngine(config):
 
 	try:
 		# Read all target input lists
-		targets = sorted(k for k, v in config.items(asec) if k.startswith('target'))
+		targets = sorted(k for k in config.options(asec) if k.startswith('target'))
 		targetfiles = OrderedDict()
 		for target in targets:
 			targetfiles[target] = matchfiles(config.getlist(asec, target))
@@ -308,7 +361,7 @@ def atimesEngine(config):
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = config.getint('general', 'nproc',
+		nproc = config.get('general', 'nproc', mapper=int, 
 				failfunc=process.preferred_process_count)
 	except Exception as e:
 		err = 'Invalid specification of optional nproc in [general]'
@@ -316,62 +369,59 @@ def atimesEngine(config):
 
 	try:
 		# Determine the sampling period and a global temporal offset
-		dt = config.getfloat(ssec, 'period')
-		t0 = config.getfloat(ssec, 'offset')
+		dt = config.get(ssec, 'period', mapper=float)
+		t0 = config.get(ssec, 'offset', mapper=float)
 	except Exception as e:
 		err = 'Configuration must specify period and offset in [%s]' % ssec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		osamp = config.getint(ssec, 'osamp', failfunc=lambda: 1)
+		osamp = config.get(ssec, 'osamp', mapper=int, default=1)
 	except Exception as e:
 		err = 'Invalid specification of optional osamp in [%s]' % ssec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine the range of elements to use; default to all (as None)
-		kwargs['txelts'] = config.getrange(asec, 'txelts', failfunc=lambda: None)
-		kwargs['rxelts'] = config.getrange(asec, 'rxelts', failfunc=lambda: None)
+		try: kwargs['txelts'] = config.getrange(asec, 'txelts')
+		except HabisNoOptionError: pass
+		try: kwargs['rxelts'] = config.getrange(asec, 'rxelts')
+		except HabisNoOptionError: pass
 	except Exception as e:
 		err = 'Invalid specification of optional txelts, rxelts in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine the range of elements to use; default to all (as None)
-		kwargs['minsnr'] = config.getlist(asec, 'minsnr', 
-				mapper=int, failfunc=lambda: None)
-		if kwargs['minsnr'] and len(kwargs['minsnr']) != 2:
-			err = 'SNR specification does not specify appropriate parameters'
-			raise HabisConfigError(err)
+		kwargs['minsnr'] = config.getlist(asec, 'minsnr', mapper=int)
+	except HabisNoOptionError:
+		pass
 	except Exception as e:
 		err = 'Invalid specification of optional minsnr in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine a temporal window to apply before finding delays
-		kwargs['window'] = config.getlist(asec, 'window',
-				mapper=int, failfunc=lambda: None)
-		if kwargs['window'] and not (2 <= len(kwargs['window']) <= 3):
-			err = 'Window does not specify appropriate parameters'
-			raise HabisConfigError(err)
+		kwargs['window'] = config.get(asec, 'window')
+	except HabisNoOptionError:
+		pass
 	except Exception as e:
 		err = 'Invalid specification of optional window in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine peak-selection criteria
-		peaks = config.get(asec, 'peaks', failfunc = lambda: None)
-		if peaks:
-			import yaml
-			kwargs['peaks'] = yaml.safe_load(peaks)
+		peaks = config.get(asec, 'peaks')
+	except HabisNoOptionError:
+		pass
 	except Exception as e:
 		err = 'Invalid specification of optional peaks in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
-	usediag = config.getboolean(asec, 'usediag', failfunc=lambda: False)
-	maskoutliers = config.getboolean(asec, 'maskoutliers', failfunc=lambda: False)
-	kwargs['compenv'] = config.getboolean(asec, 'compenv', failfunc=lambda: False)
-	cachedelay = config.getboolean(asec, 'cachedelay', failfunc=lambda: True)
+	usediag = config.get(asec, 'usediag', mapper=bool, default=False)
+	maskoutliers = config.get(asec, 'maskoutliers', mapper=bool, default=False)
+	kwargs['compenv'] = config.get(asec, 'compenv', mapper=bool, default=False)
+	cachedelay = config.get(asec, 'cachedelay', mapper=bool, default=True)
 
 	try:
 		# Remove the nearmap file key
@@ -449,7 +499,7 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	try: config = HabisConfigParser.fromfile(sys.argv[1])
+	try: config = HabisConfigParser(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])

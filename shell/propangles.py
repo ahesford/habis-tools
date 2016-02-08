@@ -87,7 +87,7 @@ def propanglesEngine(config):
 
 	try:
 		# Determine whether to use surface or center distances
-		useradius = not config.getboolean(psec, 'centers', failfunc=lambda: True)
+		useradius = not config.get(psec, 'centers', mapper=bool, default=True)
 	except Exception as e:
 		err = 'Invalid specification of optional centers in [%s]' % psec
 		raise HabisConfigError.fromException(err, e)
@@ -95,7 +95,7 @@ def propanglesEngine(config):
 	if useradius: 
 		# Grab the reflector radius if necessary
 		try:
-			radius = config.getfloat(msec, 'radius')
+			radius = config.get(msec, 'radius', mapper=float)
 		except Exception as e:
 			err = 'Configuration must specify radius in [%s]' % msec
 			raise HabisConfigError.fromException(err, e)
@@ -144,7 +144,7 @@ if __name__ == '__main__':
 
 	# Read the configuration file
 	try:
-		config = HabisConfigParser.fromfile(sys.argv[1])
+		config = HabisConfigParser(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])

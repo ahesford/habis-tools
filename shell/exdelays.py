@@ -33,8 +33,8 @@ def exdelayEngine(config):
 
 	# Grab the sound speed and reflector radius
 	try:
-		c = config.getfloat(msection, 'c')
-		r = config.getfloat(msection, 'radius')
+		c = config.get(msection, 'c', mapper=float)
+		r = config.get(msection, 'radius', mapper=float)
 	except Exception as e: 
 		err = 'Configuration must specify c and radius in [%s]' % msection
 		raise HabisConfigError.fromException(err, e)
@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
 	# Read the configuration file
 	try:
-		config = HabisConfigParser.fromfile(sys.argv[1])
+		config = HabisConfigParser(sys.argv[1])
 	except:
 		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
 		usage(sys.argv[0])
