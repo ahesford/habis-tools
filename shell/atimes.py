@@ -23,24 +23,6 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def validatechans(wset, rxelts=None, txelts=None):
-	'''
-	Validate the contents of rxelts and txelts. If rxelts is not specified,
-	populate it with sorted(wset.rxidx). If txelts is not specified,
-	populate it with rxelts. Returns (rxelts, txelts).
-	'''
-	if rxelts is None: rxelts = sorted(wset.rxidx)
-	else: rxelts = sorted(set(rxelts).intersection(wset.rxidx))
-
-	# Pull the txelts list
-	if txelts is None: txelts = list(rxelts)
-
-	if not set(txelts).issubset(wset.txidx):
-		raise ValueError('Transmit-channel list contains elements not in data file')
-
-	return rxelts, txelts
-
-
 def finddelays(nproc=1, *args, **kwargs):
 	'''
 	Distribute, among nproc processes, delay analysis for waveforms using
@@ -202,6 +184,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  is populated by sorted(datafile.rxidx). When txelts is None or
 	  unspecified, it defaults to rxelts.
 
+	* usediag: If True, only calculate the diagonal portion of the delay
+	  matrix. Incompatible with txelts != None.
+
 	* compenv: If True, delay analysis will proceed on signal and reference
 	  envelopes. If false, delay analysis uses the original signals.
 
@@ -213,8 +198,23 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	ref = Waveform.fromfile(reffile)
 
 	# Determine the elements to include in the delay matrix
-	rxelts, txelts = validatechans(data,
-			kwargs.pop('rxelts', None), kwargs.pop('txelts', None))
+	rxelts, txelts = kwargs.pop('rxelts', None), kwargs.pop('txelts', None)
+	usediag = kwargs.pop('usediag', None)
+
+	if txelts is not None and usediag:
+		raise ValueError('Specification of txelts != None and usediag == True is incompatible')
+
+	if rxelts is None: rxelts = sorted(wset.rxidx)
+	else: rxelts = sorted(set(rxelts).intersection(wset.rxidx))
+
+	# Pull the txelts list
+	if txelts is None: txelts = list(rxelts)
+
+	if not set(txelts).issubset(wset.txidx):
+		raise ValueError('Transmit-channel list contains elements not in data file')
+
+	r = len(rxelts)
+	t = len(txelts) if not usediag else 1
 
 	# Use envelopes for delay analysis if desired
 	compenv = kwargs.pop('compenv', False)
@@ -222,8 +222,6 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	# Unpack minimum SNR requirements
 	minsnr, noisewin = kwargs.pop('minsnr', (None, None))
-
-	t, r = len(txelts), len(rxelts)
 
 	try:
 		# Pull a copy of the windowing configuration
@@ -269,7 +267,11 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	for idx in range(start, t * r, stride):
 		# Find the transmit and receive indices (vary transmit most rapidly)
-		i, j = np.unravel_index(idx, (t, r), 'F')
+		if not usediag:
+			i, j = np.unravel_index(idx, (t, r), 'F')
+		else:
+			i, j = idx, idx
+
 		tid, rid = txelts[i], rxelts[j]
 
 		try:
@@ -418,8 +420,8 @@ def atimesEngine(config):
 		err = 'Invalid specification of optional peaks in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
-	usediag = config.get(asec, 'usediag', mapper=bool, default=False)
 	maskoutliers = config.get(asec, 'maskoutliers', mapper=bool, default=False)
+	kwargs['usediag'] = config.get(asec, 'usediag', mapper=bool, default=False)
 	kwargs['compenv'] = config.get(asec, 'compenv', mapper=bool, default=False)
 	cachedelay = config.get(asec, 'cachedelay', mapper=bool, default=True)
 
@@ -467,7 +469,7 @@ def atimesEngine(config):
 				# Remove outlying values from the delay dictionary
 				delays = stats.mask_outliers(delays)
 
-			if not usediag:
+			if not kwargs.get('usediag', False):
 				# Prepare the arrival-time finder
 				atf = trilateration.ArrivalTimeFinder(delays)
 				# Compute the optimized times for this data file
