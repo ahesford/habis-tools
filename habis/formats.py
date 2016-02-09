@@ -649,7 +649,7 @@ class WaveformSet(object):
 		if not append:
 			# Encode the magic number, file version and datatype
 			typecode = self.typecodes.inverse[np.dtype(self.dtype).name][0]
-			hbytes = struct.pack('<4s2I2s', 'WAVE', major, minor, typecode) 
+			hbytes = struct.pack('<4s2I2s', 'WAVE', major, minor, typecode)
 
 			# Encode common transmission parameters
 			hbytes += struct.pack('<4I', self.f2c, self.nsamp, self.nrx, self.ntx)
@@ -801,7 +801,7 @@ class WaveformSet(object):
 			else:
 				try: px, py, pz, ws, wl = funpack('<3f2I')
 				except struct.error: break
-				txgrp = None 
+				txgrp = None
 
 			# Build the channel header
 			hdr = (idx, (px, py, pz), (ws, wl), txgrp)
@@ -825,7 +825,7 @@ class WaveformSet(object):
 		import warnings
 
 		if f.tell() != fsrec:
-			warnings.warn('Junk at end of file') 
+			warnings.warn('Junk at end of file')
 
 		if nrx and self.nrx != nrx:
 			raise ValueError('Header specifies %d records, but read %d' % (nrx, self.nrx))
@@ -906,7 +906,7 @@ class WaveformSet(object):
 			if any(txi >= maxtx for txi in txidx):
 				raise ValueError('Transmit indices must be compatible with transmit groups')
 
-		self._txmap = OrderedDict((_strict_nonnegative_int(tx), i) 
+		self._txmap = OrderedDict((_strict_nonnegative_int(tx), i)
 				for i, tx in enumerate(txidx))
 
 
@@ -1082,18 +1082,21 @@ class WaveformSet(object):
 			tcidx = self.tx2row(tid)
 			singletx = True
 
-		# If the data is not changed, just return a view of the waveforms
-		if window is None and dtype is None:
-			return hdr, waveforms[tcidx,:]
-
-		# Pull an unspecified output window from the header
 		if window is None:
-			window = hdr.win
-		else:
-			from .sigtools import Window
-			window = Window(window)
+			if dtype is None:
+				# With no type override, just return a view
+				return hdr, waveforms[tcidx,:]
+			else:
+				# Force a type conversion and copy
+				if dtype == 0:
+					dtype = waveforms.dtype
+				return hdr, waveforms[tcidx,:].astype(dtype, copy=True)
 
-		# Pull an unspecified data type from the waveforms
+		# Handle a specific data window
+		from .sigtools import Window
+		window = Window(window)
+
+		# Handle unspecified data types
 		if dtype is None or dtype == 0:
 			dtype = waveforms.dtype
 
