@@ -25,7 +25,7 @@ def specwin(nsamp, freqs=None):
 	if step != 1:
 		raise ValueError('Frequency range must specify consecutive values')
 
-	return Window(fs, end=fe)
+	return Window(fs, end=fe, nonneg=True)
 
 
 def usage(progname=None, fatal=False):

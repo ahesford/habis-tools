@@ -25,35 +25,78 @@ class Window(tuple):
 	'''
 	def __new__(cls, *args, **kwargs):
 		'''
-		Create a new instance of Window.
+		Create a new Window instance.
+
+		If exactly one positional argument is specified (and no keyword
+		arguments except an optional 'nonneg'), it must either be a
+		sequence of the form (start, length), or a dictionary-like map
+		with exactly two keys 'start', 'length', or 'end'.
+
+		If exactly two arguments (positional or keyword) are supplied
+		apart from an optional 'nonneg' keyword-only argument, the
+		first positional argument is the start and the second
+		positional argument is the length. Missing positional arguments
+		are populated from the keyword arguments.
+
+		No more than two arguments apart from the optional 'nonneg'
+		can be specified.
+
+		If the keyword 'nonneg' is provided, it should be Boolean.
+		When True, the start of the window is required to be positive.
+		When False (the default), the start may be negative.
 		'''
+		# Remove nonneg from argument consideration
+		nonneg = kwargs.pop('nonneg', False)
+
+		if len(args) == 1 and len(kwargs) == 0:
+			try:
+				# Expand the positional tuple as kwargs
+				kwargs = dict(args[0])
+			except TypeError:
+				try:
+					# Expand the positional tuple
+					args = tuple(args[0])
+				except TypeError:
+					raise TypeError('Single positional argument must be a sequence or dictionary')
+			else:
+				# For successful expansion to kwargs, clear args
+				args = ()
+
 		if len(args) + len(kwargs) != 2:
-			raise ValueError('Exactly two arguments must be specified')
+			raise TypeError("Exactly two arguments must be specified apart from optional 'nonneg'")
 
 		start = kwargs.pop('start', None)
 		length = kwargs.pop('length', None)
 		end = kwargs.pop('end', None)
 
 		if len(kwargs) > 0:
-			raise ValueError('Unrecognized keyword arguments')
+			raise TypeError('Unrecognized keyword argument %s' % kwargs.iteritems().next())
 
 		if len(args) > 0:
 			if start is not None:
-				raise ValueError('Window start cannot be positional and keyword argument')
+				raise TypeError('Window start cannot be positional and keyword argument')
 			start = args[0]
 		if len(args) > 1:
 			# Must be None because kwargs would have been empty
 			length = args[1]
 
 		# Fill in missing values
-		if start is None:
-			start = end - length
-		elif length is None:
-			length = end - start
+		try:
+			if start is None: start = end - length
+			elif length is None: length = end - start
+		except TypeError:
+			raise ValueError("Window start, length and end must be integers")
 
 		from .formats import _strict_nonnegative_int, _strict_int
-		start = _strict_int(start)
-		length = _strict_nonnegative_int(length)
+
+		try:
+			if nonneg: start = _strict_nonnegative_int(start)
+			else: start = _strict_int(start)
+			length = _strict_nonnegative_int(length)
+		except (ValueError, TypeError):
+			raise ValueError('Window start and length must be integers '
+						'and satisfy nonnegativity requirements')
+
 		return tuple.__new__(cls, (start, length))
 
 	@property
@@ -170,13 +213,13 @@ class Waveform(object):
 		A 2-tuple of the form (start, length) that specifies the
 		explicitly stored (nonzero) portion of the waveform.
 		'''
-		try: return Window(self._datastart, len(self._data))
+		try: return Window(self._datastart, len(self._data), nonneg=True)
 		except (TypeError, AttributeError): return Window(0, 0)
 
 
 	@datawin.setter
 	def datawin(self, value):
-		value = Window(*value)
+		value = Window(value, nonneg=True)
 		if value.end > self.nsamp:
 			raise ValueError('Specified window is not contained in Waveform')
 
@@ -350,7 +393,7 @@ class Waveform(object):
 		else:
 			cstart = min(dwin.start, owin.start)
 			cend = max(dwin.end, owin.end)
-		cwin = Window(cstart, end=cend)
+		cwin = Window(cstart, end=cend, nonneg=True)
 
 		# Grab other signal over common window (avoid copies if possible)
 		osig = other.getsignal(cwin, forcecopy=False)
@@ -493,7 +536,7 @@ class Waveform(object):
 		always be a new copy.
 		'''
 		if window is None: window = (0, self.nsamp)
-		window = Window(*window)
+		window = Window(window)
 
 		dwin = self.datawin
 
@@ -585,7 +628,7 @@ class Waveform(object):
 			window = dict(window)
 		except TypeError:
 			# If the window is not a dictionary, just make a Window object
-			window = Window(*window)
+			window = Window(window)
 			if relative is not None:
 				raise ValueError('Argument relative must be None if window is not dictionary-like')
 		else:
@@ -601,7 +644,7 @@ class Waveform(object):
 			elif relative is not None:
 				raise ValueError("Argument relative must be one of None, 'signal', or 'datawin'")
 			# Create the window
-			window = Window(**window)
+			window = Window(window)
 
 		tails = np.asarray(tails)
 		if tails.ndim < 1:
@@ -709,7 +752,7 @@ class Waveform(object):
 		a complex type and True otherwise.
 		'''
 		if window is None: window = (0, self.nsamp)
-		window = Window(*window)
+		window = Window(window)
 
 		if real is None: real = self.isReal
 

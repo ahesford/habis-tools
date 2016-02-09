@@ -16,7 +16,7 @@ from pycwp import process, stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat, savekeymat
-from habis.sigtools import Waveform, Window
+from habis.sigtools import Waveform
 
 
 def usage(progname):
@@ -255,6 +255,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Cache a receive-channel record for faster access
 	hdr, wforms = None, None
 
+	# Extend the overall acquisition window back to 0 f2c
+	nsamp = data.nsamp + data.f2c
+
 	for idx in range(start, t * r, stride):
 		# Find the transmit and receive indices (vary transmit most rapidly)
 		if not usediag:
@@ -275,11 +278,10 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		except (TypeError, AttributeError): lidx = None
 		if lidx != rid:
 			# Pull the waveforms for the whole transmit set
-			hdr, wforms = data.getrecord(rid, tid=txelts)
+			hdr, wforms = data.getrecord(rid, tid=txelts, dtype=np.float32)
 
 		# Grab the raw waveform data on expanded (0 f2c) window
-		sig = Waveform(data.nsamp + data.f2c,
-				wforms[i].astype(np.float32), hdr.win.start + data.f2c)
+		sig = Waveform(nsamp, wforms[i], hdr.win.start + data.f2c)
 
 		if window is not None:
 			sig = sig.window(window, **winargs)

@@ -332,7 +332,8 @@ class RxChannelHeader(tuple):
 		idx = _strict_nonnegative_int(idx)
 		px, py, pz = pos
 		pos = tuple(float(p) for p in (px, py, pz))
-		win = Window(*win)
+		# Force the window start to be nonnegative
+		win = Window(win, nonneg=True)
 		if txgrp is not None: txgrp = TxGroupIndex(*txgrp)
 		return tuple.__new__(cls, (idx, pos, win, txgrp))
 	@property
@@ -351,8 +352,6 @@ class RxChannelHeader(tuple):
 		if len(kwargs):
 			raise TypeError("Unrecognized keyword argument '%s'" % (kwargs.iterkeys().next()))
 		return type(self)(**props)
-
-
 
 
 class WaveformSet(object):
@@ -532,7 +531,7 @@ class WaveformSet(object):
 				recrows = [txmap[txi] for txi in wset.txidx]
 
 				# Map the local data window to the global data window
-				lwin = Window(lhdr.win.start + wset.f2c - outset.f2c, lhdr.win.length)
+				lwin = Window(lhdr.win.start + wset.f2c - outset.f2c, lhdr.win.length, nonneg=True)
 
 				# Copy the data
 				rec[recrows,lwin.start:lwin.end] = dat
@@ -1092,14 +1091,14 @@ class WaveformSet(object):
 			window = hdr.win
 		else:
 			from .sigtools import Window
-			window = Window(*window)
+			window = Window(window)
 
 		# Pull an unspecified data type from the waveforms
 		if dtype is None or dtype == 0:
 			dtype = waveforms.dtype
 
 		# Create an output array to store the results
-		oshape = (1 if singletx else len(tcidx), window[1])
+		oshape = (1 if singletx else len(tcidx), window.length)
 		output = np.zeros(oshape, dtype=dtype)
 
 		try:
