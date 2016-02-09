@@ -51,8 +51,8 @@ class Window(tuple):
 		elif length is None:
 			length = end - start
 
-		from .formats import _strict_nonnegative_int
-		start = _strict_nonnegative_int(start)
+		from .formats import _strict_nonnegative_int, _strict_int
+		start = _strict_int(start)
 		length = _strict_nonnegative_int(length)
 		return tuple.__new__(cls, (start, length))
 
@@ -461,6 +461,7 @@ class Waveform(object):
 			self._datastart = 0
 			return
 
+		# Ensure the start of the data window is always nonnegative
 		from .formats import _strict_nonnegative_int
 		start = _strict_nonnegative_int(start)
 
@@ -540,18 +541,67 @@ class Waveform(object):
 		return v, i + self._datastart
 
 
-	def window(self, window=None, tails=0):
+	def window(self, window, tails=0, relative=None):
 		'''
 		Return a windowed copy of the waveform where, outside the
-		window (start, length), the signal is zero. If tails is
-		provided, it should be a scalar or a 1-D array of length 2N,
-		where the first N values will multiply the signal in the range
-		[start:start+N] and the last N values mull multiply the signal
-		in the range [start+length-N:start+length]. If tails is a
-		scalar, np.hanning(2 * tails) is used.
+		specified window (start, length), the signal is zero.
+
+		The argument window can take three forms: a (start, length)
+		tuple, a habis.sigtools.Window object, or a dictionary
+		equivalent with exactly two of the keys 'start', 'end' or
+		'length'.
+		
+		If tails is provided, it should be a scalar or a 1-D array of
+		length 2N, where the first N values will multiply the signal in
+		the range [start:start+N] and the last N values mull multiply
+		the signal in the range [start+length-N:start+length]. If tails
+		is a scalar, np.hanning(2 * tails) is used.
+
+		Only when the window argument is a key-value map, the argument
+		relative may take an optional value 'signal' or 'datawin'. When
+		'signal' is specified, the value associated with any 'end' key
+		is transformed according to
+
+			end -> end + self.nsamp
+
+		When 'datawin' is specified, any 'start' and 'end' keys are
+		transformed according to
+
+			start -> start + self.datawin.start
+			end   -> end + self.datawin.end
+
+		Any 'length' key of the map is always unchanged.
 		'''
-		if window is None: window = (0, self.nsamp)
-		window = Window(*window)
+		try:
+			if len(window) != 2:
+				raise ValueError('Trigger enclosing exception')
+		except (TypeError, ValueError):
+				raise ValueError('The window must be a Window object, a two-element sequence, or a two-element key-value map')
+
+		dwin = self.datawin
+
+		try:
+			# Test the dictionary-like nature of window, and make a copy
+			window = dict(window)
+		except TypeError:
+			# If the window is not a dictionary, just make a Window object
+			window = Window(*window)
+			if relative is not None:
+				raise ValueError('Argument relative must be None if window is not dictionary-like')
+		else:
+			# Account for relative window options
+			if relative == 'signal':
+				try: window['end'] += self.nsamp
+				except KeyError: pass
+			elif relative == 'datawin':
+				try: window['start'] += dwin.start
+				except KeyError: pass
+				try: window['end'] += dwin.end
+				except KeyError: pass
+			elif relative is not None:
+				raise ValueError("Argument relative must be one of None, 'signal', or 'datawin'")
+			# Create the window
+			window = Window(**window)
 
 		tails = np.asarray(tails)
 		if tails.ndim < 1:
@@ -561,8 +611,6 @@ class Waveform(object):
 
 		if len(tails) > window.length:
 			raise ValueError('Length of tails should not exceed length of window')
-
-		dwin = self.datawin
 
 		try:
 			# Find overlap between the data and output windows

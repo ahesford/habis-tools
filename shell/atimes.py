@@ -107,7 +107,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	strided index, k, into a 2-D index (j,i) into the T x R delay matrix in
 	row-major order.
 
-	The reference waveform is read from reffile using
+	The reference waveform is read from reffile using the method
 	habis.sigtools.Waveform.fromfile.
 
 	The return value is a dictionary that maps a (t,r) transmit-receive
@@ -123,7 +123,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	* window: If not None, should be a dictionary containing exactly two of
 	  the keys 'start', 'length' or 'end' that specify integer values
 	  corresponding to the start, length or end of a temporal window
-	  applied to each waveform before delay analysis.
+	  applied to each waveform before delay analysis. These keys are passed
+	  as the 'window' argument to habis.sigtools.Waveform.window().
 
 	  Two additional keys may be included in the dictionary:
 	  
@@ -132,28 +133,22 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	    window applied to each side, or 2) a list consisting of the
 	    concatenation of the start-side and end-side window profiles.
 
-	  - relative: A string that is either 'acquisition' or 'datawin'.
+	  - relative: A string, passed as the 'relative' argument to
+	    Waveform.window(), that is either 'signal' or 'datawin'.
 	    Without specifying 'relative', the window start and end are always
 	    specified relative to 0 f2c, and the the applied window becomes:
 
 	      start -> start - datafile.f2c
 	      end   -> end - datafile.f2c
 
-	    If 'relative' is 'acquisition', the start and end are always
-	    specified relative to the datafile acquisition window, and the
-	    applied window becomes:
+	    If 'relative' is specified, the acquisition ('signal') window for
+	    each signal starts at datafile.f2c and has length datafile.nsamp.
+	    Thus, in either 'relative' mode, the effect is to call
 
-	      start -> start
-	      end   -> end + datafile.nsamp
+	    	datafile[i,j].window(win, **winargs),
 
-	    If 'relative' is 'datawin', the start and end are always specified
-	    relative to the data window for each signal in the datafile, and
-	    the applied window becomes:
-
-	      start -> start + signal.datawin.start
-	      end   -> end + signal.datawin.end
-
-	    Any 'length' parameter is unchanged regardless of 'relative'.
+	    Where win is the 'window' dictionary with additional keys removed
+	    and winargs is a dictionary of only the additional keys.
 
 	* minsnr: If not none, should be a sequence (mindb, noisewin) used to
 	  define the minimum acceptable SNR in dB (mindb) by comparing the peak
@@ -229,21 +224,16 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	except KeyError:
 		window, relwin = None, None
 	else:
-		tails = window.pop('tails', 0)
-		relwin = window.pop('relative', None)
+		winargs = { }
+		try: winargs = { 'tails': window.pop('tails') }
+		except KeyError: pass
+		try: winargs['relative'] = window.pop('relative')
+		except KeyError: pass
 
-		if relwin is 'acquisition':
-			# Acquisition-relative windows should be shifted to 0 f2c
+		if winargs.get('relative', None) is 'signal':
+			# Here, all signals are assumed to start at 0 f2c.
 			try: window['start'] += data.f2c
 			except KeyError: pass
-			try: window['end'] += data.f2c + data.nsamp
-			except KeyError: pass
-		elif relwin not in { None, 'datawin' }:
-			raise ValueError("Parameter 'relative' must be absent or one of 'acquisition' or 'datawin'")
-
-		# Only the datawin-relative windows are not static at this point
-		relwin = (relwin == 'datawin')
-		if not relwin: window = Window(**window)
 
 	# Pull the optional peak search criteria
 	peaks = kwargs.pop('peaks', None)
@@ -291,18 +281,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		sig = Waveform(data.nsamp + data.f2c,
 				wforms[i].astype(np.float32), hdr.win.start + data.f2c)
 
-		# Pull the waveform as float32
-		sig = data.getwaveform(rid, tid, dtype=np.float32)
 		if window is not None:
-			if relwin:
-				dwin = sig.datawin
-				rwin = dict(window)
-				try: rwin['start'] += sig.datawin.start
-				except KeyError: pass
-				try: rwin['end'] += sig.datawin.end
-				except KeyError: pass
-				sig = sig.window(Window(*rwin), tails)
-			else: sig = sig.window(window, tails)
+			sig = sig.window(window, **winargs)
 		if minsnr is not None and noisewin is not None:
 			if sig.snr(noisewin) < minsnr: continue
 		if peaks is not None:
