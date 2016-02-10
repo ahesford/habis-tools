@@ -401,25 +401,42 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def fromwaveform(cls, wave, copy=False):
+	def fromwaveform(cls, wave, copy=False, hdr=None, tid=0, f2c=0):
 		'''
 		Create a new WaveformSet object with a single transmit index
-		and a single receive index (both 0) with a sample count and
-		data type defined by the provided Waveform wave. The sole
-		waveform record will be populated with wave.
+		and a single receive index with a sample count and data type
+		defined by the provided Waveform wave. The sole waveform record
+		will be populated with wave.
 
 		If copy is False, the record in the WaveformSet will, whenever
 		possible, capture a reference to the waveform data instead of
 		making a copy. If copy is True, a copy will always be made.
 
-		The f2c parameter of the WaveformSet will be 0.
+		If hdr is not None, it should be a receive-channel header that
+		will be used for the single receive-channel record in the
+		output WaveformSet. The value of hdr.win will be overwritten
+		with wave.datawin. If hdr is None, a default value
+		
+			(0, [0., 0., 0.], wave.datawin)
+			
+		will be used.
 
-		The 'crd' record of the waveform record will be [0., 0., 0.].
+		The parameter tid should be a single nonnegative integer that
+		specifies the transmit index to assign to the Waveform.
+
+		The parameter f2c should be a single nonnegative integer that
+		specifies the fire-to-capture delay to encode in the set.
 		'''
 		# Create the set
-		wset = cls([0], wave.nsamp, 0, wave.dtype)
-		# Create the sole record; this grows the 1-D signal to 2-D
-		hdr = (0, [0., 0., 0.], wave.datawin)
+		wset = cls([tid], wave.nsamp, f2c, wave.dtype)
+
+		if hdr is None:
+			# Create a default header
+			hdr = RxChannelHeader(0, [0.]*3, wave.datawin)
+		else:
+			# Ensure hdr is RxChannelHeader, then set datawin
+			hdr = RxChannelHeader(*hdr).copy(win=wave.datawin)
+
 		wset.setrecord(hdr, wave.getsignal(wave.datawin), copy)
 		return wset
 

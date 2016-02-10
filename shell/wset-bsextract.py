@@ -33,4 +33,7 @@ if __name__ == '__main__':
 			try: wf = wset[rx, tx]
 			except KeyError: continue
 
-			wf.store(obase + '.Element%05d.backscatter' % rx)
+			hdr = wset.getheader(rx).copy(txgrp=None)
+			bsw = WaveformSet.fromwaveform(wf, hdr=hdr, tid=rx, f2c=wset.f2c)
+
+			bsw.store(obase + '.Element%05d.backscatter' % rx)
