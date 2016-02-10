@@ -36,7 +36,7 @@ def finddelays(nproc=1, *args, **kwargs):
 	form [t, r, delay] representing a precomputed delay for
 	transmit-receive pair (t, r).
 	'''
-	if 'queue' in kwargs: 
+	if 'queue' in kwargs:
 		raise TypeError("Invalid keyword argument 'queue'")
 	if 'stride' in kwargs:
 		raise TypeError("Invalid keyword argument 'stride'")
@@ -99,13 +99,21 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	to identify the delay of the received waveform relative to a reference
 	according to
 
-		datafile[i,j].delay(reference, osamp=osamp) + datafile.f2c.
+		datafile[i,j'].delay(reference, osamp=osamp) + datafile.f2c.
 
 	The addition of datafile.f2c adjusts all delays to a common base time.
 
-	The index (i,j) of the WaveformSet is determined by un-flattening the
+	The index (i,j') of the WaveformSet is determined by un-flattening the
 	strided index, k, into a 2-D index (j,i) into the T x R delay matrix in
-	row-major order.
+	row-major order, and then mapping the transmit element with
+
+		j' = datafile.rid2tx(j).
+
+	*** NOTE: Because this relies on any transmit-group configuration
+	specified in the data file, it is not possible to map transmit elements
+	without associated receive-channel records in the file. If such
+	transmit elements must be specified, the file must be processed to
+	reorder transmissions and remove the transmit-group configuration. ***
 
 	The reference waveform is read from reffile using the method
 	habis.sigtools.Waveform.fromfile.
@@ -115,19 +123,24 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	The optional kwargs are parsed for the following keys:
 
-	* delaycache: If not None, should be the map from transmit-receive
-	  pairs (t, r) to a precomputed delay d. If a value exists for a given
-	  pair (t, r), the precomputed value will be used in favor of explicit
-	  computation.
+	* nsamp: Override datafile.nsamp. Useful mainly for bandpass filtering.
 
-	* window: If not None, should be a dictionary containing exactly two of
-	  the keys 'start', 'length' or 'end' that specify integer values
-	  corresponding to the start, length or end of a temporal window
-	  applied to each waveform before delay analysis. These keys are passed
-	  as the 'window' argument to habis.sigtools.Waveform.window().
+	* bandpass: A dictionary of keyword arguments passed to
+	  habis.sigtools.Waveform.bandpass() that will filter each waveform
+	  prior to further processing.
+
+	* delaycache: A mapping from transmit-receive element pairs (t, r) to a
+	  precomputed delay d. If a value exists for a given pair (t, r), the
+	  precomputed value will be used in favor of explicit computation.
+
+	* window: A dictionary containing exactly two of the keys 'start',
+	  'length' or 'end' that specify integer values corresponding to the
+	  start, length or end of a temporal window applied to each waveform
+	  before delay analysis. These keys are passed as the 'window' argument
+	  to habis.sigtools.Waveform.window().
 
 	  Two additional keys may be included in the dictionary:
-	  
+
 	  - tails: A value passed to the 'tails' argument of the method
 	    Waveform.window(), and is either 1) an integer half-width of a Hann
 	    window applied to each side, or 2) a list consisting of the
@@ -150,34 +163,34 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	    Where win is the 'window' dictionary with additional keys removed
 	    and winargs is a dictionary of only the additional keys.
 
-	* minsnr: If not none, should be a sequence (mindb, noisewin) used to
-	  define the minimum acceptable SNR in dB (mindb) by comparing the peak
-	  signal amplitude to the minimum standard deviation over a sliding
-	  window of width noisewin. SNR for each signal is calculated after
-	  application of an optional window. Delays will not be calculated for
-	  signals fail to exceed the minimum threshold.
+	* minsnr: A sequence (mindb, noisewin) used to define the minimum
+	  acceptable SNR in dB (mindb) by comparing the peak signal amplitude
+	  to the minimum standard deviation over a sliding window of width
+	  noisewin. SNR for each signal is calculated after application of an
+	  optional window. Delays will not be calculated for signals fail to
+	  exceed the minimum threshold.
 
-	* peaks: If not None, should be a dictionary of kwargs to be passed to
-	  Waveform.isolatepeak for every waveform. An additional 'nearmap' key
-	  may be included to specify a mapping between element indices and
-	  expected round-trip delays (relative to zero f2c). The waveform (i,j)
-	  for a delay entry (j,i) will be windowed about the peak closest to a
-	  delay given by
-	  
+	* peaks: A dictionary of kwargs to be passed to Waveform.isolatepeak
+	  for every waveform. An additional 'nearmap' key may be included to
+	  specify a mapping between element indices and expected round-trip
+	  delays (relative to zero f2c). The waveform (i,j') for a delay entry
+	  (j,i) will be windowed about the peak closest to a delay given by
+
 	    0.5 * (nearmap[txelts[j]] + nearmap[rxelts[i]]) - datafile.f2c
-	  
+
 	  to a width twice the peak width, with no tails. If the nearmap is not
 	  defined for either element (or at all), the nearmap value will be
 	  "None" to isolate the dominant peak.
-	  
+
 	  *** NOTE: peak windowing is done after overall windowing and after
 	  possible exclusion by minsnr. ***
 
 	* rxelts and txelts: If not None, should be a lists of element indices
 	  such that entry (i,j) in the delay matrix corresponds to the waveform
-	  datafile[rxelts[j],txelts[i]]. When rxelts is None or unspecified, it
-	  is populated by sorted(datafile.rxidx). When txelts is None or
-	  unspecified, it defaults to rxelts.
+	  datafile[rxelts[j],datafile.rid2tx(txelts[i])]. When rxelts is None
+	  or unspecified, it is populated by sorted(datafile.rxidx). When
+	  txelts is None or unspecified, it defaults to rxelts. (See note above
+	  about the limitations of rid2tx mapping.)
 
 	* usediag: If True, only calculate the diagonal portion of the delay
 	  matrix. Incompatible with txelts != None.
@@ -192,21 +205,31 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	data = WaveformSet.fromfile(datafile)
 	ref = Waveform.fromfile(reffile)
 
+	# Override the sample count, if desired
+	try: data.nsamp = kwargs.pop('nsamp')
+	except KeyError: pass
+
 	# Determine the elements to include in the delay matrix
-	rxelts, txelts = kwargs.pop('rxelts', None), kwargs.pop('txelts', None)
+	rxelts = kwargs.pop('rxelts', None)
+	txelts = kwargs.pop('txelts', None)
 	usediag = kwargs.pop('usediag', None)
 
 	if txelts is not None and usediag:
-		raise ValueError('Specification of txelts != None and usediag == True is incompatible')
+		raise ValueError('Specification of txelts with usediag == True is forbidden')
 
-	if rxelts is None: rxelts = sorted(wset.rxidx)
-	else: rxelts = sorted(set(rxelts).intersection(wset.rxidx))
+	if rxelts is None: rxelts = sorted(data.rxidx)
+	else: rxelts = sorted(set(rxelts).intersection(data.rxidx))
 
-	# Pull the txelts list
+	# Set a default transmit-element list
 	if txelts is None: txelts = list(rxelts)
 
-	if not set(txelts).issubset(wset.txidx):
-		raise ValueError('Transmit-channel list contains elements not in data file')
+	# Note transmit element and transmission number for each entry
+	try: tids = [data.rid2tx(t) for t in txelts]
+	except (KeyError, TypeError):
+		raise ValueError('Cannot map transmit elements to transmission indices')
+
+	if not set(tids).issubset(data.txidx):
+		raise ValueError('Data file does not contain all transmit elements')
 
 	r = len(rxelts)
 	t = len(txelts) if not usediag else 1
@@ -222,7 +245,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		# Pull a copy of the windowing configuration
 		window = dict(kwargs.pop('window'))
 	except KeyError:
-		window, relwin = None, None
+		window = None
 	else:
 		winargs = { }
 		try: winargs = { 'tails': window.pop('tails') }
@@ -230,10 +253,15 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		try: winargs['relative'] = window.pop('relative')
 		except KeyError: pass
 
-		if winargs.get('relative', None) is 'signal':
-			# Here, all signals are assumed to start at 0 f2c.
-			try: window['start'] += data.f2c
+		if winargs.get('relative', None) is None:
+			# For absolute windows, compensate start and end for f2c
+			try: window['start'] -= data.f2c
 			except KeyError: pass
+			try: window['end'] -= data.f2c
+			except KeyError: pass
+
+	try: bandpass = dict(kwargs.pop('bandpass'))
+	except KeyError: bandpass = None
 
 	# Pull the optional peak search criteria
 	peaks = kwargs.pop('peaks', None)
@@ -255,16 +283,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Cache a receive-channel record for faster access
 	hdr, wforms = None, None
 
-	# Extend the overall acquisition window back to 0 f2c
-	nsamp = data.nsamp + data.f2c
-
 	for idx in range(start, t * r, stride):
 		# Find the transmit and receive indices (vary transmit most rapidly)
-		if not usediag:
-			i, j = np.unravel_index(idx, (t, r), 'F')
-		else:
-			i, j = idx, idx
-
+		i, j = (idx, idx) if usediag else np.unravel_index(idx, (t, r), 'F')
 		tid, rid = txelts[i], rxelts[j]
 
 		try:
@@ -273,29 +294,38 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			continue
 		except KeyError: pass
 
-		# Use a cached receive-channel block if possible
-		try: lidx = hdr.idx
-		except (TypeError, AttributeError): lidx = None
-		if lidx != rid:
+		try:
+			# Use a cached receive-channel block if possible
+			if hdr.idx != rid: raise ValueError('Force record load')
+		except (ValueError, TypeError, AttributeError):
 			# Pull the waveforms for the whole transmit set
-			hdr, wforms = data.getrecord(rid, tid=txelts, dtype=np.float32)
+			hdr, wforms = data.getrecord(rid, tid=tids, dtype=np.float32)
 
-		# Grab the raw waveform data on expanded (0 f2c) window
-		sig = Waveform(nsamp, wforms[i], hdr.win.start + data.f2c)
+		# Grab the signal as a Waveform
+		sig = Waveform(data.nsamp, wforms[i], hdr.win.start)
+
+		if bandpass is not None:
+			# Remove DC bias to reduce Gibbs phenomenon
+			sig.debias()
+			sig = sig.bandpass(**bandpass)
 
 		if window is not None:
 			sig = sig.window(window, **winargs)
+
 		if minsnr is not None and noisewin is not None:
 			if sig.snr(noisewin) < minsnr: continue
+
 		if peaks is not None:
 			# Isolate the peak nearest the expected location (if one exists)
-			try: exd = 0.5 * (nearmap[tid] + nearmap[rid])
+			try: exd = 0.5 * (nearmap[tid] + nearmap[rid]) - data.f2c
 			except (KeyError, IndexError): exd = None
 			try: sig = sig.isolatepeak(exd, **peaks)
 			except ValueError: continue
+
 		if compenv: sig = sig.envelope()
+
 		# Compute and record the delay
-		result[(tid, rid)] = sig.delay(ref, osamp)
+		result[(tid, rid)] = sig.delay(ref, osamp) + data.f2c
 
 	try: queue.put(result)
 	except AttributeError: pass
@@ -310,7 +340,7 @@ def atimesEngine(config):
 	times. Multipath arrival times are computed as the maximum of
 	cross-correlation with a reference pulse, plus some constant offset.
 	'''
-	asec = 'atimes' 
+	asec = 'atimes'
 	msec = 'measurement'
 	ssec = 'sampling'
 
@@ -345,7 +375,7 @@ def atimesEngine(config):
 
 	try:
 		# Grab the number of processes to use (optional)
-		nproc = config.get('general', 'nproc', mapper=int, 
+		nproc = config.get('general', 'nproc', mapper=int,
 				failfunc=process.preferred_process_count)
 	except Exception as e:
 		err = 'Invalid specification of optional nproc in [general]'
@@ -391,6 +421,24 @@ def atimesEngine(config):
 		pass
 	except Exception as e:
 		err = 'Invalid specification of optional window in [%s]' % asec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine a temporal window to apply before finding delays
+		kwargs['bandpass'] = config.get(asec, 'bandpass')
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional bandpass in [%s]' % asec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine a temporal window to apply before finding delays
+		kwargs['nsamp'] = config.get(asec, 'nsamp', mapper=int)
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional nsamp in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:

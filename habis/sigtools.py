@@ -1204,6 +1204,14 @@ class Waveform(object):
 		return self.window(Window(fs, end=ls), tails=tails)
 
 
+	def debias(self):
+		'''
+		Debias the Waveform so that the data window has zero mean.
+		'''
+		if self._data is not None:
+			self._data -= np.mean(self._data)
+
+
 	def bandpass(self, start, end, tails=0, dtype=None):
 		'''
 		Perform a bandpass operation that zeros all frequencies below

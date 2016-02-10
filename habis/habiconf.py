@@ -333,7 +333,8 @@ class HabisConfigParser(object):
 
 		The "mapper" and "checkmap" options behave as in get(), except
 		they apply to each element in the list individually rather than
-		to the list as a whole.
+		to the list as a whole. If the value is a string rather than a
+		native list, the value for "checkmap" is ignored.
 
 		The "default" and "failfunc" options behave exactly as in
 		get(). These default values are not guaranteed to be lists.
@@ -357,6 +358,8 @@ class HabisConfigParser(object):
 		# Split a string into a list
 		if isinstance(val, basestring):
 			val = shlex.split(val, comments=True)
+			inferredlist = True
+		else: inferredlist = False
 
 		try: mapper = optargs['mapper']
 		except KeyError: return val
@@ -365,7 +368,7 @@ class HabisConfigParser(object):
 		mval = [mapper(v) for v in val]
 
 		# Ensure that types are right
-		if (optargs.get('checkmap', True) and
+		if (not inferredlist and optargs.get('checkmap', True) and
 				any(v != mv for v, mv in izip(val, mval))):
 			raise TypeError('List items are not of the prescribed type')
 
