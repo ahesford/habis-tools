@@ -261,7 +261,6 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			except KeyError: pass
 
 	bandpass = kwargs.pop('bandpass', None)
-	except KeyError: bandpass = None
 
 	# Pull the optional peak search criteria
 	peaks = kwargs.pop('peaks', None)
