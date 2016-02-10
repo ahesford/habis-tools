@@ -260,7 +260,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			try: window['end'] -= data.f2c
 			except KeyError: pass
 
-	try: bandpass = dict(kwargs.pop('bandpass'))
+	bandpass = kwargs.pop('bandpass', None)
 	except KeyError: bandpass = None
 
 	# Pull the optional peak search criteria
@@ -390,6 +390,16 @@ def atimesEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
+		# Override the number of samples in WaveformSets
+		kwargs['nsamp'] = config.get(ssec, 'nsamp', mapper=int)
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional nsamp in [%s]' % ssec
+		raise HabisConfigError.fromException(err, e)
+
+
+	try:
 		osamp = config.get(ssec, 'osamp', mapper=int, default=1)
 	except Exception as e:
 		err = 'Invalid specification of optional osamp in [%s]' % ssec
@@ -430,15 +440,6 @@ def atimesEngine(config):
 		pass
 	except Exception as e:
 		err = 'Invalid specification of optional bandpass in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Determine a temporal window to apply before finding delays
-		kwargs['nsamp'] = config.get(asec, 'nsamp', mapper=int)
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional nsamp in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
