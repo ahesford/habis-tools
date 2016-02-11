@@ -26,8 +26,8 @@ def concatenate(infiles, outfile, corrtx=True, defzero=False):
 	WaveformSet is written to the file specified by outfile.
 
 	If corrtx is True, the input names will be sorted lexicographically and
-	the txidx list for each input file will be replaced by a contiguous
-	list of integers such that
+	the txstart for each input file will be replaced by a contiguous list
+	of integers such that
 
 		infiles[i].txidx = range(ltx, ltx + infiles[i].ntx),
 
@@ -45,8 +45,8 @@ def concatenate(infiles, outfile, corrtx=True, defzero=False):
 		# Correct the transmit indices
 		ltx = 0
 		for wset in wsets:
-			wset.txidx = range(ltx, ltx + wset.ntx)
-			ltx = wset.txidx[-1] + 1
+			wset.txstart = ltx
+			ltx += wset.ntx
 
 	WaveformSet.concatenate(*wsets, defzero=defzero).store(outfile)
 

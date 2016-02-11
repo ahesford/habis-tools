@@ -149,7 +149,7 @@ class Waveform(object):
 			if wset.ntx != 1 or wset.nrx != 1:
 				raise TypeError('WaveformSet contains more than one waveform')
 			rid = wset.rxidx[0]
-			tid = wset.txidx[0]
+			tid = wset.txstart
 			return wset.getwaveform(rid, tid)
 		except ValueError: pass
 

@@ -532,7 +532,8 @@ class WaveformSet(object):
 		ntx = len(txidx)
 
 		# Create and populate the output WaveformSet
-		outset = cls(txidx, lsamp - f2c, f2c, dtype, txgrps)
+		outset = cls(ntx, 0, lsamp - f2c, f2c, dtype, txgrps)
+		outset.txidx = txidx
 
 		for rxi, rhdr in sorted(rcvhdrs.iteritems()):
 			# Subtract the global f2c from the data window
@@ -564,7 +565,7 @@ class WaveformSet(object):
 		Create a new instance of WaveformSet configured exactly as
 		wset, except without any waveform records.
 		'''
-		nwset = cls(wset.txidx, wset.nsamp, wset.f2c, wset.dtype, wset.txgrps)
+		nwset = cls(wset.ntx, wset.txstart, wset.nsamp, wset.f2c, wset.dtype, wset.txgrps)
 		nwset.extrabytes = dict(wset.extrabytes.iteritems())
 		return nwset
 
