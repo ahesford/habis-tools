@@ -11,7 +11,7 @@ import re, os
 import pandas
 import struct
 
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, namedtuple
 
 def _strict_int(x):
 	ix = int(x)
@@ -21,11 +21,12 @@ def _strict_int(x):
 
 
 def _strict_nonnegative_int(x, positive=False):
+	x = _strict_int(x) 
 	if positive and x <= 0:
 		raise ValueError('Argument must be positive')
 	elif x < 0:
 		raise ValueError('Argument must be nonnegative')
-	return _strict_int(x)
+	return x
 
 
 def loadkeymat(*args, **kwargs):
@@ -278,7 +279,6 @@ def readfiresequence(fmt, findx, reducer=None):
 	return np.concatenate(data, axis=0)
 
 
-# Define a named tuple that represents a format-enforced transmit group configuration
 class TxGroupIndex(tuple):
 	'''
 	A class to encapsulate and type-check transmit-index pairs.
@@ -315,7 +315,26 @@ class TxGroupIndex(tuple):
 		return 1 - 2 * (count % 2)
 
 
-# Define a named tuple that represents a format-enforced channel header
+class TxGroupConfiguration(tuple):
+	'''
+	A class to encapsulate and type-check transmit-group configurations.
+	'''
+	def __new__(cls, count, size):
+		'''
+		Create a new TxGroupConfiguration.
+		'''
+		count = _strict_nonnegative_int(count)
+		size = _strict_nonnegative_int(size)
+		return tuple.__new__(cls, (count, size))
+
+	@property
+	def count(self): return self[0]
+	@property
+	def size(self): return self[1]
+	@property
+	def maxtx(self): return self[0] * self[1]
+
+
 class RxChannelHeader(tuple):
 	'''
 	A class to encapsulate and type-check receive-channel headers
@@ -364,26 +383,6 @@ class WaveformSet(object):
 	typecodes = bidict(I2 = 'int16', I4 = 'int32', I8 = 'int64',
 			F2 = 'float16', F4 = 'float32', F8 = 'float64',
 			C4 = 'complex64', C8 = 'complex128')
-
-	@staticmethod
-	def _verify_file_version(version, write=False):
-		'''
-		Ensure that the provided version matches one supported by the
-		class. If not, raise a ValueError. If so, just return the
-		version tuple.
-		'''
-		try: major, minor = version
-		except (TypeError, ValueError):
-			raise ValueError('Version format is not recognized')
-
-		if major != 1: raise ValueError('Unsupported major version')
-		if write and minor not in (0, 1, 3):
-			raise ValueError('Unsupported minor version for writing')
-		elif not (write or minor in (0, 1, 2, 3)):
-			raise ValueError('Unsupported minor version for reading')
-
-		return major, minor
-
 
 	@classmethod
 	def fromfile(cls, f, *args, **kwargs):
@@ -570,22 +569,30 @@ class WaveformSet(object):
 		return nwset
 
 
-	def __init__(self, txchans=[], nsamp=4096, f2c=0,
+	def __init__(self, ntx=0, txstart=0, nsamp=4096, f2c=0,
 			dtype=np.dtype('int16'), txgrps=None):
 		'''
-		Create an empty WaveformSet object corresponding acquisitions
-		of a set of waveforms from the (0-based) transmission indices
-		in txchans, acquired with a total of nsamp samples per
-		acquisition after a fire-to-capture delay of f2c samples.
-		Waveform arrays are stored with the specified Numpy dtype.
+		Create an empty WaveformSet object that embodies acquisitions
+		of a set of waveforms from a total of ntx transmission indices (0-based)
+		starting from index txstart. Each acquisition starts after a
+		fire-to-capture delay of f2c samples and persists for nsamp
+		samples. Waveform arrays are stored with the specified Numpy
+		dtype.
 
-		If txgrps is specified, it should be a tuple of the form
-		(count, size) that specifies the number of transmit groups into
-		which transmissions are subdivided, and the number of elements
-		in each group.
+		If txgrps is specified, it should be a TxGroupConfiguration
+		object or a tuple of the form (count, size) that specifies the
+		number of transmit groups into which transmissions are
+		subdivided, and the number of elements in each group.
 		'''
-		# Record the waveform dtype (a read-only property)
+		# Record the waveform dtype
 		self._dtype = np.dtype(dtype)
+
+		# Prepopulate properties that will be validated later
+		self._f2c = 0
+		self._nsamp = 0
+		self._ntx = 0
+		self._txstart = 0
+		self._txgrps = None
 
 		# Create an empty, ordered record dictionary
 		# Needed for validation of other properties
@@ -595,11 +602,9 @@ class WaveformSet(object):
 		self.nsamp = nsamp
 		self.f2c = f2c
 
-		# Initialize a null group configuration
-		self._txgrps = None
-
-		# Build the transmit-channel mapping
-		self.txidx = txchans
+		# Build and validate the transmit-channel mapping
+		self.ntx = ntx
+		self.txstart = txstart
 
 		# Initialize the group configuration as specified
 		self.txgrps = txgrps
@@ -609,32 +614,35 @@ class WaveformSet(object):
 		self.extrabytes = { }
 
 
-	def getdefaultver(self):
+	def _verify_file_version(self, version, write=False):
 		'''
-		Determine the file format version best suited to record this
-		WaveformSet.
-
-		*** NOTE: Using this may discard some data when writing. ***
+		Ensure that the provided version matches one supported by the
+		WaveformSet class. If version is unsupported, a ValueError is
+		raised. Otherwise, just return the version tuple.
 		'''
-		# Determine if the transmit indices can be inferred
-		inferTx = True
-		last = -1
-		for tid in self.txidx:
-			if tid != last + 1:
-				inferTx = False
-				break
-			last = tid
+		try:
+			major, minor = version
+			major = _strict_nonnegative_int(major)
+			minor = _strict_nonnegative_int(minor)
+		except (TypeError, ValueError):
+			raise ValueError('Version format is not recognized')
 
-		if self.txgrps is None:
-			return (1, 1) if inferTx else (1, 0)
+		if major != 1: raise ValueError('Unsupported major version')
 
-		# Version (1, 2) is disfavored because it fails
-		# to specify a global receive-channel index
+		if not write:
+			# Support all currently defined formats for reading
+			if not (0 <= minor < 5):
+				raise ValueError('Unsupported minor version for reading')
+			return (major, minor)
 
-		return (1, 3)
+		# Only version-4 writes are supported
+		if minor != 4:
+			raise ValueError('Unsupported minor version for writing')
+
+		return major, minor
 
 
-	def store(self, f, append=False, ver=None):
+	def store(self, f, append=False, ver=(1,4)):
 		'''
 		Write the WaveformSet object to the data file in f (either a
 		name or a file-like object that allows writing).
@@ -654,39 +662,30 @@ class WaveformSet(object):
 		if isinstance(f, basestring):
 			f = open(f, mode=('wb' if not append else 'ab'))
 
-		if ver is None: ver = self.getdefaultver()
+		# Only version (1,4) is supported for output
 		major, minor = self._verify_file_version(ver, write=True)
 
-		if minor == 3:
-			# Ensure valid transmit-group configuration
-			try: count, size = self.txgrps
-			except (TypeError, ValueError):
-				raise ValueError('Version (1,3) file requires transmit-group configuration')
+		# A missing transmit-group configuration takes the special value (0,0)
+		try: gcount, gsize = self.txgrps
+		except (TypeError, ValueError): gcount, gsize = 0, 0
 
 		if not append:
 			# Encode the magic number, file version and datatype
 			typecode = self.typecodes.inverse[np.dtype(self.dtype).name][0]
 			hbytes = struct.pack('<4s2I2s', 'WAVE', major, minor, typecode)
 
-			# Encode common transmission parameters
-			hbytes += struct.pack('<4I', self.f2c, self.nsamp, self.nrx, self.ntx)
+			# Encode transmission parameters
+			hbytes += struct.pack('<4I2HI', self.f2c, self.nsamp, 
+					self.nrx, self.ntx, gcount, gsize, self.txstart)
 
-			if minor == 0:
-				# For (1, 0) files, encode transmit indices (1-based)
-				txidx = np.asarray([txi + 1 for txi in self.txidx], dtype=np.uint32)
-				hbytes += txidx.tobytes()
-			elif minor == 3:
-				# Encode the transmission group parameters
-				hbytes += struct.pack('<2H', *self.txgrps)
+			# Unspecified TGC parameters default to 0
+			try: tgc = self.extrabytes['tgc']
+			except KeyError: tgc = np.zeros(256, dtype=np.float32).tobytes()
+			
+			if len(tgc) != 1024:
+				raise ValueError('File version (1,4) requires 1024 TGC bytes')
 
-				# Unspecified TGC parameters default to 0
-				try: tgc = self.extrabytes['tgc']
-				except KeyError: tgc = np.zeros(256, dtype=np.float32).tobytes()
-
-				if len(tgc) != 1024:
-					raise ValueError('File version (1,3) requires 1024 TGC bytes')
-
-				hbytes += tgc
+			hbytes += tgc
 
 			f.write(hbytes)
 
@@ -700,19 +699,13 @@ class WaveformSet(object):
 			px, py, pz = hdr.pos
 			ws, wl = hdr.win
 
-			# First encode the global channel index
-			# Early versions use a 1-based index
-			hbytes = struct.pack('<I', idx + int(minor < 2))
+			# Without a transmit-group configuration, use (0,0)
+			try: li, gi = hdr.txgrp
+			except (TypeError, ValueError): li, gi = 0, 0
 
-			if minor == 3:
-				# Encode the channel transmit grouping
-				try: i, g = hdr.txgrp
-				except (TypeError, ValueError):
-					raise ValueError('Version (1,3) records require transmit-group configuration')
-				hbytes += struct.pack('<2I', i, g)
+			# Enclode the receive-channel header
+			hbytes = struct.pack('<3I3f2I', idx, li, gi, px, py, pz, ws, wl)
 
-			# Encode element location and data window
-			hbytes += struct.pack('<3f2I', px, py, pz, ws, wl)
 			f.write(hbytes)
 			# Encode the waveform data
 			waveforms.tofile(f)
@@ -720,22 +713,19 @@ class WaveformSet(object):
 		f.close()
 
 
-	def load(self, f, ver=None):
+	def load(self, f):
 		'''
-		Associate the WaveformSet object with the data in f, a
-		file-like object or string specifying a file name. If f is a
-		file-like object, parsing starts from the current file
-		position.
+		Associate the WaveformSet object with the data in f, a file-
+		like object or string specifying a file name. If f is a file-
+		like object, parsing starts from the current file position.
 
 		Existing waveform records will be eliminated. All parameters of
 		the WaveformSet (arguments to the constructor) will be reset to
-		values specified in the file header.
+		values specified in the file header. Failure to parse the file
+		completely may result in the instance being corrupted.
 
 		Each block of waveform data is memory-mapped from the source
 		file. This mapping is copy-on-write; changes do not persist.
-
-		If ver is specified, file parsing will fail with an IOError
-		unless the encoded version matches the specified version.
 		'''
 		# Open the file if it is not open
 		if isinstance(f, basestring):
@@ -750,38 +740,52 @@ class WaveformSet(object):
 
 		if magic != 'WAVE':
 			raise ValueError('Invalid magic number in file')
-		self._verify_file_version((major, minor))
 
-		if (ver is not None) and (major, minor) != self._verify_file_version(ver):
-			raise IOError('File version %s does not match required version %s' % ((major, minor), ver))
-
+		major, minor = self._verify_file_version((major, minor))
 		dtype = np.dtype(self.typecodes[typecode])
+
+		# Clear the record array
+		self.clearall()
 
 		# Parse common transmission parameters
 		f2c, nsamp, nrx, ntx = funpack('<4I')
 
-		if minor == 0:
-			# Read transmit list from file and convert to 0 base
-			self.txidx = np.fromfile(f, dtype=np.uint32, count=ntx) - 1
-		else:
-			# Transmit list is implicit
-			self.txidx = range(ntx)
-
-		# Clear the record array
-		self.clearall()
-		# Set the data type sample count, and fire-to-capture delay
+		# Set the file-level parameters
 		self.dtype = dtype
 		self.nsamp = nsamp
 		self.f2c = f2c
+		self.ntx = ntx
+		# By default, start the transmission indexing at 0
+		self.txstart = 0
 
-		if minor in (2, 3):
+		# Clear any group configuration for now
+		self.txgrps = None
+
+		if minor > 1:
 			# Read the group configuration
 			count, size = funpack('<2H')
-			# Default group size, if unspecified, is 10240 / count
-			size = size or (10240 / _strict_nonnegative_int(count, positive=True))
-			self.txgrps = count, size
+			# Make sure both values are sensible integers
+			count = _strict_nonnegative_int(count)
+			size = _strict_nonnegative_int(size)
+
+			# Only configure transmit groups if the count is positive
+			if count > 0:
+				# Default group size, if unspecified, is 10240 / count
+				if size == 0:
+					size = 10240 / count
+					if size * count != 10240:
+						raise ValueError('Cannot infer group size for %d groups' % count)
+					
+				self.txgrps = count, size
+
+			# For version (1,4), read an explicit txstart
+			if minor == 4: self.txstart = funpack('<I')[0]
+
 			# Read 1024 bytes of TGC parameters
 			self.extrabytes['tgc'] = f.read(1024)
+		elif minor == 0:
+			# Verion 0 uses an explicit 1-based transmit-index list
+			self.txidx = np.fromfile(f, dtype=np.uint32, count=ntx) - 1
 
 		# Record the start of the waveform data records in the file
 		fsrec = f.tell()
@@ -793,6 +797,10 @@ class WaveformSet(object):
 
 		# For (1, 2) files, keep a running index tally
 		idx = -1
+
+		# If the set isn't configured for transmit groups,
+		# ignore any group spec in the receive-channel headers
+		usegrps = (self.txgrps is not None)
 
 		# Parse through the specified number of receive records
 		while True:
@@ -806,12 +814,12 @@ class WaveformSet(object):
 				except struct.error: break
 
 			# Read element position and data window parameters
-			if minor in (2, 3):
+			if minor > 1:
 				# Also read transmission group configuration
 				try: i, g, px, py, pz, ws, wl = funpack('<2I3f2I')
 				except struct.error: break
 
-				txgrp = (i, g)
+				txgrp = (i, g) if usegrps else None
 				if minor == 2:
 					# Correct an off-by-one window specification bug
 					if wl == nsamp and ws == 1: ws = 0
@@ -869,6 +877,8 @@ class WaveformSet(object):
 		'''
 		Set the group count and length.
 		'''
+		if grps == self._txgrps: return
+
 		if self.nrx > 0:
 			raise ValueError('Cannot change transmit-group configuration with existing records')
 
@@ -876,55 +886,106 @@ class WaveformSet(object):
 			self._txgrps = None
 			return
 
-		try: count, size = grps
+		try:
+			grps = TxGroupConfiguration(*grps)
 		except (TypeError, ValueError):
-			raise ValueError('Transmit-group parameter specifies a (count, size) tuple, or None')
+			raise ValueError('Parameter must be None or (count, size) tuple')
 
-		count = _strict_nonnegative_int(count, positive=True)
-		size = _strict_nonnegative_int(size, positive=True)
+		if grps.maxtx < self.ntx:
+			raise ValueError('Implied maximum transmission count is less than number of recorded transmissions')
+		if grps.maxtx <= self.txstart:
+			raise ValueError('Implied maximum transmission count is less than starting transmission index')
 
-		# Ensure existing transmit indices are compatible with the grouping
-		maxtx = count * size
-		if any(txi >= maxtx for txi in self.txidx):
-			raise ValueError('Existing transmit indices are incompatible with proposed grouping')
+		self._txgrps = grps
 
-		# Assign the new group configuration
-		self._txgrps = count, size
+
+	@property
+	def txstart(self):
+		'''
+		Return the first transmission index in the records.
+		'''
+		return self._txstart
+
+
+	@txstart.setter
+	def txstart(self, txstart):
+		'''
+		Set the first transmission index in the records, which must be
+		a nonnegative integer within the tranmission range implied by
+		the group configuration in self.txgrps.
+		'''
+		if txstart == self._txstart: return
+
+		txstart = _strict_nonnegative_int(txstart)
+
+		try:
+			maxtx = self.txgrps.maxtx
+		except AttributeError:
+			pass
+		else:
+			if txstart >= maxtx:
+				raise ValueError('Parameter txstart exceeds maxtx of transmit-group configuration')
+
+		self._txstart = txstart
 
 
 	@property
 	def txidx(self):
 		'''
-		Return a list of transmit-channel indices in file order.
+		Return a generator of tranmit-channel indices in file order.
 		'''
-		return self._txmap.keys()
+		txstart = self.txstart
+		txgrps = self.txgrps
+
+		try:
+			maxtx = self.txgrps.maxtx
+		except AttributeError:
+			for i in xrange(txstart, txstart + self.ntx):
+				yield i
+		else:
+			for i in xrange(txstart, txstart + self.ntx):
+				yield i % maxtx
 
 
 	@txidx.setter
 	def txidx(self, txidx):
 		'''
-		Set the mapping between transmit indices and file-order
-		waveform indices.
+		Checks the provided list for sequential ordering of the input
+		sequence txidx and, if the check is satisfied, assigns
+		self.txstart and self.ntx accordingly.
 		'''
-		# If receive records exist, ensure that the transmit counts
-		# for each record match the count of the provided index list
-		ntx = len(txidx)
+		txit = iter(txidx)
 
-		if any(waves.shape[0] != ntx for _, waves in self.allrecords()):
-			raise ValueError('Count of specified transmit indices does not match existing records')
+		try: txstart = txit.next()
+		except StopIteration:
+			self.ntx = 0
+			return
 
 		try:
-			# Ensure the transmit channels do not violate group constraints
-			count, size = self.txgrps
-		except TypeError:
-			pass
+			maxtx = self.txgrps.maxtx
+		except AttributeError:
+			def nextval(x): return (x + 1)
 		else:
-			maxtx = count * size
-			if any(txi >= maxtx for txi in txidx):
-				raise ValueError('Transmit indices must be compatible with transmit groups')
+			def nextval(x): return (x + 1) % maxtx
+		
+		last = txstart
+		ntx = 1
 
-		self._txmap = OrderedDict((_strict_nonnegative_int(tx), i)
-				for i, tx in enumerate(txidx))
+		for nv in txit:
+			ntx += 1
+			last = nextval(last)
+			if nv != last:
+				raise ValueError('Transmit indices must be sequential or wrap properly')
+
+		# Record the old txstart to ensure atomicity
+		otxstart = self.txstart
+		self.txstart = txstart
+		
+		try: self.ntx = ntx
+		except:
+			# Restore the old txstart before failing
+			self.txstart = otxstart
+			raise
 
 
 	@property
@@ -932,7 +993,28 @@ class WaveformSet(object):
 		'''
 		Return the number of transmissions per receive channel.
 		'''
-		return len(self._txmap)
+		return self._ntx
+
+
+	@ntx.setter
+	def ntx(self, ntx):
+		'''
+		Set the number of transmissions per receive channel.
+		'''
+		# Take no action if the count hasn't changed
+		if ntx == self._ntx: return
+
+		# Don't attempt to change the transmit count with existing records
+		if self.nrx > 0:
+			raise ValueError('Cannot change number of transmissions with existing records')
+
+		try:
+			if ntx > self.txgrps.maxtx:
+				raise ValueError('Number of transmissions must not exceed maxtx implied by transmit-group configuration')
+		except AttributeError:
+			pass
+
+		self._ntx = _strict_nonnegative_int(ntx)
 
 
 	@property
@@ -953,6 +1035,11 @@ class WaveformSet(object):
 
 	@dtype.setter
 	def dtype(self, value):
+		'''
+		Set the datatype used to store waveforms.
+		'''
+		if self._dtype == value: return
+
 		if self.nrx > 0:
 			raise ValueError('Cannot change datatype with existing records')
 		self._dtype = np.dtype(value)
@@ -972,6 +1059,8 @@ class WaveformSet(object):
 		Set the total number of samples in the acquisition window.
 		Ensure existing records don't fall outside of the window.
 		'''
+		if self._nsamp == nsamp: return
+
 		# Force the new value to be an nonnegative integer
 		nsamp = _strict_nonnegative_int(nsamp)
 
@@ -999,6 +1088,7 @@ class WaveformSet(object):
 		'''
 		Set the fire-to-capture delay in 20-MHz samples.
 		'''
+		if self._f2c == val: return
 		self._f2c = _strict_nonnegative_int(val)
 
 
@@ -1027,15 +1117,27 @@ class WaveformSet(object):
 		'''
 		Convert a transmit-channel index into a waveform-array row index.
 		'''
-		return self._txmap[_strict_nonnegative_int(tid)]
+		# Ensure that the argument is properly bounded
+		tid = _strict_nonnegative_int(tid)
 
+		txstart = self.txstart
 
-	def row2tx(self, row):
-		'''
-		Convert a waveform-array row index to a transmit-channel index.
-		'''
-		# Use the ordered keys in the txmap to pull out the desired row
-		return self._txmap.keys()[row]
+		try: maxtx = self.txgrps.maxtx
+		except AttributeError: maxtx = None
+
+		if maxtx is not None:
+			if tid >= maxtx:
+				raise ValueError('Argument tid exceeds self.txgrps.maxtx')
+			# Shift low values to account for wraparound
+			if tid < txstart: tid += maxtx
+
+		# Shift relative to start
+		tid -= self.txstart
+
+		# Ensure the bounds are sensible
+		if not 0 <= tid < self.ntx:
+			raise ValueError('Transmit index is not contained in this file')
+		return tid
 
 
 	def _get_record_raw(self, rid):
@@ -1087,17 +1189,15 @@ class WaveformSet(object):
 		# Grab receive record, copy header to avoid corruption
 		hdr, waveforms = self._get_record_raw(rid)
 
-		# With no tid, pull all transmissions
-		if tid is None: tid = self.txidx
-
 		try:
-			# Map the transmit IDs to row indices
-			tcidx = [self.tx2row(t) for t in tid]
-			singletx = False
-		except TypeError:
-			# Handle mapping for a scalar tid
 			tcidx = self.tx2row(tid)
 			singletx = True
+		except TypeError:
+			singletx = False
+			if tid is None:
+				tcidx = range(self.ntx)
+			else:
+				tcidx = [self.tx2row(t) for t in tid]
 
 		if window is None:
 			if dtype is None:
@@ -1215,10 +1315,15 @@ class WaveformSet(object):
 		'''
 		hdr = RxChannelHeader(*hdr)
 
-		if hdr.txgrp is not None and self.txgrps is None:
-			raise ValueError('Record specifies Tx-group parameters, but set has no Tx-group configuration')
-		elif hdr.txgrp is None and self.txgrps is not None:
-			raise ValueError('Record specifies no Tx-group parameters, but set requires Tx-group configuration')
+		if self.txgrps is not None:
+			if hdr.txgrp is None:
+				raise ValueError('Record is missing required txgrp configuration')
+			if hdr.txgrp.gidx >= self.txgrps.count:
+				raise ValueError('Record group index too large')
+			if hdr.txgrp.lidx >= self.txgrps.size:
+				raise ValueError('Record local index too large')
+		elif hdr.txgrp is not None:
+			raise ValueError('Record contains inappropriate txgrp configuration')
 
 		# Check that the header bounds make sense
 		if hdr.win.end > self.nsamp:
