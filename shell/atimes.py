@@ -480,8 +480,9 @@ def atimesEngine(config):
 
 		times[target] = dict()
 
+		print 'Finding delays for target %s (%d data files)' % (target, len(datafiles))
+
 		for (dfile, dlayfile) in izip(datafiles, delayfiles):
-			print 'Finding delays for data set', dfile
 			kwargs['cachefile'] = dlayfile
 
 			delays = finddelays(nproc, dfile, reffile, osamp, **kwargs)
