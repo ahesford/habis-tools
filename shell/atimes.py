@@ -99,21 +99,23 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	to identify the delay of the received waveform relative to a reference
 	according to
 
-		datafile[i,j'].delay(reference, osamp=osamp) + datafile.f2c.
+		wave = datafile.getwaveform(i, j, maptids=True)
+		delay = wave.delay(reference, osamp=osamp) + datafile.f2c.
 
 	The addition of datafile.f2c adjusts all delays to a common base time.
 
-	The index (i,j') of the WaveformSet is determined by un-flattening the
+	The index (i,j) of the WaveformSet is determined by un-flattening the
 	strided index, k, into a 2-D index (j,i) into the T x R delay matrix in
-	row-major order, and then mapping the transmit element with
+	row-major order.
 
-		j' = datafile.rid2tx(j).
-
-	*** NOTE: Because this relies on any transmit-group configuration
-	specified in the data file, it is not possible to map transmit elements
-	without associated receive-channel records in the file. If such
-	transmit elements must be specified, the file must be processed to
-	reorder transmissions and remove the transmit-group configuration. ***
+	*** NOTE ***
+	The indices i and j specify element numbers. When accessing waveforms
+	for delay analysis, the transmit element j is mapped to an appropriate
+	transmission number according to any transmit-group configuration
+	specified in the WaveformSet. Thus, either all transmit elements j must
+	have corresponding receive-channel records in the WaveformSet file, or
+	the file must specify no transmit-group configuration (i.e., the
+	transmissions must be stored in element order).
 
 	The reference waveform is read from reffile using the method
 	habis.sigtools.Waveform.fromfile.
@@ -187,10 +189,10 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	* rxelts and txelts: If not None, should be a lists of element indices
 	  such that entry (i,j) in the delay matrix corresponds to the waveform
-	  datafile[rxelts[j],datafile.rid2tx(txelts[i])]. When rxelts is None
-	  or unspecified, it is populated by sorted(datafile.rxidx). When
-	  txelts is None or unspecified, it defaults to rxelts. (See note above
-	  about the limitations of rid2tx mapping.)
+	  datafile.getwaveform(rxelts[j], txelts[i], maptids=True). When rxelts
+	  is None or unspecified, it is populated by sorted(datafile.rxidx).
+	  When txelts is None or unspecified, it defaults to rxelts. (See note
+	  above about the limitations of element-to-transmission mapping.)
 
 	* usediag: If True, only calculate the diagonal portion of the delay
 	  matrix. Incompatible with txelts != None.
@@ -224,7 +226,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	if txelts is None: txelts = list(rxelts)
 
 	# Note transmit element and transmission number for each entry
-	try: tids = [data.rid2tx(t) for t in txelts]
+	try: tids = [data.element2tx(t) for t in txelts]
 	except (KeyError, TypeError):
 		raise ValueError('Cannot map transmit elements to transmission indices')
 

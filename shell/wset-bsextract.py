@@ -40,16 +40,11 @@ if __name__ == '__main__':
 	for f in infiles:
 		wset = WaveformSet.fromfile(f)
 
-		try: _, gsize = wset.txgrps
-		except TypeError: gsize = None
-
 		obase = prefix or os.path.splitext(f)[0]
 		print 'Extracting backscatter waves from file', f, 'to files %s.*' % obase
 
 		for rx in wset.rxidx:
-			tx = wset.rid2tx(rx)
-
-			try: wf = wset[rx, tx]
+			try: wf = wset.getwaveform(rx, rx, maptids=True)
 			except KeyError: continue
 
 			hdr = wset.getheader(rx).copy(txgrp=None)

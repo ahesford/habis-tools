@@ -21,7 +21,7 @@ def _strict_int(x):
 
 
 def _strict_nonnegative_int(x, positive=False):
-	x = _strict_int(x) 
+	x = _strict_int(x)
 	if positive and x <= 0:
 		raise ValueError('Argument must be positive')
 	elif x < 0:
@@ -610,8 +610,8 @@ class WaveformSet(object):
 		# Needed for validation of other properties
 		self._records = OrderedDict()
 
-		# Create a null group map
-		self._groupmap = None
+		# Create an empty group map
+		self._groupmap = { }
 
 		# Assign validated properties
 		self.nsamp = nsamp
@@ -690,7 +690,7 @@ class WaveformSet(object):
 			hbytes = struct.pack('<4s2I2s', 'WAVE', major, minor, typecode)
 
 			# Encode transmission parameters
-			hbytes += struct.pack('<4I2HI', self.f2c, self.nsamp, 
+			hbytes += struct.pack('<4I2HI', self.f2c, self.nsamp,
 					self.nrx, self.ntx, gcount, gsize, self.txstart)
 
 			# Unspecified TGC parameters default to 0
@@ -1133,8 +1133,7 @@ class WaveformSet(object):
 		Access a copy of the map between global element indices to
 		tuples (local index, group index) that govern firing order.
 		'''
-		if self._groupmap is None: return None
-		else: return dict(self._groupmap)
+		return dict(self._groupmap)
 
 
 	@groupmap.setter
@@ -1143,9 +1142,11 @@ class WaveformSet(object):
 		Check the provided mapping from global element indices to
 		(local index, group index) for consistency and assign the map
 		to this instance.
+
+		Set grpmap to None or an object with 0 len() to clear the map.
 		'''
-		if grpmap is None:
-			self._groupmap = None
+		if grpmap is None or len(grpmap) < 1:
+			self._groupmap = { }
 			return
 
 		if self.txgrps is None:
@@ -1170,41 +1171,41 @@ class WaveformSet(object):
 		self._groupmap = ngrpmap
 
 
-	def rid2tx(self, rid, unfold=True):
+	def element2tx(self, elt, unfold=True):
 		'''
-		Convert a receive-channel index rid into a transmit index. If
-		no transmit-group configuration is specified, this is *ALWAYS*
-		an identity map. Otherwise, if self.groupmap is set and rid is
-		in the group map, the transmit index is derived from the
-		groupmap and the transmit-group configuration. If rid is not in
-		the groupmap (or it does not exist), the transmit index is
-		derived from the txgrp property of the receive-channel header
-		for rid. (In this case, rid must correspond to a record stored
-		in the instance.)
+		Convert an element index elt into a transmission index. If no
+		transmit-group configuration exists, this is *ALWAYS* the
+		identity map.
 
-		If unfold is True, the transmit index is a scalar value
-		suitable for indexing into record arrays. If unfold is False,
-		the transmit index is a pair (locidx, grpnum) that can be
-		mapped to the unfolded index, t, by
+		When a transmit-group configuration exists, self.groupmap is
+		first checked for a transmit index for elt. If the groupmap
+		does not exist or fails to specify the necessary index, the
+		txgrp configuration for a receive-channel record for index elt
+		(if one exists) is used.
 
-		  t = locidx + grpnum * self.txgrps.gsize.
+		If unfold is True, the transmission index is a scalar value
+		that directly indexes rows in record arrays. If unfold is
+		False, the transmission index is a pair (locidx, grpnum) that
+		maps to the unfolded index, t, by
+
+			t = locidx + grpnum * self.txgrps.gsize.
 		'''
-		rid = _strict_nonnegative_int(rid)
+		elt = _strict_nonnegative_int(elt)
 
 		try: gcount, gsize = self.txgrps
-		except TypeError: return rid
+		except TypeError: return elt
 
 		try:
-			txgrp = self._groupmap[rid]
-		except (KeyError, TypeError):
-			try: txgrp = self.getheader(rid).txgrp
+			txgrp = self._groupmap[elt]
+		except KeyError:
+			try: txgrp = self.getheader(elt).txgrp
 			except KeyError:
-				raise KeyError('Could not find map record for receive channel %d' % rid)
+				raise KeyError('Could not find map record for receive channel %d' % elt)
 
 		try:
 			idx, grp = txgrp
-		except TypeError:
-			raise TypeError('Unable to unpack transmit-group configuration for channel %d' % rid)
+		except (TypeError, ValueError) as e:
+			raise ValueError('Unable to unpack invalid txgrp for channel %d' % elt)
 
 		return (grp * gsize + idx) if unfold else (idx, grp)
 
@@ -1251,7 +1252,7 @@ class WaveformSet(object):
 		return self._get_record_raw(rid)[0]
 
 
-	def getrecord(self, rid, tid=None, window=None, dtype=None):
+	def getrecord(self, rid, tid=None, window=None, dtype=None, maptids=False):
 		'''
 		Return a (header, waveforms) record for the receive channel
 		with channel index rid. If window is None and dtype is None,
@@ -1281,9 +1282,20 @@ class WaveformSet(object):
 
 		To force a copy without knowing or changing the window and
 		dtype, pass dtype=0.
+
+		If maptids is True, any indices specified in tid will be
+		converted from a transmission index to an element index using
+		self.element2tx().
 		'''
 		# Grab receive record, copy header to avoid corruption
 		hdr, waveforms = self._get_record_raw(rid)
+
+		if maptids and tid is not None:
+			# Map the transmit indices to element indices
+			try:
+				tid = self.element2tx(tid)
+			except TypeError:
+				tid = [self.element2tx(t) for t in tid]
 
 		try:
 			tcidx = self.tx2row(tid)
@@ -1344,6 +1356,8 @@ class WaveformSet(object):
 		If tid is a scalar, a single Waveform object is returned.
 		Otherwise, is tid is an iterable or None (which pulls all
 		transmissions), a list of Waveform objects is returned.
+
+		If a keyword-only argument '' is
 
 		Extra args and kwargs are passed through to getrecord().
 		'''
@@ -1422,7 +1436,7 @@ class WaveformSet(object):
 			if hdr.txgrp is None:
 				# Check the group map for a matching record
 				try:
-					txgrp = self.rid2tx(hdr.idx, unfold=False)
+					txgrp = self.element2tx(hdr.idx, unfold=False)
 				except (KeyError, TypeError):
 					raise ValueError('Record is missing required txgrp configuration')
 				else:
