@@ -32,10 +32,11 @@ def _strict_nonnegative_int(x, positive=False):
 def loadkeymat(*args, **kwargs):
 	'''
 	Loads a textual Numpy matrix by calling numpy.loadtxt(*args, **kwargs),
-	then converts the output to a dictionary mapping integers in some
+	then converts the output to an OrderedDict mapping integers in some
 	positive number of leading columns to Numpy arrays composed of the
 	remaining columns. If the number of remaining columns is 1, the Numpy
-	array will be collapsed to a scalar.
+	array will be collapsed to a scalar. The ouput dictionary preserves the
+	ordering of rows in the input file.
 
 	The dimensionality of the text matrix will be forced to 2 by adding
 	ndmin=2 to the kwargs. Therefore, this value should not be specified in
@@ -63,7 +64,7 @@ def loadkeymat(*args, **kwargs):
 		if len(v) < 2: v = v[0]
 		return k, v
 
-	return dict(kvmaker(g) for g in mat)
+	return OrderedDict(kvmaker(g) for g in mat)
 
 
 def savekeymat(*args, **kwargs):
@@ -75,6 +76,12 @@ def savekeymat(*args, **kwargs):
 
 	If a format is specified as the 'fmt' argument to savetxt, it must
 	account for the extra columns populated by the keys.
+
+	If kwargs contains a 'sortrows' argument, the Boolean value (defaulting
+	to True) for the argument determines whether the mapping is sorted by
+	keys prior to output. Without sorting, the row order is either
+	arbitrary or enforced by the input map (e.g., an OrderedDict). This
+	argument is not forwarded to savetxt.
 	'''
 	# Pull the map
 	if len(args) > 1:
@@ -82,12 +89,16 @@ def savekeymat(*args, **kwargs):
 	else:
 		x = kwargs.pop('X')
 
+	sortrows = kwargs.pop('sortrows', True)
+
 	def aslist(x):
 		try: return list(x)
 		except TypeError: return list([x])
 
+	rows = x.iteritems() if not sortrows else sorted(x.iteritems())
+
 	# Convert the dictionary to a list of lists
-	mat = [ aslist(k) + aslist(v) for k, v in sorted(x.iteritems()) ]
+	mat = [ aslist(k) + aslist(v) for k, v in rows ]
 
 	# Overwrite the input argument for the matrix
 	if len(args) > 1:
@@ -599,6 +610,9 @@ class WaveformSet(object):
 		# Needed for validation of other properties
 		self._records = OrderedDict()
 
+		# Create a null group map
+		self._groupmap = None
+
 		# Assign validated properties
 		self.nsamp = nsamp
 		self.f2c = f2c
@@ -876,7 +890,8 @@ class WaveformSet(object):
 	@txgrps.setter
 	def txgrps(self, grps):
 		'''
-		Set the group count and length.
+		Set the group count and length. Removes any existing groupmap
+		property.
 		'''
 		if grps == self._txgrps: return
 
@@ -885,6 +900,7 @@ class WaveformSet(object):
 
 		if grps is None:
 			self._txgrps = None
+			self.groupmap = None
 			return
 
 		try:
@@ -898,6 +914,7 @@ class WaveformSet(object):
 			raise ValueError('Implied maximum transmission count is less than starting transmission index')
 
 		self._txgrps = grps
+		self.groupmap = None
 
 
 	@property
@@ -954,12 +971,18 @@ class WaveformSet(object):
 		Checks the provided list for sequential ordering of the input
 		sequence txidx and, if the check is satisfied, assigns
 		self.txstart and self.ntx accordingly.
-		'''
-		txit = iter(txidx)
 
-		try: txstart = txit.next()
-		except StopIteration:
+		If the indices are not sequential, but self.txgrps is None, the
+		txgrp configuration and self.groupmap will be set to map
+		transmit indices 0 through len(txidx) - 1 to the elements of
+		txidx.
+		'''
+		txidx = list(txidx)
+
+		try: txstart = txidx[0]
+		except IndexError:
 			self.ntx = 0
+			self.txstart = 0
 			return
 
 		try:
@@ -970,23 +993,34 @@ class WaveformSet(object):
 			def nextval(x): return (x + 1) % maxtx
 		
 		last = txstart
-		ntx = 1
+		sequential = True
 
-		for nv in txit:
-			ntx += 1
+		for nv in txidx[1:]:
 			last = nextval(last)
 			if nv != last:
-				raise ValueError('Transmit indices must be sequential or wrap properly')
+				sequential = False
+				break
 
-		# Record the old txstart to ensure atomicity
-		otxstart = self.txstart
-		self.txstart = txstart
+		def atomic_set(txstart, ntx):
+			# Record the old txstart to ensure atomicity
+			otxstart = self.txstart
+			self.txstart = txstart
 		
-		try: self.ntx = ntx
-		except:
-			# Restore the old txstart before failing
-			self.txstart = otxstart
-			raise
+			try: self.ntx = ntx
+			except:
+				# Restore the old txstart before failing
+				self.txstart = otxstart
+				raise
+
+		if not sequential:
+			if self.txgrps is not None:
+				raise ValueError('Indices must be sequential or wrap when txgrps is defines')
+			# Set txgrp configuration to remap out-of-sequence indices
+			atomic_set(0, len(txidx))
+			self.txgrps = (self.ntx, 1)
+			self.groupmap = { txi: (0, i) for i, txi in enumerate(txidx) }
+		else:
+			atomic_set(txstart, len(txidx))
 
 
 	@property
@@ -1093,25 +1127,86 @@ class WaveformSet(object):
 		self._f2c = _strict_nonnegative_int(val)
 
 
-	def rid2tx(self, rid):
+	@property
+	def groupmap(self):
 		'''
-		Convert a receive-channel index rid (which must be stored in
-		the WaveformSet) into a transmit index according to the
-		transmit-group configuration specified in the set. If the
-		configuration is None, this is an identity map.
+		Access a copy of the map between global element indices to
+		tuples (local index, group index) that govern firing order.
 		'''
-		try: _, gsize = self.txgrps
-		except TypeError: return _strict_nonnegative_int(rid)
+		if self._groupmap is None: return None
+		else: return dict(self._groupmap)
 
-		try: txgrp = self.getheader(rid).txgrp
-		except KeyError:
-			raise KeyError('WaveformSet does not contain receive channel %d' % rid)
 
-		try: idx, grp = txgrp
+	@groupmap.setter
+	def groupmap(self, grpmap):
+		'''
+		Check the provided mapping from global element indices to
+		(local index, group index) for consistency and assign the map
+		to this instance.
+		'''
+		if grpmap is None:
+			self._groupmap = None
+			return
+
+		if self.txgrps is None:
+			raise ValueError('Cannot set a group map without a txgrps configuration for the WaveformSet')
+
+		# Make sure the map is valid and consistent with txgrp configuration
+		ngrpmap = { }
+		for k, v in grpmap.iteritems():
+			ki = _strict_nonnegative_int(k)
+			vi, vg = [_strict_nonnegative_int(vl) for vl in v]
+			if vi >= self.txgrps.size:
+				raise ValueError('Local index in group map exceeds txgrp size')
+			if vg >= self.txgrps.count:
+				raise ValueError('Group index in group map exceeds txgrp count')
+			ngrpmap[ki] = (vi, vg)
+
+		# Check any local receive-channels for consistence
+		for hdr in self.allheaders():
+			if ngrpmap.get(hdr.idx, hdr.txgrp) != hdr.txgrp:
+				raise ValueError('Group map does not match receive-channel record at index %d' % hdr.idx)
+
+		self._groupmap = ngrpmap
+
+
+	def rid2tx(self, rid, unfold=True):
+		'''
+		Convert a receive-channel index rid into a transmit index. If
+		no transmit-group configuration is specified, this is *ALWAYS*
+		an identity map. Otherwise, if self.groupmap is set and rid is
+		in the group map, the transmit index is derived from the
+		groupmap and the transmit-group configuration. If rid is not in
+		the groupmap (or it does not exist), the transmit index is
+		derived from the txgrp property of the receive-channel header
+		for rid. (In this case, rid must correspond to a record stored
+		in the instance.)
+
+		If unfold is True, the transmit index is a scalar value
+		suitable for indexing into record arrays. If unfold is False,
+		the transmit index is a pair (locidx, grpnum) that can be
+		mapped to the unfolded index, t, by
+
+		  t = locidx + grpnum * self.txgrps.gsize.
+		'''
+		rid = _strict_nonnegative_int(rid)
+
+		try: gcount, gsize = self.txgrps
+		except TypeError: return rid
+
+		try:
+			txgrp = self._groupmap[rid]
+		except (KeyError, TypeError):
+			try: txgrp = self.getheader(rid).txgrp
+			except KeyError:
+				raise KeyError('Could not find map record for receive channel %d' % rid)
+
+		try:
+			idx, grp = txgrp
 		except TypeError:
-			raise TypeError('WaveformSet specifies group config, but receive channel does not')
+			raise TypeError('Unable to unpack transmit-group configuration for channel %d' % rid)
 
-		return grp * gsize + idx
+		return (grp * gsize + idx) if unfold else (idx, grp)
 
 
 	def tx2row(self, tid):
@@ -1305,6 +1400,12 @@ class WaveformSet(object):
 		in the header already exists, it will be overwritten.
 		Otherwise, the record will be created.
 
+		If the header specifies None for txgrp, but the WaveformSet
+		transmit-group configuration is not None, any groupmap
+		associated with the WaveformSet will be searched for a matching
+		receive-channel index to create a matching txgrp. No other
+		automatic txgrp manipulation is attempted.
+
 		The waveform array must either be a Numpy ndarray or None. When
 		waveforms takes the special value None, a new, all-zero
 		waveform array is created (regardless of the value of copy).
@@ -1317,12 +1418,28 @@ class WaveformSet(object):
 		hdr = RxChannelHeader(*hdr)
 
 		if self.txgrps is not None:
+			# Ensure consistency with the group configuration
 			if hdr.txgrp is None:
-				raise ValueError('Record is missing required txgrp configuration')
-			if hdr.txgrp.gidx >= self.txgrps.count:
-				raise ValueError('Record group index too large')
-			if hdr.txgrp.lidx >= self.txgrps.size:
+				# Check the group map for a matching record
+				try:
+					txgrp = self.rid2tx(hdr.idx, unfold=False)
+				except (KeyError, TypeError):
+					raise ValueError('Record is missing required txgrp configuration')
+				else:
+					hdr = hdr.copy(txgrp=txgrp)
+			elif hdr.txgrp.grp >= self.txgrps.count:
+				raise ValueError('Record group number too large')
+			elif hdr.txgrp.idx >= self.txgrps.size:
 				raise ValueError('Record local index too large')
+			else:
+				# Ensure consistency with the groupmap
+				try:
+					rgrp = self.groupmap[hdr.idx]
+				except (TypeError, KeyError):
+					pass
+				else:
+					if rgrp != hdr.txgrp:
+						raise ValueError('Record txgrp does not match groupmap')
 		elif hdr.txgrp is not None:
 			raise ValueError('Record contains inappropriate txgrp configuration')
 
@@ -1382,7 +1499,7 @@ class WaveformSet(object):
 			yield self.getrecord(rid, *args, **kwargs)
 
 
-	def allheaders(self, *args, **kwargs):
+	def allheaders(self):
 		'''
 		Return a generator that fetches, in channel-index order, only
 		the receive-channel record headers.

@@ -10,7 +10,7 @@ from collections import defaultdict, OrderedDict
 import multiprocessing
 
 from habis.habiconf import matchfiles, buildpaths
-from habis.formats import WaveformSet
+from habis.formats import WaveformSet, loadkeymat
 from habis.sigtools import Window
 from pycwp import process, mio
 
@@ -116,11 +116,11 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	truncated. The Hadamard decoding follows the grouping configuration
 	stored in the file.
 
-	Outputs will have the transmission indices rearranged according to the
-	rank-2 sequence grpmap, where output transmission i is given the label
-	grpmap[i][0] and corresponds to input transmission
-	
-		j = grpmap[i][1] + grpmap[i][2] * wset.txgrps[1] 
+	Outputs will have the transmission indices rearranged according to
+	grpmap, a mapping between output transmission i corresponds to input
+	transmission
+
+		j = grpmap[i][0] + grpmap[i][1] * wset.txgrps.size
 	    
 	for wset = WaveformSet.fromfile(infile).
 	
@@ -141,7 +141,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	  output instead of WaveformSet files.
 
 	* signs (default: None): When not None, should be a sequence of length
-	  wset.txgrps[1] that specifies a 1 for any local Hadamard index
+	  wset.txgrps.size that specifies a 1 for any local Hadamard index
 	  (corresponding to lines in the file) that should be negated, and 0
 	  anywhere else. Ignored when dofht is False.
 
@@ -204,13 +204,18 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	except TypeError:
 		raise ValueError('A valid Tx-group configuration must be specified')
 
+	# Validate the group map for the input
+	wset.groupmap = grpmap
+
 	# Map global indices to transmission number
-	outidx = OrderedDict((i[0], i[1] + gsize * i[2]) for i in grpmap)
+	outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.iteritems()))
 
 	# Create a WaveformSet object to hold the ungrouped data
 	ftype = _r2c_datatype(wset.dtype)
 	otype = ftype if not tdout else wset.dtype
-	oset = WaveformSet(outidx.keys(), nsamp, wset.f2c, otype)
+	oset = WaveformSet(len(outidx), 0, nsamp, wset.f2c, otype)
+	# Check the output keys for sanity and set the transmit parameters in oset
+	oset.txidx = outidx.keys()
 
 	# Prepare a list of input rows to be copied to output
 	outrows = [wset.tx2row(i) for i in outidx.itervalues()]
@@ -277,11 +282,6 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	for rxc in wset.rxidx[start::stride]:
 		# Grab the waveform record
 		hdr, data = wset.getrecord(rxc)
-
-		# Validate the group map if possible
-		glidx = gsize * hdr.txgrp.grp + hdr.txgrp.idx
-		if (hdr.idx in outidx) and outidx[hdr.idx] != glidx:
-			raise ValueError('Receive channel %d group configuration does not match provided map' % rxc)
 
 		# Remove a signal bias, if appropriate
 		if debias:
@@ -371,7 +371,7 @@ if __name__ == '__main__':
 		elif opt[0] == '-b':
 			kwargs['binfile'] = True
 		elif opt[0] == '-g':
-			grpmap = np.loadtxt(opt[1], dtype=np.uint32)
+			grpmap = loadkeymat(opt[1], dtype=np.uint32)
 		elif opt[0] == '-s':
 			kwargs['signs'] = np.loadtxt(opt[1], dtype=bool)
 		elif opt[0] == '-z':
