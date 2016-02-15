@@ -7,27 +7,28 @@ import sys, numpy as np, os, getopt
 import multiprocessing
 
 from pycwp import process
-from habis.habiconf import matchfiles, buildpaths
+from habis.habiconf import matchfiles, buildpaths, numrange
 from habis.formats import WaveformSet
 from habis.sigtools import Waveform
 
 
 def usage(progname, fatal=False):
-	print >> sys.stderr, 'USAGE: %s [-r rxlist] [-t txlist] [-p nprocs] [-n nsamp] [-o outpath] -f <start:end[:tails]> <inputs>' % progname
+	print >> sys.stderr, 'USAGE: %s [-r rxlist] [-t txlist] [-z] [-p nprocs] [-n nsamp] [-o outpath] -f <start:end[:tails]> <inputs>' % progname
 	sys.exit(int(fatal))
 
 
 def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
-		nsamp=None, start=0, stride=1, lock=None, event=None):
+		nsamp=None, debias=True, start=0, stride=1, lock=None, event=None):
 	'''
 	For the habis.formats.WaveformSet object in infile, successively filter
 	all waves received by channels in the sequence rxchans[start::stride]
 	and transmitted by the channels specified in the sequence txchans using
 	a bandpass filter (habis.sigtools.Waveform.bandpass). If rxchans is
 	None, all receive channels are used. If txchans is None, it defaults to
-	rxchans. Append the filtered waveforms to the specified file named by
-	outfile, which will be created or truncated. All output waveforms will
-	be of type float32.
+	rxchans. If txchans is "all" (regardless of case), every transmission
+	index is used. Append the filtered waveforms to the specified file
+	named by outfile, which will be created or truncated. All output
+	waveforms will be of type float32.
 
 	The filter is defined by the tuple filt = (start, end, [tailwidth]).
 	The bandwidth start and end parameters are specified in units of R2C
@@ -57,13 +58,16 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 	# Attempt to truncate the input signals, if possible
 	if nsamp is not None: wset.nsamp = nsamp
 	if rxchans is None: rxchans = wset.rxidx
-	if txchans is None: txchans = sorted(rxchans)
-
-	if wset.txgrps is not None:
-		raise ValueError('Bandpass filtering is not supported for grouped transmissions')
+	if txchans is None:
+		txchans = sorted(rxchans)
+	elif txchans.lower() == 'all':
+		txchans = sorted(list(wset.txidx))
 
 	# Create an empty waveform set to capture filtered output
-	oset = WaveformSet.empty_like(txchans, wset.nsamp, wset.f2c, np.float32)
+	oset = WaveformSet.empty_like(wset)
+	# Override transmit indices and data type
+	oset.dtype = np.float32
+	oset.txidx = txchans
 
 	# Create the input file header, if necessary
 	getattr(lock, 'acquire', lambda : None)()
@@ -84,6 +88,8 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 		for txc in txchans:
 			# Pull the waveform for the Tx-Rx pair
 			wave = Waveform(wset.nsamp, data[txc], hdr.win.start)
+			# Debias before filtering to mitigate Gibbs phenomenon
+			if debias: wave.debias()
 			# Set output to filtered waveform (force type conversion)
 			owave = wave.bandpass(*filt, dtype=oset.dtype)
 			oset.setwaveform(rxc, txc, owave)
@@ -97,24 +103,26 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 	getattr(lock, 'release', lambda : None)()
 
 
-def mpwavefilt(infile, filt, nproc, outfile, rxchans=None, txchans=None, nsamp=None):
+def mpwavefilt(nproc, *args, **kwargs):
 	'''
 	Subdivide, along receive channels, the work of wavefilt() among
-	nproc processes to bandpass filter the habis.formats.WaveformSet stored
-	in infile into a WaveformSet file that will be written to outfile.
-
-	If rxchans is None, it defaults to all receive channels in the file. If
-	txchans is None, it defaults the rxchans.
-
-	The output file will be overwritten if it already exists.
-
-	If nsamp is not None, it specifies a number of samples to which all
-	input and output waveforms will be truncated. If nsamp is None, the
-	length encoded in the input WaveformSet will be used.
+	nproc processes.
 	'''
+	if 'lock' in kwargs:
+		raise TypeError('Keyword argument "lock" is forbidden')
+	if 'event' in kwargs:
+		raise TypeError('Keyword argument "lock" is forbidden')
+	if 'stride' in kwargs:
+		raise TypeError('Keyward argument "stride" is forbidden')
+	if 'start' in kwargs:
+		raise TypeError('Keyward argument "start" is forbidden')
+
 	# Create a lock and event for output synchronization
-	lock = multiprocessing.Lock()
-	event = multiprocessing.Event()
+	kwargs['lock'] = multiprocessing.Lock()
+	kwargs['event'] = multiprocessing.Event()
+
+	# Set the "stride" argument
+	kwargs['stride'] = nproc
 
 	# Spawn the desired processes to perform the cross-correlation
 	with process.ProcessPool() as pool:
@@ -122,19 +130,21 @@ def mpwavefilt(infile, filt, nproc, outfile, rxchans=None, txchans=None, nsamp=N
 			# Assign a meaningful process name
 			procname = process.procname(i)
 			# Stride the recieve channels
-			args = (infile, filt, outfile, rxchans, txchans, nsamp, i, nproc, lock, event)
-			pool.addtask(target=wavefilt, name=procname, args=args)
+			kwargs['start'] = i
+			pool.addtask(target=wavefilt, name=procname, args=args, kwargs=kwargs)
 
 		pool.start()
 		pool.wait()
 
 
 if __name__ == '__main__':
-	outpath, filt, nsamp = None, None, None
-	rxchans, txchans = None, None
+	outpath, filt = None, None
 	nprocs = process.preferred_process_count()
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'ho:f:p:n:r:t:')
+	# Optional arguments
+	kwargs = { }
+
+	optlist, args = getopt.getopt(sys.argv[1:], 'ho:f:p:n:r:t:z')
 
 	for opt in optlist:
 		if opt[0] == '-p':
@@ -142,13 +152,18 @@ if __name__ == '__main__':
 		elif opt[0] == '-f':
 			filt = tuple(int(s, base=10) for s in opt[1].split(':'))
 		elif opt[0] == '-n':
-			nsamp = int(opt[1])
+			kwargs['nsamp'] = int(opt[1])
 		elif opt[0] == '-o':
 			outpath = opt[1]
 		elif opt[0] == '-r':
-			rxchans = [int(s) for s in opt[1].split(',')]
+			kwargs['rxchans'] = numrange(opt[1])
 		elif opt[0] == '-t':
-			txchans = [int(s) for s in opt[1].split(',')]
+			if opt[1].lower() == 'all':
+				kwargs['txchans'] = 'all'
+			else:
+				kwargs['txchans'] = numrange(opt[1])
+		elif opt[0] == '-z':
+			kwargs['debias'] = False
 		else:
 			usage(sys.argv[0], fatal=True)
 
@@ -170,4 +185,4 @@ if __name__ == '__main__':
 	# Process the waveforms
 	for datafile, outfile in zip(infiles, outfiles):
 		print 'Filtering data file', datafile, '->', outfile
-		mpwavefilt(datafile, filt, nprocs, outfile, rxchans, txchans, nsamp)
+		mpwavefilt(nprocs, datafile, filt, outfile, **kwargs)

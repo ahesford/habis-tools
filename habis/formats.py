@@ -1284,7 +1284,7 @@ class WaveformSet(object):
 		dtype, pass dtype=0.
 
 		If maptids is True, any indices specified in tid will be
-		converted from a transmission index to an element index using
+		converted from an element index to a transmission index using
 		self.element2tx().
 		'''
 		# Grab receive record, copy header to avoid corruption
@@ -1488,13 +1488,18 @@ class WaveformSet(object):
 		self._records[hdr.idx] = (hdr, waveforms)
 
 
-	def setwaveform(self, rid, tid, wave):
+	def setwaveform(self, rid, tid, wave, maptid=False):
 		'''
 		Replace the waveform at receive index rid and transmit index
 		tid with the provided habis.sigtools.Waveform wave. When replacing
 		the existing waveform, the signal will be padded and clipped as
 		necessary to fit into the window defined for the record.
+
+		If maptid is True, the tid will be converted from an element
+		index to a transmission index using self.element2tx().
 		'''
+		if maptid: tid = self.element2tx(tid)
+
 		tcidx = self.tx2row(tid)
 
 		# Pull the existing record

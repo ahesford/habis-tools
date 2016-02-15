@@ -11,6 +11,44 @@ import yaml
 from itertools import izip
 
 
+def numrange(s):
+	'''
+	Parse a string representing comma-separated lists of integers or ranges
+	(of the form start-end) to return a sorted list of integers represented
+	in the string. The start and end indices in range specifications are
+	both included.
+
+	The shlex.split(comments=True) function is used to remove whitespace
+	and comments that might be embedded in the string.
+
+	Duplicate values are OK and are coalesced in the output.
+	'''
+	# Use shlex to remove whitespace and comments, then split on commas
+	ssec = ''.join(shlex.split(s, comments=True)).split(',')
+	rvals = []
+
+	for s in ssec:
+		# Split any ranges and strip whitespace
+		try: spc = [int(sv) for sv in s.split('-') if len(sv.strip())]
+		except ValueError:
+			raise ValueError('Invalid range component "%s"' % s)
+
+		npc = len(spc)
+
+		if npc == 0:
+			continue
+		elif npc == 1:
+			rvals.append(spc[0])
+		elif npc == 2:
+			rseg = range(spc[0], spc[1] + 1)
+			if not len(rseg):
+				raise ValueError('Range "%s" includes no values' % s)
+			rvals.extend(rseg)
+		else: raise ValueError('Invalid range component "%s"' % s)
+
+	return sorted(set(rvals))
+
+
 def matchfiles(files, forcematch=True):
 	'''
 	Given a list of files or globs, return a list of matching files.
@@ -377,31 +415,20 @@ class HabisConfigParser(object):
 
 	def getrange(self, section, option, *args, **kwargs):
 		'''
-		Parse a value for the given section and option as either a
-		range or an explicit list of integers. The value is fetched
-		using self.get(section, option).
+		Parse a value self.get(section, option) as a list of integers
+		or ranges. The return value is an expanded and sorted list of
+		integers.
 
 		The "mapper" and "checkmap" arguments are not supported.
 		Optional arguments "default" and "failfunc" are consumed by
 		this function and behave as they do with self.getlist().
 
-		A configured range is specifed as a value
+		Ranges take the form
 
-			range int1 [int2 [int3]]
+			2, 5, 7-12, 15
 
-		where int1, int2, and int3 are integers passed as arguments to
-		range(). The ints are processed by int(), so non-integer
-		arguments will be clipped instead of throwing a TypeError.
-
-		If an explicit list of integers is desired, the value should
-		take the form
-
-			int1 [...]
-
-		Again, int() will be used to convert non-integer arguments.
-
-		The function shlex.split(value, comments=True) is used to parse
-		the value string.
+		Range specifications of the form "start-end" include both the
+		start and end indices.
 		'''
 		# Process optional arguments
 		optargs = self._get_optargs(*args, **kwargs)
@@ -420,15 +447,4 @@ class HabisConfigParser(object):
 				except KeyError: pass
 			raise e
 
-		items = shlex.split(val, comments=True)
-		if len(items) < 1: return []
-
-		if items[0].lower() == 'range':
-			# Process a configuration range
-			if len(items) < 2 or len(items) > 4:
-				raise HabisConfigError('Range specification must between 1 and 3 arguments')
-			# Pass the arguments to range
-			return range(*(int(i) for i in items[1:]))
-
-		# Just convert all arguments to ints
-		return [int(i) for i in items]
+		return numrange(val)
