@@ -308,9 +308,11 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		if bandpass is not None:
 			# Remove DC bias to reduce Gibbs phenomenon
 			sig.debias()
-			sig = sig.bandpass(**bandpass)
+			# Bandpass and crop to original data window
+			sig = sig.bandpass(**bandpass).window(sig.datawin)
 
 		if window is not None:
+			# Apply a desired restricted window
 			sig = sig.window(window, **winargs)
 
 		if minsnr is not None and noisewin is not None:
