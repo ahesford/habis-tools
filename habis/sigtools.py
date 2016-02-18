@@ -1146,10 +1146,10 @@ class Waveform(object):
 		if prommode == 'noisedb':
 			# Compute the noise standard deviation
 			try:
-				nvar = min(stats.rolling_variance(self._data, noisewin))
+				nstd = min(stats.rolling_std(self._data, noisewin))
 			except ValueError:
-				raise ValueError('Noise window %d too wide to compute variance' % noisewin)
-			minprom = 10.**(minprom / 20.) * math.sqrt(nvar)
+				raise ValueError('Noise window %d too wide to compute standard deviation' % noisewin)
+			minprom = 10.**(minprom / 20.) * nstd
 		elif prommode == 'relative':
 			try:
 				minprom = minprom * max(pk['peak'][1] for pk in peaks)
