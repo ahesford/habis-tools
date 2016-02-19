@@ -190,8 +190,6 @@ def hadtest(decfile, stxfile, **kwargs):
 		# Grab the overlapping portion of the window
 		cwin = Window(max(dwin.start, swin.start), end=min(dwin.end, swin.end))
 
-		print 'RXC', rxc
-
 		for chanrec, decrow, stxrow in izip(chanrow, decdat, stxdat):
 			# Convert each record row to a Waveform
 			decwave = Waveform(dwin.end, decrow, dwin.start)
