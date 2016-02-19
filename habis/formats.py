@@ -438,7 +438,7 @@ class WaveformSet(object):
 		specifies the fire-to-capture delay to encode in the set.
 		'''
 		# Create the set
-		wset = cls([tid], wave.nsamp, f2c, wave.dtype)
+		wset = cls(1, tid, wave.nsamp, f2c, wave.dtype)
 
 		if hdr is None:
 			# Create a default header
