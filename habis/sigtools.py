@@ -106,6 +106,16 @@ class Window(tuple):
 	@property
 	def end(self): return self[0] + self[1]
 
+	def shift(self, ds):
+		'''
+		Convenience function returning
+
+			Window(self.start + ds, self.length).
+
+		The start is allowed to be negative.
+		'''
+		return type(self)(self[0] + ds, self[1])
+
 
 class Waveform(object):
 	'''
@@ -593,7 +603,7 @@ class Waveform(object):
 		tuple, a habis.sigtools.Window object, or a dictionary
 		equivalent with exactly two of the keys 'start', 'end' or
 		'length'.
-		
+
 		If tails is provided, it should be a scalar or a 1-D array of
 		length 2N, where the first N values will multiply the signal in
 		the range [start:start+N] and the last N values mull multiply

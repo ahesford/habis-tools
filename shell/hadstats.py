@@ -9,31 +9,20 @@ from numpy import fft, linalg as la
 
 from itertools import izip
 
+from scipy.signal import hilbert
+
 import multiprocessing, Queue
 
 from pycwp import process, stats
 
-from habis.habiconf import matchfiles, buildpaths
-from habis.formats import WaveformSet
+from habis.habiconf import matchfiles, buildpaths, HabisConfigParser, HabisConfigError, HabisNoOptionError
+from habis.formats import WaveformSet, loadkeymat
 from habis.sigtools import Waveform, Window
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s [-p p] [-q q] [-d d] [-n n] -o output -s <single-tx> <decoded WaveformSets>' % binfile
-	print >> sys.stderr, '''
-  Compare Hadamard-decoded and single-transmission WaveformSets.
-
-  REQUIRED ARGUMENTS:
-  -s: Search the provided directory for single-transmission WaveformSets
-  -o: Provide a path for writing output using pickle.dump()
-
-  OPTIONAL ARGUMENTS:
-  -p: Use p processors (default: all available processors)
-  -q: Set the width of the "quiet window" over which to estimate the SNR
-  -n: Set the oversampling rate with which waveforms will be aligned
-  -d: Set the maximum allowable delay shift before forcing a nominal shift
-	'''
+	print >> sys.stderr, 'USAGE: %s <configuration>' % binfile
 	if fatal: sys.exit(fatal)
 
 
@@ -89,7 +78,7 @@ def mphadtest(nproc, *args, **kwargs):
 def hadtest(decfile, stxfile, **kwargs):
 	'''
 	For a WaveformSet file decfile containing Hadamard-decoded waveforms,
-	and corresponding single-transmission waveforms in the WaveformSet file
+	and corresponding single-element waveforms in the WaveformSet file
 	stxfile, perform optional bandpass filtering on the waves in both sets,
 	then return a dictionary providing statistics on the two sets.
 
@@ -99,33 +88,50 @@ def hadtest(decfile, stxfile, **kwargs):
 	the array are:
 
 	* delay: The list of delays d.delay(s, osamp=osamp) between the decoded
-	  (d) and single-transmission (s) waves for each transmission.
+	  (d) and single-element (s) waves for each transmission.
 
-	* esnr: The error SNR (in dB). For each transmission with decoded (d)
-	  and single-transmission (s) waveforms, the error is E = d - s and the
-	  error SNR is var(E) / min(stats.rolling_variance(E, qper)).
+	* dppwr, sppwr: The peak power (on a linear scale) of the decoded (d)
+	  and single-element (s) waveforms for each transmission, as the square
+	  of the peak amplitude.
 
-	* dsnr: The SNR (in dB) of the decoded waveforms for each transmission,
-	  computed as d.snr(qper) when d is a habis.sigtools.Waveform instance.
+	* dnpwr, snpwr: The noise power (on a linear scale) of the
+	  decoded (d) and single-element (s) waveforms for each transmission,
+	  as the minimum variance over a sliding window of length qper.
 
-	* ssnr: The SNR (in dB) of the single-transmission waveforms for each
-	  transmission, computed as for dsnr.
+	* epwr: The averaged power over a window around the expected peak
+	  arrival time (or the entire signal if no expected arrival time is
+	  provided), as var(E) for an error E = d - s.
 
-	*** NOTE: Signals d and s, and error E, must have zero mean for the SNR
-	    values defined above to make sense. This can be enforced by
-	    bandpass filtering to exclude a DC component.
+	*** NOTE: Signals d, s and E, must have zero mean for the power as
+	    defined above to make sense. This can be enforced by bandpass
+	    filtering to exclude a DC component.
 
 	The kwargs contain optional values or default overrides:
 
-	* qper (default: 100): The width, in samples, of a sliding window used
+	* qper (default: 50): The width, in samples, of a sliding window used
 	  to identify the quietest portion of a signal for SNR comparisons.
 
-	* osamp (default: 1): Set the oversampling rate with which delays
-	  between single-transmission and decoded waveforms will be computed.
+	* osamp (default: 1): The oversampling rate with which delays between
+	  single-element and decoded waveforms will be computed.
 
-	* maxd (default: 10): Set the maximum allowable magnitude of calculated
-	  delays between single-transmission and decoded waveforms. If a delay
-	  exceeds maxd, esnr will be calculated without aligning the waveforms.
+	* maxdelay (default: 10): The maximum allowable delay between decoded
+	  and single-element waveforms. If a delay exceeds maxdelay, epwr and
+	  enpwr will be calculated without aligning the waveforms.
+
+	* ref (default: None): If not None, should be the name of a file
+	  specifying a reference waveform used to determine arrival times (and
+	  alignment) for decoded and single-element waveforms. If None, the
+	  delay will be determined by directly cross-correlating the waveforms.
+
+	* peaks (default: None): If not None, should be a dictionary of kwargs
+	  passed to Waveform.isolatepeak for every decoded and single-element
+	  Waveform. An additional 'nearmap' key may be included to specify the
+	  name of a file, loadable with habis.formats.loadkeymat, that
+	  specifies a mapping between element indices and expected round-trip
+	  delays (in samples, relative to 0 f2c) for monostatic reflections
+	  from a target. The index argument to Waveform.isolatepeak will be
+	  populated with 0.5 * (atmap[tx] + atmap[rx]) for a given Waveform
+	  transmitted from element tx and received on element rx.
 
 	* start (default: 0) and stride (default: 1): For an input WaveformSet
 	  wset, process receive channels in wset.rxidx[start::stride].
@@ -140,14 +146,24 @@ def hadtest(decfile, stxfile, **kwargs):
 	osamp = kwargs.pop('osamp', 1)
 
 	# Grab the maximum allowable delay
-	maxd = kwargs.pop('maxd', 10)
+	maxdelay = kwargs.pop('maxdelay', 10)
 
 	# Grab striding information
 	start = kwargs.pop('start', 0)
 	stride = kwargs.pop('stride', 1)
 
 	# Grab the quiet-window width
-	qper = int(kwargs.pop('qper', 100))
+	qper = int(kwargs.pop('qper', 50))
+
+	# Load a cross-correlation reference if provided
+	try: ref = Waveform.fromfile(kwargs.pop('ref'))
+	except KeyError: ref = None
+
+	# Grab the isolation parameters
+	peaks = kwargs.pop('peaks', None)
+	if peaks is not None:
+		try: atmap = loadkeymat(peaks.pop('nearmap'))
+		except KeyError: atmap = { }
 
 	if len(kwargs):
 		raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
@@ -175,7 +191,7 @@ def hadtest(decfile, stxfile, **kwargs):
 
 	# Build the record data type
 	rectype = np.dtype([(name, '<f4') 
-		for name in ['delay', 'esnr', 'dsnr', 'ssnr']])
+		for name in ['delay', 'epwr', 'dppwr', 'dnpwr', 'sppwr', 'snpwr']])
 	chanrecs = np.zeros((len(decset.rxidx[start::stride]), len(txlist)), dtype=rectype)
 
 	for chanrow, rxc in izip(chanrecs, decset.rxidx[start::stride]):
@@ -183,33 +199,53 @@ def hadtest(decfile, stxfile, **kwargs):
 		dechdr, decdat = decset.getrecord(rxc, txlist)
 		stxhdr, stxdat = stxset.getrecord(rxc, txlist)
 
+		# Calculate the peak powers
+		chanrow['dppwr'][:] = np.max(np.abs(hilbert(decdat, axis=-1)), axis=-1)**2
+		chanrow['sppwr'][:] = np.max(np.abs(hilbert(stxdat, axis=-1)), axis=-1)**2
+
+		# Calculate the noise powers
+		chanrow['dnpwr'][:] = np.min(stats.rolling_variance(decdat, qper), axis=-1)
+		chanrow['snpwr'][:] = np.min(stats.rolling_variance(stxdat, qper), axis=-1)
+
 		# Shift the data windows to 0 f2c
-		dwin = Window(dechdr.win.start + decset.f2c, dechdr.win.length)
-		swin = Window(stxhdr.win.start + stxset.f2c, stxhdr.win.length)
+		dwin = dechdr.win.shift(decset.f2c)
+		swin = stxhdr.win.shift(stxset.f2c)
 
 		# Grab the overlapping portion of the window
 		cwin = Window(max(dwin.start, swin.start), end=min(dwin.end, swin.end))
 
-		for chanrec, decrow, stxrow in izip(chanrow, decdat, stxdat):
+		for chanrec, decrow, stxrow, txc in izip(chanrow, decdat, stxdat, txlist):
 			# Convert each record row to a Waveform
 			decwave = Waveform(dwin.end, decrow, dwin.start)
 			stxwave = Waveform(swin.end, stxrow, swin.start)
+			
+			if peaks is not None:
+				# Find expected arrival time
+				try: expk = 0.5 * (atmap[rxc] + atmap[txc])
+				except KeyError: expk = None
+				# Attempt to isolate peaks, if possible
+				try: decwave = decwave.isolatepeak(expk, **peaks)
+				except ValueError: pass
+				try: stxwave = stxwave.isolatepeak(expk, **peaks)
+				except ValueError: pass
 
-			# Figure the delay between elements
-			delay = decwave.delay(stxwave, osamp=osamp)
+			# Figure the delay between waveforms
+			if ref is not None:
+				decdelay = decwave.delay(ref, osamp=osamp)
+				stxdelay = stxwave.delay(ref, osamp=osamp)
+				delay = decdelay - stxdelay
+			else:
+				delay = decwave.delay(stxwave, osamp=osamp)
+
 			chanrec['delay'] = delay
 
-			chanrec['dsnr'] = decwave.snr(qper)
-			chanrec['ssnr'] = stxwave.snr(qper)
-
 			# Limit allowable shift for alignments
-			if abs(delay) <= maxd:
+			if abs(delay) <= maxdelay:
 				stxwave = stxwave.shift(delay)
 
 			# Calculate the error SNR
 			dwave = (decwave - stxwave).window(cwin)
-			npwr = min(stats.rolling_variance(dwave._data, qper))
-			chanrec['esnr'] = 10 * np.log10(np.var(dwave._data) / npwr)
+			chanrec['epwr'] = np.var(dwave._data)
 			
 		results[rxc] = chanrow
 
@@ -220,53 +256,95 @@ def hadtest(decfile, stxfile, **kwargs):
 
 
 if __name__ == '__main__':
-	# Set default options
-	nprocs = process.preferred_process_count()
-	outfile = None
-	stxpath = None
-
 	# Build optional or default overrides for hadtest
 	kwargs = {}
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'hs:o:p:q:n:d:')
+	if len(sys.argv) != 2:
+		usage(sys.argv[0], fatal=True)
 
-	for opt in optlist:
-		if opt[0] == '-s':
-			stxpath = opt[1]
-		elif opt[0] == '-o':
-			outfile = opt[1]
-		elif opt[0] == '-p':
-			nprocs = int(opt[1])
-		elif opt[0] == '-q':
-			kwargs['qper'] = int(opt[1])
-		elif opt[0] == '-n':
-			kwargs['osamp'] = int(opt[1])
-		elif opt[0] == '-d':
-			kwargs['maxd'] = int(opt[1])
-		else:
-			usage(fatal=True)
+	try: config = HabisConfigParser(sys.argv[1])
+	except:
+		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		usage(sys.argv[0], fatal=True)
 
-	if outfile is None or stxpath is None:
-		print >> sys.stderr, 'ERROR: arguments -o and -s are required'
-		usage(fatal=True)
-
-	try: decfiles = matchfiles(args)
-	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
-		usage(fatal=True)
+	# Configuration sections
+	hsec = 'hadstats'
 
 	try:
-		stxfiles = buildpaths(decfiles, stxpath)
-	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
-		usage(fatal=True)
+		decfiles = matchfiles(config.getlist(hsec, 'decoded'))
+		if len(decfiles) < 1:
+			err = "Key 'decoded' matches no input files"
+			raise HabisConfigError(err)
+	except Exception as e:
+		err = 'Configuration must specify at least one valid decoded file'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		stxfiles = buildpaths(decfiles, config.get(hsec, 'stxdir'))
+	except Exception as e:
+		err = 'Configuration must specify a valid location for single-element transmissions'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		outfile = config.get(hsec, 'output')
+	except Exception as e:
+		err = 'Configuration must specify an output file'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		nproc = config.get('general', 'nproc', mapper=int,
+				failfunc=process.preferred_process_count)
+	except Exception as e:
+		err = 'Invalid specification of optional nproc'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		kwargs['qper'] = config.get(hsec, 'noisewin', mapper=int)
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional noisewin'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		kwargs['osamp'] = config.get('sampling', 'osamp', mapper=int)
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional osamp'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		kwargs['maxdelay'] = config.get(hsec, 'maxdelay', mapper=int)
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional maxdelay'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		kwargs['ref'] = config.get('measurement', 'reference')
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional reference'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		kwargs['peaks'] = config.get(hsec, 'peaks')
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional peaks'
+		raise HabisConfigError.fromException(err, e)
+
 
 	# Accumulate results from all files
-	results = {}
+	results = { }
 
 	for decfile, stxfile in zip(decfiles, stxfiles):
 		print 'Comparing data files', decfile, stxfile
-		fres = mphadtest(nprocs, decfile, stxfile, **kwargs)
+		fres = mphadtest(nproc, decfile, stxfile, **kwargs)
 		results.update(fres)
 
 	cPickle.dump(results, open(outfile, 'wb'), protocol=2)

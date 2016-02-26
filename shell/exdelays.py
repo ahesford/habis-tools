@@ -42,7 +42,7 @@ def exdelayEngine(config):
 	# Read the element and reflector positions
 	eltspos = dict(kp for efile in eltfiles
 			for kp in loadkeymat(efile).iteritems())
-	reflpos = np.loadtxt(rflfile)
+	reflpos = np.loadtxt(rflfile, ndmin=2)
 	nrefl, nrdim = reflpos.shape
 
 	times = {}
