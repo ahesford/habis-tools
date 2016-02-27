@@ -190,8 +190,8 @@ def hadtest(decfile, stxfile, **kwargs):
 	txlist = sorted(decset.txidx)
 
 	# Build the record data type
-	rectype = np.dtype([(name, '<f4') 
-		for name in ['delay', 'epwr', 'dppwr', 'dnpwr', 'sppwr', 'snpwr']])
+	rectype = np.dtype([('delay', '<f4'), ('dwin', '<2i4'), ('swin', '<2i4')] +
+			[(n + 'pwr', '<f4') for n in ['e', 'dp', 'dn', 'sp', 'sn']])
 	chanrecs = np.zeros((len(decset.rxidx[start::stride]), len(txlist)), dtype=rectype)
 
 	for chanrow, rxc in izip(chanrecs, decset.rxidx[start::stride]):
@@ -228,6 +228,10 @@ def hadtest(decfile, stxfile, **kwargs):
 				except ValueError: pass
 				try: stxwave = stxwave.isolatepeak(expk, **peaks)
 				except ValueError: pass
+
+			# Record the data windows for the cross-correlation
+			chanrec['dwin'][:] = decwave.datawin
+			chanrec['swin'][:] = stxwave.datawin
 
 			# Figure the delay between waveforms
 			if ref is not None:
