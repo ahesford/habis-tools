@@ -286,9 +286,10 @@ if __name__ == '__main__':
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		outfile = config.get(hsec, 'output')
+		outdir = config.get(hsec, 'outdir', default=None)
+		outfiles = buildpaths(decfiles, outdir, 'hadstats.pickle')
 	except Exception as e:
-		err = 'Configuration must specify an output file'
+		err = 'Configuration must specify a valid location for output files'
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -323,12 +324,22 @@ if __name__ == '__main__':
 		raise HabisConfigError.fromException(err, e)
 
 	try:
+		useref = config.get(hsec, 'useref', mapper=bool, default=True)
+	except Exception as e:
+		err = 'Invalid specification of optional useref'
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		if not useref:
+			raise HabisNoOptionError('Skip reference specification')
 		kwargs['ref'] = config.get('measurement', 'reference')
 	except HabisNoOptionError:
-		pass
+		print 'Delays will be estimated by direct cross-correlation'
 	except Exception as e:
 		err = 'Invalid specification of optional reference'
 		raise HabisConfigError.fromException(err, e)
+	else:
+		print 'Delays will be estimated by cross-correlation with reference', kwargs['ref']
 
 	try:
 		kwargs['peaks'] = config.get(hsec, 'peaks')
@@ -339,12 +350,7 @@ if __name__ == '__main__':
 		raise HabisConfigError.fromException(err, e)
 
 
-	# Accumulate results from all files
-	results = { }
-
-	for decfile, stxfile in zip(decfiles, stxfiles):
-		print 'Comparing data files', decfile, stxfile
-		fres = mphadtest(nproc, decfile, stxfile, **kwargs)
-		results.update(fres)
-
-	cPickle.dump(results, open(outfile, 'wb'), protocol=2)
+	for decfile, stxfile, outfile in zip(decfiles, stxfiles, outfiles):
+		print 'Comparing data files (%s, %s) -> %s' % (decfile, stxfile, outfile)
+		results = mphadtest(nproc, decfile, stxfile, **kwargs)
+		cPickle.dump(results, open(outfile, 'wb'), protocol=2)
