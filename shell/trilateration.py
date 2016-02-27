@@ -207,6 +207,8 @@ def trilaterationEngine(config):
 
 	# Pull the relevant times
 	ctimes = np.array([times[e] for e in elements])
+	if ctimes.ndim == 1:
+		ctimes = ctimes[:,np.newaxis]
 
 	# Build a list of the elements in each facet
 	facets = { }
