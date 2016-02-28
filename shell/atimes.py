@@ -447,7 +447,7 @@ def atimesEngine(config):
 
 	try:
 		# Determine peak-selection criteria
-		peaks = config.get(asec, 'peaks')
+		kwargs['peaks'] = config.get(asec, 'peaks')
 	except HabisNoOptionError:
 		pass
 	except Exception as e:
@@ -461,7 +461,7 @@ def atimesEngine(config):
 
 	try:
 		# Remove the nearmap file key
-		guesses = loadkeymat(kwargs['peaks'].pop('nearmap'))
+		guesses = loadkeymat(kwargs['peaks'].pop('nearmap'), scalar=False)
 	except (KeyError, TypeError, IOError, AttributeError) as e:
 		guesses = None
 	else:

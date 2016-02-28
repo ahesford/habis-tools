@@ -34,9 +34,15 @@ def loadkeymat(*args, **kwargs):
 	Loads a textual Numpy matrix by calling numpy.loadtxt(*args, **kwargs),
 	then converts the output to an OrderedDict mapping integers in some
 	positive number of leading columns to Numpy arrays composed of the
-	remaining columns. If the number of remaining columns is 1, the Numpy
-	array will be collapsed to a scalar. The ouput dictionary preserves the
-	ordering of rows in the input file.
+	remaining columns. The ouput dictionary preserves the ordering of rows
+	in the input file.
+
+	If the number of remaining columns is 1, setting an optional keyword
+	argument scalar (default: True) to False will preserve 1-element Numpy
+	arrays as the values of the dictionary. Otherwise, 1-element Numpy
+	arrays in the dictionary values will be collapsed to scalars. The
+	scalar keyword argument is stripped from kwargs and is not passed to
+	numpy.loadtxt.
 
 	The dimensionality of the text matrix will be forced to 2 by adding
 	ndmin=2 to the kwargs. Therefore, this value should not be specified in
@@ -47,7 +53,10 @@ def loadkeymat(*args, **kwargs):
 	nkeys is 1, the keys will be single integers. For nkeys > 1, the keys
 	will be tuples of integers.
 	'''
+	# Pull speciality kwargs
 	nkeys = _strict_nonnegative_int(kwargs.pop('nkeys', 1), positive=True)
+	scalar = kwargs.pop('scalar', True)
+
 	# Ensure the dimensionality is correctly specified
 	kwargs['ndmin'] = 2
 	mat = np.loadtxt(*args, **kwargs)
@@ -61,7 +70,7 @@ def loadkeymat(*args, **kwargs):
 		k = tuple(_strict_int(gv) for gv in g[:nkeys])
 		v = g[nkeys:]
 		if len(k) < 2: k = k[0]
-		if len(v) < 2: v = v[0]
+		if scalar and len(v) < 2: v = v[0]
 		return k, v
 
 	return OrderedDict(kvmaker(g) for g in mat)
@@ -426,9 +435,9 @@ class WaveformSet(object):
 		will be used for the single receive-channel record in the
 		output WaveformSet. The value of hdr.win will be overwritten
 		with wave.datawin. If hdr is None, a default value
-		
+
 			(0, [0., 0., 0.], wave.datawin)
-			
+
 		will be used.
 
 		The parameter tid should be a single nonnegative integer that
@@ -696,7 +705,7 @@ class WaveformSet(object):
 			# Unspecified TGC parameters default to 0
 			try: tgc = self.extrabytes['tgc']
 			except KeyError: tgc = np.zeros(256, dtype=np.float32).tobytes()
-			
+
 			if len(tgc) != 1024:
 				raise ValueError('File version (1,4) requires 1024 TGC bytes')
 
@@ -790,7 +799,7 @@ class WaveformSet(object):
 					size = 10240 / count
 					if size * count != 10240:
 						raise ValueError('Cannot infer group size for %d groups' % count)
-					
+
 				self.txgrps = count, size
 
 			# For version (1,4), read an explicit txstart
@@ -991,7 +1000,7 @@ class WaveformSet(object):
 			def nextval(x): return (x + 1)
 		else:
 			def nextval(x): return (x + 1) % maxtx
-		
+
 		last = txstart
 		sequential = True
 
@@ -1005,7 +1014,7 @@ class WaveformSet(object):
 			# Record the old txstart to ensure atomicity
 			otxstart = self.txstart
 			self.txstart = txstart
-		
+
 			try: self.ntx = ntx
 			except:
 				# Restore the old txstart before failing
