@@ -84,10 +84,10 @@ def finddelays(nproc=1, *args, **kwargs):
 
 		pool.wait()
 
-	try:
+	if len(delays):
 		# Save the computed delays, if desired
-		savekeymat(cachefile, delays, fmt='%d %d %16.8f')
-	except (ValueError, IOError): pass
+		try: savekeymat(cachefile, delays, fmt='%d %d %16.8f')
+		except (ValueError, IOError): pass
 
 	return delays
 
