@@ -497,7 +497,7 @@ def atimesEngine(config):
 			# Convert delays to arrival times
 			delays = { k: v * dt + t0 for k, v in delays.iteritems() }
 
-			if np.any(delays.itervalues() < 0):
+			if any(dv < 0 for dv in delays.itervalues()):
 				raise ValueError('Non-physical, negative delays exist')
 
 			if maskoutliers:
