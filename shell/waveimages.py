@@ -179,8 +179,13 @@ def getbswaves(args):
 		if bpass: wf = wf.bandpass(*bpass).window(dwin)
 
 		if atimes:
-			try: wf = wf.shift(mtime - atimes[rx])
-			except KeyError: pass
+			try:
+				shift = mtime - atimes[rx]
+			except KeyError:
+				pass
+			else:
+				wf = wf.shift(shift)
+				dwin = wf.datawin
 
 		bswaves[rx] = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
 

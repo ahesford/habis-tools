@@ -6,6 +6,8 @@
 import sys, numpy as np, os, getopt
 import multiprocessing
 
+from itertools import izip
+
 from pycwp import process
 from habis.habiconf import matchfiles, buildpaths, numrange
 from habis.formats import WaveformSet
@@ -57,11 +59,11 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 	wset = WaveformSet.fromfile(infile)
 	# Attempt to truncate the input signals, if possible
 	if nsamp is not None: wset.nsamp = nsamp
-	if rxchans is None: rxchans = wset.rxidx
+	if rxchans is None: rxchans = sorted(wset.rxidx)
 	if txchans is None:
 		txchans = sorted(rxchans)
 	elif txchans.lower() == 'all':
-		txchans = sorted(list(wset.txidx))
+		txchans = sorted(wset.txidx)
 
 	# Create an empty waveform set to capture filtered output
 	oset = WaveformSet.empty_like(wset)
@@ -80,14 +82,14 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 
 	for rxc in rxchans[start::stride]:
 		# Read the record
-		hdr, data = wset.getrecord(rxc)
+		hdr, data = wset.getrecord(rxc, txchans)
 
 		# Create an empty record in the output set to hold filtered waves
 		oset.setrecord(hdr)
 
-		for txc in txchans:
+		for txc, drow in izip(txchans, data):
 			# Pull the waveform for the Tx-Rx pair
-			wave = Waveform(wset.nsamp, data[txc], hdr.win.start)
+			wave = Waveform(wset.nsamp, drow, hdr.win.start)
 			# Debias before filtering to mitigate Gibbs phenomenon
 			if debias: wave.debias()
 			# Set output to filtered waveform (force type conversion)
