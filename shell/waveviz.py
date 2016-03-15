@@ -35,11 +35,17 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	import matplotlib.pyplot as plt
 	import matplotlib.animation as ani
 
+	# Ensure all data sets are equally sized
+	nsets = max(len(v) for v in waves.itervalues())
+	if any(len(v) != nsets for v in waves.itervalues()):
+		raise ValueError('All waveform lists must be equally sized')
+
 	# Prepare the axes for a 1080p frame
 	fig = plt.figure()
 	fig.set_dpi(80)
 	fdpi = float(fig.get_dpi())
 	fig.set_size_inches(1920. / fdpi, 1080. / fdpi)
+	fig.subplots_adjust(left=0.1, right=0.975, bottom=0.1, top=0.9)
 
 	# Grab the axes
 	ax = ax = fig.add_subplot(111)
@@ -60,14 +66,10 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 		dwin = Window(dstart, end=dend)
 	else:
 		# With a data window, encompass the maximum range of arrival times
-		dstart = int(min(atimes[elt][0] if elt in atimes else float('inf')
-				for elt in waves.iterkeys()))
-		dend = int(max(atimes[elt][0] if elt in atimes else 0
-				for elt in waves.iterkeys()))
-		dwin = Window(max(0, dstart + dwin[0]), end=dend + dwin[1])
-
-	# Build the common time axis
-	taxis = np.arange(dwin.start, dwin.end)
+		celts = set(waves.iterkeys()).intersection(atimes.iterkeys())
+		dstart = min(atimes[elt][0] for elt in celts)
+		dend = max(atimes[elt][0] for elt in celts)
+		dwin = Window(max(0, int(dstart + dwin[0])), end=int(dend + dwin[1]))
 
 	# Clip the waveforms to the common data window
 	waves = { k: [ w.window(dwin) for w in v ] for k, v in waves.iteritems() }
@@ -77,16 +79,16 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	if cthresh is None: vmax = np.max(pkamps)
 	else: vmax = np.mean(pkamps) + cthresh * np.std(pkamps)
 
-	# Ensure all data sets are equally sized
-	nsets = max(len(v) for v in waves.itervalues())
-	if any(len(v) != nsets for v in waves.itervalues()):
-		raise ValueError('All waveform lists must be equally sized')
+	# Build the common time axis
+	taxis = np.arange(dwin.start, dwin.end)
 
 	# Create the frames and write the video
 	with writer.saving(fig, output, fig.get_dpi()):
 		# Create the empty plot for efficiency
 		lines = ax.plot(*[[] for i in range(2 * nsets)])
-		ax.axis([dwin.start, dwin.end, -vmax, vmax])
+		ax.hold(True)
+		apoint, = ax.plot([], [], 'bs')
+		ax.axis([taxis[0], taxis[-1], -vmax, vmax])
 		ax.set_xlabel('Time, samples', fontsize=14)
 		ax.set_ylabel('Amplitude', fontsize=14)
 		ax.grid(True)
@@ -95,7 +97,17 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 			# Update the line data
 			for l, w in izip(lines, wlist):
 				l.set_data(taxis, w.getsignal(dwin))
-			ax.set_title('Waveform for element %d' % elt, fontsize=16)
+
+			# Plot an arrival time, if possible
+			try:
+				atelt = int(atimes[elt][0])
+			except (KeyError, TypeError):
+				apoint.set_visible(False)
+			else:
+				apoint.set_data([atelt], [wlist[0][atelt]])
+				apoint.set_visible(True)
+
+			ax.set_title('Waveform for element %d' % elt, fontsize=14)
 
 			# Capture the frame
 			writer.grab_frame()
