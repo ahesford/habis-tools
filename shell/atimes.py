@@ -462,7 +462,10 @@ def atimesEngine(config):
 	try:
 		# Remove the nearmap file key
 		guesses = loadkeymat(kwargs['peaks'].pop('nearmap'), scalar=False)
-	except (KeyError, TypeError, IOError, AttributeError) as e:
+	except IOError as e:
+		guesses = None
+		print >> sys.stderr, 'WARNING - Ignoring nearmap:', e
+	except (KeyError, TypeError, AttributeError):
 		guesses = None
 	else:
 		# Adjust delay time scales

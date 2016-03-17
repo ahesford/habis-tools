@@ -82,6 +82,8 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	# Build the common time axis
 	taxis = np.arange(dwin.start, dwin.end)
 
+	print 'Display frame is [%d, %d, %g, %g]' % (dwin.start, dwin.end, -vmax, vmax)
+
 	# Create the frames and write the video
 	with writer.saving(fig, output, fig.get_dpi()):
 		# Create the empty plot for efficiency
