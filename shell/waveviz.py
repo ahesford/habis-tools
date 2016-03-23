@@ -191,7 +191,10 @@ def plotwaves(output, waves, atimes=None, dwin=None, cthresh=None):
 	ax[0].grid(True)
 	ax[0].set_aspect('auto')
 	ax[0].set_ylabel('Sample index', fontsize=16)
-	ax[0].set_title('Waveforms aligned to mean arrival time', fontsize=16)
+	if atimes is not None:
+		ax[0].set_title('Waveforms aligned to mean arrival time', fontsize=16)
+	else:
+		ax[0].set_title('Waveforms with natural alignment', fontsize=16)
 
 	if atimes is not None:
 		# Plot the arrival-time image
