@@ -18,7 +18,7 @@ def usage(progname, fatal=False):
 	sys.exit(int(fatal))
 
 
-def concatenate(infiles, outfile, corrtx=True, defzero=False):
+def concatenate(infiles, outfile, corrtx=False, defzero=False):
 	'''
 	Given a list infiles of file names for input habis.formats.WaveformSet
 	objects, invoke WaveformSet.concatenate on the inputs. The argument
@@ -61,7 +61,7 @@ if __name__ == '__main__':
 		if opt[0] == '-o':
 			outpath = opt[1]
 		elif opt[0] == '-c':
-			kwargs['corrtx'] = False
+			kwargs['corrtx'] = True
 		elif opt[0] == '-z':
 			kwargs['defzero'] = True
 		else:
