@@ -488,7 +488,7 @@ class WaveformSet(object):
 
 		# Map the nsamp and f2c for each file to a global range
 		lsamp = 0
-		f2c = args[0].f2c
+		f2c = float('inf')
 
 		# Map receive channels to transmit-channel lists and receive-channel headers
 		rxtxmap = defaultdict(set)
@@ -568,7 +568,7 @@ class WaveformSet(object):
 				recrows = [txmap[txi] for txi in wset.txidx]
 
 				# Map the local data window to the global data window
-				lwin = Window(lhdr.win.start + wset.f2c - outset.f2c, lhdr.win.length, nonneg=True)
+				lwin = Window(lhdr.win.start + wset.f2c - rhdr.win.start, lhdr.win.length, nonneg=True)
 
 				# Copy the data
 				rec[recrows,lwin.start:lwin.end] = dat
