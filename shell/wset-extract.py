@@ -61,9 +61,7 @@ def txrxextract(infiles, rxlist, txlist, maptids, output):
 	If rxlist or txlist is None, the output will contain all receive
 	channels and all transmit indices in the input files.
 
-	The output WaveformSet will not retain transmit-group information (and
-	may use an arbitrary transmit-group configuration to allow
-	noncontiguous transmission indices).
+	The output WaveformSet will not retain transmit-group information.
 	'''
 	if rxlist is not None: rxlist = set(rxlist)
 
@@ -89,8 +87,7 @@ def txrxextract(infiles, rxlist, txlist, maptids, output):
 	if txlist is None: txlist = list(wsets[0].txidx)
 
 	# Create the properly typed and windowed output set
-	oset = WaveformSet(0, 0, nsamp, f2c, dtype)
-	oset.txidx = txlist
+	oset = WaveformSet(len(txlist), 0, nsamp, f2c, dtype)
 
 	for wset in wsets:
 		# Pull the relevant receive channels from each file
