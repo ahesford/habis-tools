@@ -308,6 +308,7 @@ def getbswaves(infile, atimes=None, nsamp=None):
 	f2c = wset.f2c
 
 	if atimes: mtime = np.mean(atimes.values())
+	else: mtime = None
 
 	bswaves = { }
 	for rx in wset.rxidx:
