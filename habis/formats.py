@@ -713,6 +713,8 @@ class WaveformSet(object):
 
 			f.write(hbytes)
 
+		f.seek(0, 2)
+
 		# Write each record in turn
 		for idx in sorted(self.rxidx):
 			hdr, waveforms = self._get_record_raw(idx)
@@ -732,7 +734,9 @@ class WaveformSet(object):
 
 			f.write(hbytes)
 			# Encode the waveform data
-			waveforms.tofile(f)
+			wbytes = waveforms.tobytes()
+			f.write(wbytes)
+			f.flush()
 
 		f.close()
 
