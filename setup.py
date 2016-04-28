@@ -31,6 +31,6 @@ if __name__ == '__main__':
 			description = DOCLINES[0],
 			long_description = '\n'.join(DOCLINES[2:]),
 			author = 'Andrew J. Hesford',
-			author_email = 'andrew.hesford@rochester.edu',
+			author_email = 'ajh@sideband.org',
 			platforms = ['any'], license = 'BSD', packages = ['habis'],
 			configuration = configuration)
