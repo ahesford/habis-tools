@@ -36,6 +36,8 @@ def configureConductor():
 	blockwrappers = {
 			'echo' : '/bin/echo',
 			'fieldmodel' : '/opt/habis/bin/FieldModelStepI',
+			'phase3' : '/opt/habis/bin/Phase_III',
+			'phase4' : '/opt/habis/bin/Phase_IV',
 	}
 
 	# Register the commands to wrap
