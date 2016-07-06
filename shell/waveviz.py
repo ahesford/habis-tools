@@ -23,12 +23,28 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	Prepare, using the ffmpeg writer in matplotlib.animation, a video in
 	which each frame depicts aligned waveforms received by a common
 	element. The argument waves should be a mapping from element index to a
-	list of Waveform objects. The argument atimes should be a mapping from
-	element index to a list of arrival times (one for each Waveform in the
-	list of Waveforms in an entry of waves). For each element, all
-	waveforms will be aligned to the first one using the times in atimes.
-	(If atimes is not specified or does not contain times for a given
-	element, no alignment will be attempted.)
+	list of Waveform objects, prealigned if alignment is desired.
+
+	The argument atimes should be a mapping from element index to a list of
+	at least one arrival time. If the mapping contains at least one arrival
+	time for a given element index, the first arrival time for the element
+	will be plotted along with the corresponding waveforms.
+
+	If dwin = (start, win) is specified, it defines an absolute window
+	(when atimes is None) or relative window (when atimes is defined) over
+	which the waveforms (and arrival times) will be plotted. In the
+	relative mode, the actual plot window starts at
+
+		start + min(atimes[elt][0] for elt in celts)
+
+	and ends at
+
+		end + max(atimes[elt][0] for elt in celts),
+
+	where celts is the list of comment keys in atimes and waves.
+
+	If dwin is None, the window will be chosen to encompass all data
+	windows in the waves map.
 	'''
 	import matplotlib as mpl
 	mpl.use('agg')
@@ -59,17 +75,20 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	metadata = dict(title='Waveform analysis video', artist='waveviz.py')
 	writer = ffwr(fps=5, bitrate=bitrate, metadata=metadata)
 
-	if dwin is None or atimes is None:
+	if dwin is None:
 		# With no data window, show the entire data range
 		dstart = min(w.datawin.start for v in waves.itervalues() for w in v)
 		dend = max(w.datawin.end for v in waves.itervalues() for w in v)
 		dwin = Window(dstart, end=dend)
 	else:
-		# With a data window, encompass the maximum range of arrival times
-		celts = set(waves.iterkeys()).intersection(atimes.iterkeys())
-		dstart = min(atimes[elt][0] for elt in celts)
-		dend = max(atimes[elt][0] for elt in celts)
-		dwin = Window(max(0, int(dstart + dwin[0])), end=int(dend + dwin[1]))
+		if atimes is not None:
+			# The window is relative to the arrival-time range
+			celts = set(waves.iterkeys()).intersection(atimes.iterkeys())
+			dstart = min(atimes[elt][0] for elt in celts)
+			dend = max(atimes[elt][0] for elt in celts)
+			dwin = Window(max(0, int(dstart + dwin[0])), end=int(dend + dwin[1]))
+		else:
+			dwin = Window(dwin[0], end=dwin[1])
 
 	# Clip the waveforms to the common data window
 	waves = { k: [ w.window(dwin) for w in v ] for k, v in waves.iteritems() }

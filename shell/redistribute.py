@@ -30,26 +30,36 @@ def xfer(srcfile, dstfile, host):
 	'''
 	If the transfer is local (host is None or ''), attempt to hard-link the
 	source file srcfile at the location dstfile. If the link fails, attempt
-	a copy. Returns True (False) if the file was linked (copied), or raises
-	subprocess.CalledProcessError on error.
+	a copy. The destination is unlinked (if possible) before attempting the
+	link or copy. Returns True (False) if the file was linked (copied), or
+	raises an exception to describe errors.
 
 	If the transfer is not local, transfer srcfile to <host>:<dstfile> with
-	scp. Returns True Unless a subprocess.CalledProcessError is raised.
+	scp. Returns True unless a subprocess.CalledProcessError is raised.
 	'''
-	from subprocess32 import check_call, CalledProcessError
+	from subprocess32 import check_call
 
 	if host:
 		check_call(['scp', srcfile, host + ':' + dstfile])
 		return True
 
-	if os.path.abspath(srcfile) == os.path.abspath(dstfile):
-		# If source and destination are the same, no need to link
-		return True
+	# Canonicalize the paths
+	srcfile = os.path.realpath(srcfile)
+	dstfile = os.path.realpath(dstfile)
+
+	if os.path.lexists(dstfile):
+		if os.path.samefile(srcfile, dstfile):
+			# No need to link if source and destination are the same file
+			return True
+		elif not os.path.isdir(dstfile):
+			# Attempt to unlink a destination file if possible
+			try: os.unlink(dstfile)
+			except: pass
 
 	try:
-		check_call(['ln', srcfile, dstfile])
+		os.link(srcfile, dstfile)
 		return True
-	except CalledProcessError:
+	except OSError:
 		check_call(['cp', srcfile, dstfile])
 		return False
 
