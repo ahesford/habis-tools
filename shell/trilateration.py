@@ -189,8 +189,8 @@ def trilaterationEngine(config):
 	# Accumulate all element coordinates and arrival times
 	eltpos = dict(kp for efile in inelements
 			for kp in loadkeymat(efile).iteritems())
-	times = dict(kp for tfile in timefiles
-			for kp in loadkeymat(tfile).iteritems())
+	times = dict((k[0], v) for tfile in timefiles
+			for k, v in loadkeymat(tfile, nkeys=2).iteritems() if k[0] == k[1])
 	# Only consider elements in both sets
 	elements = sorted(set(eltpos.iterkeys()).intersection(times.iterkeys()))
 

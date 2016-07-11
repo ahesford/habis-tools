@@ -19,6 +19,20 @@ from habis.formats import WaveformSet, loadkeymat, savekeymat
 from habis.sigtools import Waveform
 
 
+def kmat(s):
+	'''
+	If s is a string and sv = s.strip() starts with 'keymat:' (case
+	insensitive), return the output of habis.formats.loadkeymat(sv[7:]).
+	Otherwise, return s.
+	'''
+	if isinstance(s, basestring):
+		sv = s.strip()
+		if sv.startswith('keymat:'):
+			return loadkeymat(sv[7:])
+
+	return s
+
+
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
@@ -104,18 +118,15 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	The addition of datafile.f2c adjusts all delays to a common base time.
 
-	The index (i,j) of the WaveformSet is determined by un-flattening the
-	strided index, k, into a 2-D index (j,i) into the T x R delay matrix in
-	row-major order.
-
-	*** NOTE ***
-	The indices i and j specify element numbers. When accessing waveforms
-	for delay analysis, the transmit element j is mapped to an appropriate
-	transmission number according to any transmit-group configuration
-	specified in the WaveformSet. Thus, either all transmit elements j must
-	have corresponding receive-channel records in the WaveformSet file, or
-	the file must specify no transmit-group configuration (i.e., the
-	transmissions must be stored in element order).
+	The index (i,j) of the WaveformSet is determined by an optional keyword
+	argument 'elmap'. When accessing waveforms for delay analysis, the
+	transmit element j is mapped to an appropriate transmission number
+	according to any transmit-group configuration specified in the
+	WaveformSet. Thus, either all transmit elements j must have
+	corresponding receive-channel records in the WaveformSet file, an
+	explicit group map must be provided (with the optional kwarg 'groupmap'
+	described below), or the file must specify no transmit-group
+	configuration (i.e., transmissions must be stored in element order).
 
 	The reference waveform is read from reffile using the method
 	habis.sigtools.Waveform.fromfile.
@@ -187,15 +198,26 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  *** NOTE: peak windowing is done after overall windowing and after
 	  possible exclusion by minsnr. ***
 
-	* rxelts and txelts: If not None, should be a lists of element indices
-	  such that entry (i,j) in the delay matrix corresponds to the waveform
-	  datafile.getwaveform(rxelts[j], txelts[i], maptids=True). When rxelts
-	  is None or unspecified, it is populated by sorted(datafile.rxidx).
-	  When txelts is None or unspecified, it defaults to rxelts. (See note
-	  above about the limitations of element-to-transmission mapping.)
+	* groupmap: A mapping from global element indices to (local index,
+	  group index) tuples that will be assigned to the "groupmap" property
+	  of the loaded WaveformSet. As part of the property assignment, the
+	  groupmap is checked for consistency with receive-channel records in
+	  the WaveformSet. Assigning the groupmap property allows (and is
+	  required for) specification of transmit channels that are not present
+	  in the WaveformSet as receive-channel records.
 
-	* usediag: If True, only calculate the diagonal portion of the delay
-	  matrix. Incompatible with txelts != None.
+	* elmap: A mapping from desired receive element indices to one or more
+	  transmit indices for which arrival times should be computed. A
+	  special string value 'backscatter' (the default) is interpreted as
+
+	  	elmap = { i: [i] for i in datafile.rxidx },
+
+	  while a special string value 'block' is interpreted as
+
+		elmap = { i: list(datafile.rxidx) for i in datafile.rxidx }.
+
+	  Whenever waveforms are accessed with WaveformSet.getwaveform(), the
+	  maptids kwarg is set to True.
 
 	* compenv: If True, delay analysis will proceed on signal and reference
 	  envelopes. If false, delay analysis uses the original signals.
@@ -208,33 +230,49 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	ref = Waveform.fromfile(reffile)
 
 	# Override the sample count, if desired
-	try: data.nsamp = kwargs.pop('nsamp')
+	try: nsamp = kwargs.pop('nsamp')
 	except KeyError: pass
+	else: data.nsamp = nsamp
 
-	# Determine the elements to include in the delay matrix
-	rxelts = kwargs.pop('rxelts', None)
-	txelts = kwargs.pop('txelts', None)
-	usediag = kwargs.pop('usediag', None)
+	# Assign a global group map, if desired
+	try: gmap = kwargs.pop('groupmap')
+	except KeyError: pass
+	else: data.groupmap = gmap
 
-	if txelts is not None and usediag:
-		raise ValueError('Specification of txelts with usediag == True is forbidden')
+	# Interpret the element map
+	elmap = kwargs.pop('elmap', 'backscatter')
 
-	if rxelts is None: rxelts = sorted(data.rxidx)
-	else: rxelts = sorted(set(rxelts).intersection(data.rxidx))
+	if isinstance(elmap, basestring):
+		elmap = elmap.strip().lower()
+		if elmap == 'backscatter':
+			elmap = { i: [i] for i in data.rxidx }
+		elif elmap == 'block':
+			elmap = { i: list(data.rxidx) for i in data.rxidx }
+		else:
+			raise ValueError("Valid string values for optional kwarg "
+						"'elmap' are 'backscatter' or 'block'")
 
-	# Set a default transmit-element list
-	if txelts is None: txelts = list(rxelts)
+	try:
+		items = elmap.items()
+	except AttributeError:
+		raise ValueError("Optional kwarg 'elmap' is not a proper map")
 
-	# Note transmit element and transmission number for each entry
-	try: tids = [data.element2tx(t) for t in txelts]
-	except (KeyError, TypeError):
-		raise ValueError('Cannot map transmit elements to transmission indices')
+	# Flatten and sort the element map into a sorted list for striding
+	ellst = [ ]
+	rxelts = set(data.rxidx)
+	txelts = set(data.txidx)
+	for k, v in sorted(items):
+		# Ignore receive elements not in this file
+		if k not in rxelts: continue
 
-	if not set(tids).issubset(data.txidx):
-		raise ValueError('Data file does not contain all transmit elements')
+		# Build a sorted list of desired transmit elements in this file
+		try: s = sorted(sv for sv in set(v) if sv in txelts)
+		except TypeError: s = [v] if v in txelts else []
 
-	r = len(rxelts)
-	t = len(txelts) if not usediag else 1
+		# Store the flattened pair list
+		ellst.extend((k, sv) for sv in s)
+		# And make sure the mapping is sorted
+		elmap[k] = s
 
 	# Use envelopes for delay analysis if desired
 	compenv = kwargs.pop('compenv', False)
@@ -282,13 +320,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	result = { }
 
 	# Cache a receive-channel record for faster access
-	hdr, wforms = None, None
+	hdr, wforms, tmap = None, None, None
 
-	for idx in range(start, t * r, stride):
-		# Find the transmit and receive indices (vary transmit most rapidly)
-		i, j = (idx, idx) if usediag else np.unravel_index(idx, (t, r), 'F')
-		tid, rid = txelts[i], rxelts[j]
-
+	for rid, tid in ellst[start::stride]:
 		try:
 			# Use a cahced value if possible
 			result[(tid, rid)] = delaycache[(tid, rid)]
@@ -299,11 +333,17 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			# Use a cached receive-channel block if possible
 			if hdr.idx != rid: raise ValueError('Force record load')
 		except (ValueError, TypeError, AttributeError):
-			# Pull the waveforms for the whole transmit set
-			hdr, wforms = data.getrecord(rid, tid=tids, dtype=np.float32)
+			# Pull out the desired transmit rows for this receive channel
+			try: 
+				hdr, wforms = data.getrecord(rid, tid=elmap[rid],
+						dtype=np.float32, maptids=True)
+			except KeyError:
+				raise KeyError('Unable to load Rx %d, Tx %s' % (rid, elmap[rid]))
+			# Map transmit indices to desired rows
+			tmap = dict(reversed(j) for j in enumerate(elmap[rid]))
 
 		# Grab the signal as a Waveform
-		sig = Waveform(data.nsamp, wforms[i], hdr.win.start)
+		sig = Waveform(data.nsamp, wforms[tmap[tid]], hdr.win.start)
 
 		if bandpass is not None:
 			# Remove DC bias to reduce Gibbs phenomenon
@@ -403,19 +443,28 @@ def atimesEngine(config):
 
 
 	try:
+		# Determine the oversampling rate to use when cross-correlating
 		osamp = config.get(ssec, 'osamp', mapper=int, default=1)
 	except Exception as e:
 		err = 'Invalid specification of optional osamp in [%s]' % ssec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		# Determine the range of elements to use; default to all (as None)
-		try: kwargs['txelts'] = config.getrange(asec, 'txelts')
-		except HabisNoOptionError: pass
-		try: kwargs['rxelts'] = config.getrange(asec, 'rxelts')
-		except HabisNoOptionError: pass
+		# Determine the map of receive elements to transmit elements
+		kwargs['elmap'] = config.get(asec, 'elmap', mapper=kmat, 
+					checkmap=False, default='backscatter')
 	except Exception as e:
-		err = 'Invalid specification of optional txelts, rxelts in [%s]' % asec
+		err = 'Invalid specification of optional elmap in [%s]' % asec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine a global group mapping to use for transmit row selection
+		kwargs['groupmap'] = config.get(asec, 'groupmap',
+					checkmap=False, mapper=kmat)
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional groupmap in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -455,9 +504,9 @@ def atimesEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	maskoutliers = config.get(asec, 'maskoutliers', mapper=bool, default=False)
-	kwargs['usediag'] = config.get(asec, 'usediag', mapper=bool, default=False)
-	kwargs['compenv'] = config.get(asec, 'compenv', mapper=bool, default=False)
+	optimize = config.get(asec, 'optimize', mapper=bool, default=False)
 	cachedelay = config.get(asec, 'cachedelay', mapper=bool, default=True)
+	kwargs['compenv'] = config.get(asec, 'compenv', mapper=bool, default=False)
 
 	try:
 		# Remove the nearmap file key
@@ -507,14 +556,14 @@ def atimesEngine(config):
 				# Remove outlying values from the delay dictionary
 				delays = stats.mask_outliers(delays)
 
-			if not kwargs.get('usediag', False):
+			if optimize:
 				# Prepare the arrival-time finder
 				atf = trilateration.ArrivalTimeFinder(delays)
 				# Compute the optimized times for this data file
-				optimes = { k: v for k, v in atf.lsmr() if k in lrx }
+				optimes = { (k, k): v for k, v in atf.lsmr() if k in lrx }
 			else:
-				# Take only diagonal values
-				optimes = { k[0]: v for k, v in delays.iteritems() if k[0] == k[1] }
+				# Just pass through the desired times
+				optimes = delays
 
 			times[target].update(optimes)
 
@@ -530,7 +579,7 @@ def atimesEngine(config):
 
 	# Save the output as a text file
 	# Each data file gets a column
-	savekeymat(outfile, ctimes, fmt=['%d'] + ['%16.8f']*len(times))
+	savekeymat(outfile, ctimes, fmt=['%d', '%d'] + ['%16.8f']*len(times))
 
 
 if __name__ == '__main__':
