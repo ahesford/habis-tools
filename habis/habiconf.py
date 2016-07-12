@@ -6,7 +6,6 @@ Tools for manipulating and accessing HABIS configuration files.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import shlex
-import yaml
 
 from itertools import izip
 
@@ -163,16 +162,9 @@ class HabisConfigParser(object):
 
 		try:
 			# Otherwise, parse the file as YAML or a Mako-templated YAML
+			from .formats import renderAndLoadYaml
 			confbytes = f.read()
-			try:
-				from mako.template import Template
-			except ImportError:
-				if len(kwargs):
-					raise TypeError('Extra keyword arguments require the Mako template engine')
-				self._config = yaml.safe_load(confbytes)
-			else:
-				cnftmpl = Template(text=confbytes, strict_undefined=True)
-				self._config = yaml.safe_load(cnftmpl.render(**kwargs))
+			self._config = renderAndLoadYaml(confbytes, **kwargs)
 		except Exception as e:
 			err = 'Unable to parse file %s' % f.name
 			raise HabisConfigError.fromException(err, e)

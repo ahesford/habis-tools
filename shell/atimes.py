@@ -10,31 +10,29 @@ from numpy import ma
 
 from itertools import izip
 
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 
 from pycwp import process, stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
-from habis.formats import WaveformSet, loadkeymat, savekeymat
+from habis.formats import WaveformSet, loadkeymat, savekeymat, loaduri
 from habis.sigtools import Waveform
-
-
-def kmat(s):
-	'''
-	If s is a string and sv = s.strip() starts with 'keymat:' (case
-	insensitive), return the output of habis.formats.loadkeymat(sv[7:]).
-	Otherwise, return s.
-	'''
-	if isinstance(s, basestring):
-		sv = s.strip()
-		if sv.startswith('keymat:'):
-			return loadkeymat(sv[7:])
-
-	return s
 
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+
+
+def getkeys(obj):
+	'''
+	Return a key iterator if obj has an iterkeys() method, or else a key
+	list if obj has a keys() method, or else raise a TypeError.
+	'''
+	try: return obj.iterkeys()
+	except AttributeError:
+		try: return obj.keys()
+		except AttributeError:
+			raise TypeError('Object is not a map')
 
 
 def finddelays(nproc=1, *args, **kwargs):
@@ -206,18 +204,19 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  required for) specification of transmit channels that are not present
 	  in the WaveformSet as receive-channel records.
 
-	* elmap: A mapping from desired receive element indices to one or more
-	  transmit indices for which arrival times should be computed. A
-	  special string value 'backscatter' (the default) is interpreted as
+	* elmap: A mapping or a list of mappings from desired receive element
+	  indices to one or more transmit indices for which arrival times
+	  should be computed. If this parameter is a list of maps, the actual
+	  map will be the union of all maps. Any map can also be specified by
+	  the magic strings 'backscatter', interpreted as
 
-	  	elmap = { i: [i] for i in datafile.rxidx },
+	  	{ i: [i] for i in datafile.rxidx },
 
-	  while a special string value 'block' is interpreted as
+	  or 'block', interpreted as
 
-		elmap = { i: list(datafile.rxidx) for i in datafile.rxidx }.
+		{ i: list(datafile.rxidx) for i in datafile.rxidx }.
 
-	  Whenever waveforms are accessed with WaveformSet.getwaveform(), the
-	  maptids kwarg is set to True.
+	  The default map is 'backscatter'.
 
 	* compenv: If True, delay analysis will proceed on signal and reference
 	  envelopes. If false, delay analysis uses the original signals.
@@ -241,29 +240,52 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	# Interpret the element map
 	elmap = kwargs.pop('elmap', 'backscatter')
+	if isinstance(elmap, basestring): elmap = [elmap]
 
-	if isinstance(elmap, basestring):
-		elmap = elmap.strip().lower()
-		if elmap == 'backscatter':
-			elmap = { i: [i] for i in data.rxidx }
-		elif elmap == 'block':
-			elmap = { i: list(data.rxidx) for i in data.rxidx }
-		else:
-			raise ValueError("Valid string values for optional kwarg "
-						"'elmap' are 'backscatter' or 'block'")
+	if not hasattr(elmap, 'items'):
+		# Merge a collection of maps
+		dmap = defaultdict(list)
+		for en, elm in enumerate(elmap):
+			if isinstance(elm, basestring):
+				elm = elm.strip().lower()
+				if elm == 'backscatter':
+					elm = { i: [i] for i in data.rxidx }
+				elif elm == 'block':
+					elm = { i: list(data.rxidx) for i in data.rxidx }
+				else:
+					raise ValueError("Invalid magic element map specified '%s'" % elm)
+
+			try:
+				keys = getkeys(elm)
+			except TypeError:
+				raise TypeError('Invalid element map specifier at index %d' % en)
+
+			for k in keys:
+				# v may be a collection or a scalar
+				v = elm[k]
+				try: dmap[k].extend(v)
+				except TypeError: dmap[k].append(v)
+
+		# Replace the map
+		elmap = dict(dmap)
+		del dmap
 
 	try:
-		items = elmap.items()
-	except AttributeError:
-		raise ValueError("Optional kwarg 'elmap' is not a proper map")
+		keys = getkeys(elmap)
+	except TypeError:
+		raise TypeError('Invalid element map specification')
 
 	# Flatten and sort the element map into a sorted list for striding
 	ellst = [ ]
 	rxelts = set(data.rxidx)
 	txelts = set(data.txidx)
-	for k, v in sorted(items):
+
+	for k in sorted(keys):
 		# Ignore receive elements not in this file
 		if k not in rxelts: continue
+
+		# v is either a collection or a scalar
+		v = elmap[k]
 
 		# Build a sorted list of desired transmit elements in this file
 		try: s = sorted(sv for sv in set(v) if sv in txelts)
@@ -271,7 +293,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 		# Store the flattened pair list
 		ellst.extend((k, sv) for sv in s)
-		# And make sure the mapping is sorted
+		# Write the trimmed, sorted list back to the map
 		elmap[k] = s
 
 	# Use envelopes for delay analysis if desired
@@ -451,21 +473,32 @@ def atimesEngine(config):
 
 	try:
 		# Determine the map of receive elements to transmit elements
-		kwargs['elmap'] = config.get(asec, 'elmap', mapper=kmat, 
-					checkmap=False, default='backscatter')
+		elmap = config.get(asec, 'elmap', default='backscatter')
+
+		if isinstance(elmap, basestring):
+			# A simple string is either a magic key or a URI
+			elmap = loaduri(elmap)
+		else:
+			# A map should not be further touched, but a list needs loading
+			if not hasattr(elmap, 'keys'):
+				elmap = [loaduri(e) for e in elmap]
+		kwargs['elmap'] = elmap
 	except Exception as e:
 		err = 'Invalid specification of optional elmap in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
 		# Determine a global group mapping to use for transmit row selection
-		kwargs['groupmap'] = config.get(asec, 'groupmap',
-					checkmap=False, mapper=kmat)
+		kwargs['groupmap'] = config.get(asec, 'groupmap')
 	except HabisNoOptionError:
 		pass
 	except Exception as e:
 		err = 'Invalid specification of optional groupmap in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
+	else:
+		# Treat a string groupmap as a file name
+		if isinstance(kwargs['groupmap'], basestring):
+			kwargs['groupmap'] = loadkeymat(kwargs['groupmap'], dtype=int)
 
 	try:
 		# Determine the range of elements to use; default to all (as None)

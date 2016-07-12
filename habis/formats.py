@@ -7,8 +7,7 @@ Routines for manipulating HABIS data file formats.
 
 import mmap
 import numpy as np
-import re, os
-import pandas
+import os
 import struct
 
 from collections import OrderedDict, defaultdict, namedtuple
@@ -27,6 +26,94 @@ def _strict_nonnegative_int(x, positive=False):
 	elif x < 0:
 		raise ValueError('Argument must be nonnegative')
 	return x
+
+
+def loaduri(uri):
+	'''
+	Attempt to load the contents of the URI using specialized schema. The
+	form of the URI should be
+
+		<scheme>:<path>[#<kwargs>],
+
+	where <path> is a local file path, <schema> is one of the specialized
+	schema, and the optional fragment <kwargs> is a YAML representation of
+	a dictionary. Note that the scheme is not followed by a double slash,
+	so there is no netloc. The URI is parsed with urlparse.urlparse.
+
+	The recognized schema are (where data = open(<path>, 'rb')):
+
+	* keymat: Return the value habis.formats.loadkeymat(<path>, **kwargs).
+
+	* pickle: Return the value cPickle.load(data). A ValueError will be
+	  raised if kwargs are specified with the pickle sheme.
+
+	* yaml: Return the value of renderAndLoadYaml(data, **kwargs).
+
+	* string: Return the value of the string without loading.
+
+	If no scheme can be detected, 'string' is assumed. Any URI that
+	includes netloc, parameters, or query components will raise a
+	ValueError.
+	'''
+	from urlparse import urlparse
+
+	comps = urlparse(uri, scheme='string', allow_fragments=True)
+
+	if comps.netloc or comps.params or comps.query:
+		raise ValueError('URI must not contain netloc, parameters, or query components')
+
+	scheme = comps.scheme.lower()
+	if scheme == 'string':
+		return comps.path + (('#' + comps.fragment) if comps.fragment else '')
+
+	if comps.fragment:
+		from yaml import safe_load
+		kwargs = safe_load(comps.fragment)
+	else:
+		kwargs = { }
+
+	if scheme == 'keymat':
+		return loadkeymat(comps.path, **kwargs)
+
+	if scheme not in ('pickle', 'yaml'):
+		raise ValueError('Unrecognized URI scheme')
+
+	if scheme == 'pickle' and len(kwargs):
+		raise ValueError('URI fragments are not supported for pickle scheme')
+
+	# Attempt to open and read the file
+	data = open(comps.path, 'rb').read()
+
+	if scheme == 'yaml':
+		return renderAndLoadYaml(data, **kwargs)
+
+	else:
+		from cPickle import loads as unpickle
+		return unpickle(data)
+
+
+def renderAndLoadYaml(data, **kwargs):
+	'''
+	Attempt to render the string data as a Mako template with kwargs passed
+	to the Mako renderer with string_undefined=True.  Parse the rendered
+	result as YAML using yaml.safe_load.
+
+	If the Mako template engine cannot be imported, the data is parsed as
+	pure YAML. Specifying kwargs when Mako cannot be imported raises a
+	TypeError.
+	'''
+	from yaml import safe_load
+
+	try:
+		from mako.template import Template
+	except ImportError:
+		if kwargs:
+			raise TypeError('Extra keyword arguments '
+					'require Mako template engine')
+		return safe_load(data)
+	else:
+		tmpl = Template(text=data, strict_undefined=True)
+		return safe_load(tmpl.render(**kwargs))
 
 
 def loadkeymat(*args, **kwargs):
@@ -128,6 +215,7 @@ def findenumfiles(dir, prefix='.*?', suffix='', ngroups=1):
 	(which will number ngroups) in left-to-right order.
 	'''
 	from os.path import join
+	from re import compile as recomp
 
 	if ngroups < 1:
 		raise ValueError('At least one number group must be specified')
@@ -137,7 +225,7 @@ def findenumfiles(dir, prefix='.*?', suffix='', ngroups=1):
 	# Enumerate the matching groups (0 is the whole matching string)
 	grpidx = tuple(range(ngroups + 1))
 	# Build the regexp and filter the list of files in the directory
-	regexp = re.compile(r'^%s%s%s$' % (prefix, numstr, suffix))
+	regexp = recomp(r'^%s%s%s$' % (prefix, numstr, suffix))
 	# When converting matched groups to integers, discard the whole-string group
 	return [tuple([join(dir, f)] + [int(g) for g in m.group(*grpidx)[1:]])
 			for f in os.listdir(dir) for m in [regexp.match(f)] if m]
@@ -244,8 +332,9 @@ def readfirecapture(f, reducer=None):
 	raw array data read from f and returns a filtered version of the data
 	that will be processed as that were the raw data read from the file.
 	'''
+	from pandas import read_csv
 	# Read the data and use the reducer filter if appropriate
-	data = pandas.read_csv(f, skiprows=4, header=None).values
+	data = read_csv(f, skiprows=4, header=None).values
 	# If reducer is None, a TypeError is raised; just ignore it
 	try: data = reducer(data)
 	except TypeError: pass
