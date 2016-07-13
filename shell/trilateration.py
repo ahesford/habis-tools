@@ -14,7 +14,7 @@ from pycwp import process
 
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
-from habis.formats import savekeymat, loadkeymat
+from habis.formats import savetxt_keymat, loadkeymat
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -261,7 +261,7 @@ def trilaterationEngine(config):
 
 		# Save the element coordinates in the output file
 		refmt = ['%d'] + ['%16.8f']*(len(relements.itervalues().next()))
-		savekeymat(outelements, relements, fmt=refmt)
+		savetxt_keymat(outelements, relements, fmt=refmt)
 
 		if max(rfldist) < stopdist and max(reltdist) < stopdist:
 			print 'Convergence achieved'

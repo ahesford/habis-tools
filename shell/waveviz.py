@@ -237,14 +237,16 @@ def getatimes(atarg, freq=1, scalar=True):
 	'''
 	Given a file name with an optional ":<column>,<column>,..." suffix of
 	integer indices, try to open the arrival-time map with
-	habis.formats.loadkeymat() and pull the specified column.
+	habis.formats.loadkeymat() and pull the specified column. Keys of the
+	map should be transmit-receive pairs (t, r), although only keys of the
+	form (r, r) are of interest.
 
 	A file with the full name in atarg will first be checked. If none
 	exists or the file cannot be opened, and the name constains a suffix of
 	integer indices, a file whose name matches atarg up to the suffix will
 	be checked and the specified column will be pulled.
 
-	If no suffix is unspecified, the first column will be pulled.
+	If no suffix is specified, the first column will be pulled.
 
 	The times are scaled by the frequency to convert the times to samples.
 
@@ -254,14 +256,14 @@ def getatimes(atarg, freq=1, scalar=True):
 	acols = [0]
 	try:
 		# Try to load the file with the full name
-		atmap = loadkeymat(atarg, scalar=False)
+		atmap = loadkeymat(atarg, scalar=False, nkeys=2)
 	except IOError as err:
 		atcomps = atarg.split(':')
 		if len(atcomps) < 2: raise err
 		# Treat the name as a name + column
 		acols = [int(av, base=10) for av in atcomps[-1].split(',')]
 		atname = ':'.join(atcomps[:-1])
-		atmap = loadkeymat(atname, scalar=False)
+		atmap = loadkeymat(atname, scalar=False, nkeys=2)
 		print 'Loading columns %s from arrival-time file %s' % (acols, atname)
 
 	if scalar:
@@ -269,7 +271,7 @@ def getatimes(atarg, freq=1, scalar=True):
 			raise ValueError('Scalar arrival-time map requires a single column specification')
 		acols = acols[0]
 
-	return { k: freq * v[acols] for k, v in atmap.iteritems() }
+	return { k[0]: freq * v[acols] for k, v in atmap.iteritems() if k[0] == k[1] }
 
 
 def getbsgroups(infiles, atimes=None, nsamp=None):

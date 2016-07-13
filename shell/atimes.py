@@ -15,7 +15,7 @@ from collections import OrderedDict, defaultdict
 from pycwp import process, stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
-from habis.formats import WaveformSet, loadkeymat, savekeymat, loaduri
+from habis.formats import WaveformSet, loadkeymat, savez_keymat
 from habis.sigtools import Waveform
 
 
@@ -44,9 +44,8 @@ def finddelays(nproc=1, *args, **kwargs):
 	and **kwargs should not contain these values.
 
 	The delaycache argument is built from an optional file specified in
-	cachefile, which should be a three-column text matrix with rows of the
-	form [t, r, delay] representing a precomputed delay for
-	transmit-receive pair (t, r).
+	cachefile, which should be a map from transmit-receive pair (t, r) to a
+	precomputed delay, loadable with habis.formats.loadkeymat.
 	'''
 	if 'queue' in kwargs:
 		raise TypeError("Invalid keyword argument 'queue'")
@@ -59,9 +58,8 @@ def finddelays(nproc=1, *args, **kwargs):
 
 	cachefile = kwargs.pop('cachefile', None)
 
-	try:
-		# Try to read an existing delay file and convert to a dictionary
-		kwargs['delaycache'] = loadkeymat(cachefile, nkeys=2)
+	# Try to read an existing pickled delay map
+	try: kwargs['delaycache'] = loadkeymat(cachefile)
 	except (KeyError, ValueError, IOError): pass
 
 	# Create a result queue and a dictionary to accumulate results
@@ -98,7 +96,7 @@ def finddelays(nproc=1, *args, **kwargs):
 
 	if len(delays):
 		# Save the computed delays, if desired
-		try: savekeymat(cachefile, delays, fmt='%d %d %16.8f')
+		try: savez_keymat(cachefile, delays)
 		except (ValueError, IOError): pass
 
 	return delays
@@ -184,10 +182,14 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	* peaks: A dictionary of kwargs to be passed to Waveform.isolatepeak
 	  for every waveform. An additional 'nearmap' key may be included to
 	  specify a mapping between element indices and expected round-trip
-	  delays (relative to zero f2c). The waveform (i,j') for a delay entry
+	  delays (relative to zero f2c). The waveform (i,j) for a delay entry
 	  (j,i) will be windowed about the peak closest to a delay given by
 
-	    0.5 * (nearmap[txelts[j]] + nearmap[rxelts[i]]) - datafile.f2c
+	  	nearmap[j,i] - datafile.f2c
+
+	  or, if (j,i) is not a valid key,
+
+	    0.5 * (nearmap[i,i] + nearmap[j,j]) - datafile.f2c
 
 	  to a width twice the peak width, with no tails. If the nearmap is not
 	  defined for either element (or at all), the nearmap value will be
@@ -382,8 +384,15 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 		if peaks is not None:
 			# Isolate the peak nearest the expected location (if one exists)
-			try: exd = 0.5 * (nearmap[tid] + nearmap[rid]) - data.f2c
-			except (KeyError, IndexError): exd = None
+			try:
+				exd = nearmap[tid,rid] - data.f2c
+			except KeyError:
+				try: 
+					ntt = nearmap[tid,tid]
+					nrr = nearmap[rid,rid]
+					exd = 0.5 * (ntt + nrr) - data.f2c
+				except KeyError:
+					exd = None
 			try: sig = sig.isolatepeak(exd, **peaks)
 			except ValueError: continue
 
@@ -473,15 +482,18 @@ def atimesEngine(config):
 
 	try:
 		# Determine the map of receive elements to transmit elements
-		elmap = config.get(asec, 'elmap', default='backscatter')
+		elmap = config.get(asec, 'elmap', default='magic:backscatter')
 
-		if isinstance(elmap, basestring):
-			# A simple string is either a magic key or a URI
-			elmap = loaduri(elmap)
-		else:
-			# A map should not be further touched, but a list needs loading
-			if not hasattr(elmap, 'keys'):
-				elmap = [loaduri(e) for e in elmap]
+		# Wrap a single value as a 1-element list
+		if isinstance(elmap, basestring): elmap = [elmap]
+
+		# A map should not be further touched, but a list needs loading
+		# A simple string is either a magic key or a key matrix
+		if not hasattr(elmap, 'keys'):
+			def loader(e):
+				if e.startswith('magic:'): return e[6:]
+				return loadkeymat(e, dtype=int)
+			elmap = [ loader(e) for e in elmap ]
 		kwargs['elmap'] = elmap
 	except Exception as e:
 		err = 'Invalid specification of optional elmap in [%s]' % asec
@@ -490,15 +502,15 @@ def atimesEngine(config):
 	try:
 		# Determine a global group mapping to use for transmit row selection
 		kwargs['groupmap'] = config.get(asec, 'groupmap')
+
+		# Treat a string groupmap as a file name
+		if isinstance(kwargs['groupmap'], basestring):
+			kwargs['groupmap'] = loadkeymat(kwargs['groupmap'], dtype=int)
 	except HabisNoOptionError:
 		pass
 	except Exception as e:
 		err = 'Invalid specification of optional groupmap in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
-	else:
-		# Treat a string groupmap as a file name
-		if isinstance(kwargs['groupmap'], basestring):
-			kwargs['groupmap'] = loadkeymat(kwargs['groupmap'], dtype=int)
 
 	try:
 		# Determine the range of elements to use; default to all (as None)
@@ -543,7 +555,8 @@ def atimesEngine(config):
 
 	try:
 		# Remove the nearmap file key
-		guesses = loadkeymat(kwargs['peaks'].pop('nearmap'), scalar=False)
+		guesses = kwargs['peaks'].pop('nearmap')
+		guesses = loadkeymat(guesses, nkeys=2, scalar=False)
 	except IOError as e:
 		guesses = None
 		print >> sys.stderr, 'WARNING - Ignoring nearmap:', e
@@ -563,7 +576,7 @@ def atimesEngine(config):
 			kwargs['peaks']['nearmap'] = nearmap
 
 		if cachedelay:
-			delayfiles = buildpaths(datafiles, extension='delays.txt')
+			delayfiles = buildpaths(datafiles, extension='delays.npz')
 		else:
 			delayfiles = [None]*len(datafiles)
 
@@ -608,11 +621,11 @@ def atimesEngine(config):
 	if not len(rxset):
 		raise ValueError('Different targets have no common receive-channel indices')
 
-	ctimes = { i: [t[i] for t in times.itervalues()] for i in sorted(rxset) }
+	# Cast to Python float to avoid numpy dependencies in pickled output
+	ctimes = { i: [float(t[i]) for t in times.itervalues()] for i in sorted(rxset) }
 
-	# Save the output as a text file
-	# Each data file gets a column
-	savekeymat(outfile, ctimes, fmt=['%d', '%d'] + ['%16.8f']*len(times))
+	# Save the output as a pickled map
+	savez_keymat(outfile, ctimes)
 
 
 if __name__ == '__main__':

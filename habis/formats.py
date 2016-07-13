@@ -19,6 +19,10 @@ def _strict_int(x):
 	return ix
 
 
+def _strict_float(x):
+	ix = float(x)
+
+
 def _strict_nonnegative_int(x, positive=False):
 	x = _strict_int(x)
 	if positive and x <= 0:
@@ -26,70 +30,6 @@ def _strict_nonnegative_int(x, positive=False):
 	elif x < 0:
 		raise ValueError('Argument must be nonnegative')
 	return x
-
-
-def loaduri(uri):
-	'''
-	Attempt to load the contents of the URI using specialized schema. The
-	form of the URI should be
-
-		<scheme>:<path>[#<kwargs>],
-
-	where <path> is a local file path, <schema> is one of the specialized
-	schema, and the optional fragment <kwargs> is a YAML representation of
-	a dictionary. Note that the scheme is not followed by a double slash,
-	so there is no netloc. The URI is parsed with urlparse.urlparse.
-
-	The recognized schema are (where data = open(<path>, 'rb')):
-
-	* keymat: Return the value habis.formats.loadkeymat(<path>, **kwargs).
-
-	* pickle: Return the value cPickle.load(data). A ValueError will be
-	  raised if kwargs are specified with the pickle sheme.
-
-	* yaml: Return the value of renderAndLoadYaml(data, **kwargs).
-
-	* string: Return the value of the string without loading.
-
-	If no scheme can be detected, 'string' is assumed. Any URI that
-	includes netloc, parameters, or query components will raise a
-	ValueError.
-	'''
-	from urlparse import urlparse
-
-	comps = urlparse(uri, scheme='string', allow_fragments=True)
-
-	if comps.netloc or comps.params or comps.query:
-		raise ValueError('URI must not contain netloc, parameters, or query components')
-
-	scheme = comps.scheme.lower()
-	if scheme == 'string':
-		return comps.path + (('#' + comps.fragment) if comps.fragment else '')
-
-	if comps.fragment:
-		from yaml import safe_load
-		kwargs = safe_load(comps.fragment)
-	else:
-		kwargs = { }
-
-	if scheme == 'keymat':
-		return loadkeymat(comps.path, **kwargs)
-
-	if scheme not in ('pickle', 'yaml'):
-		raise ValueError('Unrecognized URI scheme')
-
-	if scheme == 'pickle' and len(kwargs):
-		raise ValueError('URI fragments are not supported for pickle scheme')
-
-	# Attempt to open and read the file
-	data = open(comps.path, 'rb').read()
-
-	if scheme == 'yaml':
-		return renderAndLoadYaml(data, **kwargs)
-
-	else:
-		from cPickle import loads as unpickle
-		return unpickle(data)
 
 
 def renderAndLoadYaml(data, **kwargs):
@@ -116,7 +56,157 @@ def renderAndLoadYaml(data, **kwargs):
 		return safe_load(tmpl.render(**kwargs))
 
 
-def loadkeymat(*args, **kwargs):
+def loadkeymat(f, scalar=None, dtype=None, nkeys=None):
+	'''
+	A convenience function that will attempt to load a mapping from f using
+	loadz_keymat or (if loadz_keymat fails) loadtxt_keymat. The optional
+	arguments scalar and dtype, if not None, are passed as kwargs to either
+	load function.
+
+	If nkeys is not None, it will be used to verify the cardinality of keys
+	in a mapping returned by a successful call to loadz_keymat or passed as
+	an argument to loadtxt_keymat.
+	'''
+	# Build optional kwargs
+	kwargs = { }
+	if scalar is not None: kwargs['scalar'] = scalar
+	if dtype is not None: kwargs['dtype'] = dtype
+
+	try:
+		mapping = loadz_keymat(f, **kwargs)
+	except (ValueError, IOError):
+		if nkeys is not None: kwargs['nkeys'] = nkeys
+		return loadtxt_keymat(f, **kwargs)
+
+	if nkeys is not None and len(mapping):
+		key = next(iter(mapping))
+
+		try: nk = len(key)
+		except TypeError: nk = 1
+
+		if nkeys != nk:
+			raise ValueError('Cardinality of keys in mapping does not match nkeys parameter')
+
+	return mapping
+
+
+def savez_keymat(f, mapping, sortrows=True, compressed=False):
+	'''
+	Stores mapping, which maps one or more integers to one or more
+	numerical values, into f (which may be a string providing a file name,
+	or an open file-like object) using numpy.savez (if compressed is
+	False) or numpy.savez_compressed (if compressed is True).
+
+	All keys must contain the same number of integers. Each value in the
+	mapping may consiste of an arbitrary number of numeric values.
+
+	If sortrows is True, the data will be stored in an order determined by
+	sorted(mapping.keys()). Otherwise, the row order is either arbitrary or
+	enforced by the input map (e.g., an OrderedDict).
+
+	The saved npz file contains two arrays: 'keys', an N-by-M integer array
+	such that each row specifies an M-integer key in the input mapping, and
+	'values', which stores the values such that values[i] contains a Numpy
+	array of the values at mapping[keys[i]].
+	'''
+	keys = sorted(mapping.iterkeys()) if sortrows else mapping.keys()
+
+	# Build and verify the value array
+	values = np.array([mapping[k] for k in keys])
+
+	if not np.issubdtype(values.dtype, np.number):
+		# Values may have different lengths; make each value an array
+		for i, v in enumerate(values):
+			values[i] = np.asarray(v)
+			if not np.issubdtype(values[i].dtype, np.number):
+				raise TypeError('Values in mapping must be numeric')
+			if values[i].ndim < 1:
+				values[i] = values[i][np.newaxis]
+
+	# Build and verify the key array
+	keys = np.array(keys)
+
+	if not np.issubdtype(keys.dtype, np.integer) or keys.ndim > 2:
+		raise TypeError('Keys in mapping consist of one more integers and must have consistent cardinality')
+
+	savez = np.savez_compressed if compressed else np.savez
+	savez(f, keys=keys, values=values)
+
+
+def loadz_keymat(*args, **kwargs):
+	'''
+	Load and return, using numpy.load(*args, **kwargs), a mapping (created
+	with savez_keymat) from one or more integers to one or more numerical
+	values.
+
+	If the number of elements in every value array is 1, setting an
+	optional keyword argument scalar (True by default) to False will
+	preserve the values as 1-element Numpy arrays. Otherwise, 1-element
+	Numpy arrays will be collapsed to scalars. The scalar keyword argument
+	is stripped from the kwargs and is not passed to numpy.load.
+
+	The data types of the value arrays can be forced by specifying an
+	optional keyword argument dtype. The dtype argument will be stripped
+	from the kwargs and is not passed to numpy.load.
+
+	The returned mapping is an OrderedDict that preserves the ordering of
+	keys in the input file.
+
+	If the loaded file does not contain a valid mapping in the style
+	prepared by savez_keymat, a ValueError will be raised.
+	'''
+	# Pull specialty kwargs
+	scalar = kwargs.pop('scalar', True)
+	dtype = kwargs.pop('dtype', None)
+
+	try:
+		# Load the file
+		with np.load(*args, **kwargs) as data:
+			try:
+				files = set(data.iterkeys())
+				if files != { 'keys', 'values' }: raise ValueError
+			except (AttributeError, ValueError):
+				raise ValueError('Unrecognized data structure in input')
+
+			keys = data['keys']
+			values = data['values']
+	except AttributeError:
+		raise ValueError('Unrecognized data structure in input')
+
+	if not np.issubdtype(keys.dtype, np.integer) or not 0 < keys.ndim < 3:
+		raise ValueError('Invalid mapping key structure')
+
+	if values.ndim < 1:
+		raise ValueError('Invalid mapping value structure')
+
+	if values.shape[0] != keys.shape[0]:
+		raise ValueError('Mapping keys and values do not have equal lengths')
+
+	# Squeeze out unit second dimension if possible
+	try: keys = keys.squeeze(axis=1)
+	except ValueError: pass
+
+	if np.issubdtype(values.dtype, np.number):
+		# Properly handle scalar collapse for numeric arrays
+		if scalar and values.ndim == 2:
+			try: values = values.squeeze(axis=1)
+			except ValueError: pass
+		if not scalar and values.ndim == 1:
+			values = values[:,np.newaxis]
+
+	mapping = { }
+	for key, value in zip(keys, values):
+		try: ki = tuple(int(k) for k in key)
+		except TypeError: ki = int(key)
+		v = np.asarray(value, dtype=dtype)
+		if not np.issubdtype(v.dtype, np.number):
+			raise ValueError('Value for key %s is not numeric' % ki)
+		mapping[ki] = v if v.ndim > 0 else v[np.newaxis][0]
+
+	return mapping
+
+
+def loadtxt_keymat(*args, **kwargs):
 	'''
 	Loads a textual Numpy matrix by calling numpy.loadtxt(*args, **kwargs),
 	then converts the output to an OrderedDict mapping integers in some
@@ -163,7 +253,7 @@ def loadkeymat(*args, **kwargs):
 	return OrderedDict(kvmaker(g) for g in mat)
 
 
-def savekeymat(*args, **kwargs):
+def savetxt_keymat(*args, **kwargs):
 	'''
 	Stores a dictionary mapping integers to sequences as a textual Numpy
 	matrix using numpy.savetxt(*args, **kwargs), where the keys become the

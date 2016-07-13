@@ -7,7 +7,7 @@ import os, sys, ConfigParser, numpy as np
 from numpy.linalg import norm
 
 from habis.habiconf import HabisConfigError, HabisConfigParser
-from habis.formats import savekeymat, loadkeymat
+from habis.formats import loadkeymat, savez_keymat
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -56,10 +56,10 @@ def exdelayEngine(config):
 		try: lc = reflpos[:,nedim]
 		except IndexError: lc = c
 		# Convert distances to round-trip arrival times
-		times[elt] = 2 * (dx - r) / lc
+		times[elt,elt] = 2 * (dx - r) / lc
 
 	# Save the estimated arrival times
-	savekeymat(timefile, times, fmt=['%d'] + ['%16.8f']*nrefl)
+	savez_keymat(timefile, times)
 
 
 if __name__ == '__main__':
