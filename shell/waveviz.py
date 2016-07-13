@@ -431,7 +431,7 @@ if __name__ == '__main__':
 				mtime = int(np.mean(atimes.values()))
 				dwin = Window(max(0, mtime + dwin[0]), end=mtime + dwin[1])
 
-		if hidewf:
+		if hidewf and atimes:
 			print 'Suppressing unaligned waveforms'
 			for k, v in bswaves.iteritems():
 				if k not in atimes: v *= 0
