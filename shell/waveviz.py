@@ -14,7 +14,7 @@ from habis.formats import loadkeymat, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
-	print >> sys.stderr, 'USAGE: %s [-b bitrate] [-m] [-w s,e] [-a file[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname
+	print >> sys.stderr, 'USAGE: %s [-b bitrate] [-m] [-l] [-w s,e] [-a file[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname
 	sys.exit(fatal)
 
 
@@ -135,7 +135,7 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 			if not i % 50: print 'Stored frame %d' % elt
 
 
-def plotwaves(output, waves, atimes=None, dwin=None, cthresh=None):
+def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 	'''
 	Plot, into the image file output, the habis.sigtools.Waveform objects
 	mapped (by index) in waves, with temporal variations along the vertical
@@ -151,9 +151,16 @@ def plotwaves(output, waves, atimes=None, dwin=None, cthresh=None):
 	If dwin is None, the smallest data window that encompasses all plotted
 	signals will be used.
 
-	The color range to clip at cthresh standard deviations above the mean
-	peak amplitude over all signals. If cthresh is None, the narrowest
-	range that avoids clipping will be selected.
+	If log is True, the plot will display log magnitudes rather than linear
+	waveforms. The maximum color value will always be the peak amplitude,
+	and cthresh, if not None, should be a negative value that specifies the
+	minimum resolvable magnitude in dB down from the maximum. (It is
+	possible to specify a positive cthresh, but all values will clip to a
+	uniform color image.)
+
+	If log is False, the color range will clip at cthresh standard
+	deviations above the mean peak amplitude over all signals. If cthresh
+	is None, the narrowest range that avoids clipping will be selected.
 	'''
 	import matplotlib as mpl
 	mpl.use('pdf')
@@ -196,24 +203,37 @@ def plotwaves(output, waves, atimes=None, dwin=None, cthresh=None):
 
 	# Pull the waveforms and determine the color range
 	img = np.array([w.getsignal(dwin) for w in waves])
-	pkamps = np.max(np.abs(hilbert(img, axis=1)), axis=1)
 
-	if cthresh is None: cmax = np.max(pkamps)
-	else: cmax = np.mean(pkamps) + cthresh * np.std(pkamps)
+	if not log:
+		pkamps = np.max(np.abs(hilbert(img, axis=1)), axis=1)
+
+		if cthresh is None: cmax = np.max(pkamps)
+		else: cmax = np.mean(pkamps) + cthresh * np.std(pkamps)
+
+		clim = [-cmax, cmax]
+	else:
+		img = np.log10(np.abs(hilbert(img, axis=1)))
+		pkval = np.max(img)
+
+		if cthresh is None:
+			clim = [np.min(img), pkval]
+		else:
+			clim = [pkval + cthresh / 20., pkval]
 
 	# Shift extent by half a pixel so grid lines are centered on samples
 	extent = [-0.5, img.shape[0] - 0.5, dwin[0] - 0.5, dwin[0] + dwin[1] - 0.5]
 
 	# Plot the waveform image
-	ax[0].imshow(img.T, vmin=-cmax, vmax=cmax, cmap=cm.bone,
+	ax[0].imshow(img.T, vmin=clim[0], vmax=clim[1], cmap=cm.bone,
 			interpolation='nearest', origin='lower', extent=extent)
 	ax[0].grid(True)
 	ax[0].set_aspect('auto')
 	ax[0].set_ylabel('Sample index', fontsize=16)
 	if atimes is not None:
-		ax[0].set_title('Waveforms aligned to mean arrival time', fontsize=16)
+		title = 'Waveforms aligned to mean arrival time'
 	else:
-		ax[0].set_title('Waveforms with natural alignment', fontsize=16)
+		title = 'Waveforms with natural alignment'
+	ax[0].set_title(title + (' (log magnitude)' if log else ''), fontsize=16)
 
 	if atimes is not None:
 		# Plot the arrival-time image
@@ -354,13 +374,14 @@ if __name__ == '__main__':
 	dwin = None
 	nsamp = None
 	cthresh = None
+	log = False
 	zeropad = False
 	atimes = None
 	freq = 20.
 	hidewf = False
 	bitrate = -1
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:m')
+	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:ml')
 
 	for opt in optlist:
 		if opt[0] == '-h':
@@ -371,6 +392,8 @@ if __name__ == '__main__':
 				raise ValueError('Window must be a start,end pair')
 		elif opt[0] == '-a':
 			atimes = opt[1]
+		elif opt[0] == '-l':
+			log = True
 		elif opt[0] == '-t':
 			cthresh = float(opt[1])
 		elif opt[0] == '-f':
@@ -437,4 +460,4 @@ if __name__ == '__main__':
 				if k not in atimes: v *= 0
 
 		print 'Storing waveform image to file', imgname
-		plotwaves(imgname, bswaves, atimes, dwin, cthresh)
+		plotwaves(imgname, bswaves, atimes, dwin, log, cthresh)
