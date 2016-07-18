@@ -56,6 +56,17 @@ def renderAndLoadYaml(data, **kwargs):
 		return safe_load(tmpl.render(**kwargs))
 
 
+def loadmatlist(files, *a, **k):
+	'''
+	A conveience function to produce the ordered dictionary
+
+		OrderedDict(sorted(kv for f in files
+				for kv in loadkeymat(f, *a, **k).iteritems()))
+	'''
+	return OrderedDict(sorted(kv for f in files
+		for kv in loadkeymat(f, *a, **k).iteritems()))
+
+
 def loadkeymat(f, scalar=None, dtype=None, nkeys=None):
 	'''
 	A convenience function that will attempt to load a mapping from f using
@@ -194,7 +205,7 @@ def loadz_keymat(*args, **kwargs):
 		if not scalar and values.ndim == 1:
 			values = values[:,np.newaxis]
 
-	mapping = { }
+	mapping = OrderedDict()
 	for key, value in zip(keys, values):
 		try: ki = tuple(int(k) for k in key)
 		except TypeError: ki = int(key)
