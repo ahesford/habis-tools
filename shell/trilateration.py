@@ -14,7 +14,7 @@ from pycwp import process
 
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
-from habis.formats import savetxt_keymat, loadkeymat
+from habis.formats import savetxt_keymat, loadmatlist
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -98,9 +98,6 @@ def trilaterationEngine(config):
 	try:
 		# Try to grab the input time files
 		timefiles = matchfiles(config.getlist(tsec, 'timefile'))
-		if len(timefiles) < 1:
-			err = 'Key timefile must contain at least one entry'
-			raise HabisConfigError(err)
 	except Exception as e:
 		err = 'Configuration must specify timefile in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
@@ -187,12 +184,12 @@ def trilaterationEngine(config):
 		raise HabisConfigError('Optional fctsize must be a positive integer')
 
 	# Accumulate all element coordinates and arrival times
-	eltpos = dict(kp for efile in inelements
-			for kp in loadkeymat(efile).iteritems())
-	times = dict((k[0], v) for tfile in timefiles
-			for k, v in loadkeymat(tfile, nkeys=2).iteritems() if k[0] == k[1])
+	eltpos = loadmatlist(inelements)
+	times = { k[0]: v
+			for k, v in loadmatlist(timefiles, nkeys=2).iteritems()
+			if k[0] == k[1] }
 	# Only consider elements in both sets
-	elements = sorted(set(eltpos.iterkeys()).intersection(times.iterkeys()))
+	elements = sorted(set(eltpos).intersection(times))
 
 	# Pull the reflector guess as a 2-D matrix
 	guess = np.loadtxt(guessfile, ndmin=2)
