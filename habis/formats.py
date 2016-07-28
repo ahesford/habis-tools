@@ -10,7 +10,7 @@ import numpy as np
 import os
 import struct
 
-from itertools import izip
+from itertools import izip, repeat
 
 from collections import OrderedDict, defaultdict, namedtuple
 
@@ -123,9 +123,9 @@ def savez_keymat(f, mapping, sortrows=True, compressed=False):
 	according to the order of 'keys', and 'lengths', which specifies the
 	length of the value array for each associated key. That is,
 
-		mapping[keys[i]] = values[cumstart:cumstart+lengths[i]],
+		mapping[keys[i]] = values[start:start+lengths[i]],
 
-	where cumstart = sum(lengths[j] for 0 <= j < i).
+	where start = sum(lengths[j] for 0 <= j < i).
 
 	If the lengths of the value lists for all keys are the same, the
 	'lengths' array may be just a scalar value, in which case 'lengths[i]'
@@ -207,11 +207,7 @@ def loadz_keymat(*args, **kwargs):
 			values = data['values']
 			lengths = data['lengths']
 	except AttributeError:
-		raise ValueError('Unrecognized data structure in input')
-
-	# Expand scalar length for convenience
-	if lengths.ndim == 0:
-		lengths = np.array([lengths] * len(keys))
+		raise ValueError('Invalid file format')
 
 	# Convert the data type if desired
 	if dtype is not None:
@@ -220,38 +216,44 @@ def loadz_keymat(*args, **kwargs):
 	if not np.issubdtype(keys.dtype, np.integer) or not 0 < keys.ndim < 3:
 		raise ValueError('Invalid mapping key structure')
 
-	if not np.issubdtype(lengths.dtype, np.integer) or lengths.ndim != 1:
+	if not np.issubdtype(lengths.dtype, np.integer) or lengths.ndim > 1:
 		raise ValueError('Invalid mapping length structure')
 
 	if not np.issubdtype(values.dtype, np.number) or values.ndim != 1:
 		raise ValueError('Invalid mapping value structure')
 
-	if len(values) != np.sum(lengths):
-		raise ValueError('Mapping values do not have appropriate lengths')
-
-	if len(lengths) != len(keys):
+	if lengths.ndim == 1 and len(lengths) != len(keys):
 		raise ValueError('Mapping lengths and keys do not have equal lengths')
 
-	# Squeeze out unit second dimension if possible
+	nvals = np.sum(lengths) if lengths.ndim == 1 else (lengths * len(keys))
+	if len(values) != nvals:
+		raise ValueError('Mapping values do not have appropriate lengths')
+
+	if scalar:
+		# Determine whether the mapped values can be collapsed to scalars
+		if lengths.ndim == 0:
+			scalar = lengths == 1
+		else:
+			scalar = (lengths.shape[0] > 0 and
+					all(lv == 1 for lv in lengths))
+
+	# Collapse 1-element keys to scalars
 	try: keys = keys.squeeze(axis=1)
 	except ValueError: pass
 
+	if keys.ndim == 2:
+		# Convert a list of key values to a tuple of Python scalars
+		keys = [ tuple(k.tolist()) for k in keys ]
+	else:
+		# Collapse a single key value to a single Python scalar
+		keys = [ k.tolist() for k in keys ]
+
 	mapping = OrderedDict()
-	cumstart = 0
-	scalarok = True
+	start = 0
 
-	for key, length in izip(keys, lengths):
-		scalarok = scalarok and length == 1
-
-		try: ki = tuple(int(k) for k in key)
-		except TypeError: ki = int(key)
-
-		mapping[ki] = values[cumstart:cumstart+length]
-		cumstart += length
-
-	# Collarse 1-element values to scalars if desired and allowed
-	if scalarok and scalar:
-		mapping = { k: v[0] for k, v in mapping.iteritems() }
+	for key, lv in izip(keys, lengths if lengths.ndim == 1 else repeat(lengths)):
+		mapping[key] = values[start] if scalar else values[start:start+lv]
+		start += lv
 
 	return mapping
 
