@@ -10,6 +10,8 @@ import numpy as np
 import os
 import struct
 
+from itertools import izip
+
 from collections import OrderedDict, defaultdict, namedtuple
 
 def _strict_int(x):
@@ -115,33 +117,55 @@ def savez_keymat(f, mapping, sortrows=True, compressed=False):
 	sorted(mapping.keys()). Otherwise, the row order is either arbitrary or
 	enforced by the input map (e.g., an OrderedDict).
 
-	The saved npz file contains two arrays: 'keys', an N-by-M integer array
-	such that each row specifies an M-integer key in the input mapping, and
-	'values', which stores the values such that values[i] contains a Numpy
-	array of the values at mapping[keys[i]].
+	The saved npz file contains three arrays: 'keys', an N-by-M integer
+	array such that each row specifies an M-integer key in the input
+	mapping; 'values', which stores the values of the mapping flattened
+	according to the order of 'keys', and 'lengths', which specifies the
+	length of the value array for each associated key. That is,
+
+		mapping[keys[i]] = values[cumstart:cumstart+lengths[i]],
+
+	where cumstart = sum(lengths[j] for 0 <= j < i).
+
+	If the lengths of the value lists for all keys are the same, the
+	'lengths' array may be just a scalar value, in which case 'lengths[i]'
+	should be interpreted as '([lengths] * len(keys))[i]'.
 	'''
 	keys = sorted(mapping.iterkeys()) if sortrows else mapping.keys()
 
-	# Build and verify the value array
-	values = np.array([mapping[k] for k in keys])
+	# Build the length array and flattened value array
+	lengths, values = [ ], [ ]
+	for k in keys:
+		v = mapping[k]
 
+		try:
+			lengths.append(len(v))
+			values.extend(v)
+		except TypeError:
+			lengths.append(1)
+			values.append(v)
+
+	lengths = np.array(lengths)
+	values = np.array(values)
+
+	# Collapse lengths to scalar if possible
+	try: lv = lengths[0]
+	except IndexError: lv = 0
+	if np.all(lengths == lv):
+		lengths = np.array(lv)
+
+
+	# Verify the value array
 	if not np.issubdtype(values.dtype, np.number):
-		# Values may have different lengths; make each value an array
-		for i, v in enumerate(values):
-			values[i] = np.asarray(v)
-			if not np.issubdtype(values[i].dtype, np.number):
-				raise TypeError('Values in mapping must be numeric')
-			if values[i].ndim < 1:
-				values[i] = values[i][np.newaxis]
+		raise TypeError('Values in mapping must be numeric')
 
-	# Build and verify the key array
+	# Verify the key array
 	keys = np.array(keys)
-
 	if not np.issubdtype(keys.dtype, np.integer) or keys.ndim > 2:
 		raise TypeError('Keys in mapping consist of one more integers and must have consistent cardinality')
 
 	savez = np.savez_compressed if compressed else np.savez
-	savez(f, keys=keys, values=values)
+	savez(f, keys=keys, values=values, lengths=lengths)
 
 
 def loadz_keymat(*args, **kwargs):
@@ -175,44 +199,59 @@ def loadz_keymat(*args, **kwargs):
 		with np.load(*args, **kwargs) as data:
 			try:
 				files = set(data.iterkeys())
-				if files != { 'keys', 'values' }: raise ValueError
+				if files != { 'keys', 'values', 'lengths' }: raise ValueError
 			except (AttributeError, ValueError):
 				raise ValueError('Unrecognized data structure in input')
 
 			keys = data['keys']
 			values = data['values']
+			lengths = data['lengths']
 	except AttributeError:
 		raise ValueError('Unrecognized data structure in input')
+
+	# Expand scalar length for convenience
+	if lengths.ndim == 0:
+		lengths = np.array([lengths] * len(keys))
+
+	# Convert the data type if desired
+	if dtype is not None:
+		values = values.astype(dtype)
 
 	if not np.issubdtype(keys.dtype, np.integer) or not 0 < keys.ndim < 3:
 		raise ValueError('Invalid mapping key structure')
 
-	if values.ndim < 1:
+	if not np.issubdtype(lengths.dtype, np.integer) or lengths.ndim != 1:
+		raise ValueError('Invalid mapping length structure')
+
+	if not np.issubdtype(values.dtype, np.number) or values.ndim != 1:
 		raise ValueError('Invalid mapping value structure')
 
-	if values.shape[0] != keys.shape[0]:
-		raise ValueError('Mapping keys and values do not have equal lengths')
+	if len(values) != np.sum(lengths):
+		raise ValueError('Mapping values do not have appropriate lengths')
+
+	if len(lengths) != len(keys):
+		raise ValueError('Mapping lengths and keys do not have equal lengths')
 
 	# Squeeze out unit second dimension if possible
 	try: keys = keys.squeeze(axis=1)
 	except ValueError: pass
 
-	if np.issubdtype(values.dtype, np.number):
-		# Properly handle scalar collapse for numeric arrays
-		if scalar and values.ndim == 2:
-			try: values = values.squeeze(axis=1)
-			except ValueError: pass
-		if not scalar and values.ndim == 1:
-			values = values[:,np.newaxis]
-
 	mapping = OrderedDict()
-	for key, value in zip(keys, values):
+	cumstart = 0
+	scalarok = True
+
+	for key, length in izip(keys, lengths):
+		scalarok = scalarok and length == 1
+
 		try: ki = tuple(int(k) for k in key)
 		except TypeError: ki = int(key)
-		v = np.asarray(value, dtype=dtype)
-		if not np.issubdtype(v.dtype, np.number):
-			raise ValueError('Value for key %s is not numeric' % ki)
-		mapping[ki] = v if v.ndim > 0 else v[np.newaxis][0]
+
+		mapping[ki] = values[cumstart:cumstart+length]
+		cumstart += length
+
+	# Collarse 1-element values to scalars if desired and allowed
+	if scalarok and scalar:
+		mapping = { k: v[0] for k, v in mapping.iteritems() }
 
 	return mapping
 
