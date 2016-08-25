@@ -12,7 +12,6 @@ from threading import Lock
 
 class HabisConductorError(Exception): pass
 
-
 class HabisRemoteCommand(object):
 	'''
 	A class to prepare positional and keyword argument lists from a special
@@ -89,7 +88,7 @@ class HabisRemoteCommand(object):
 
 		2. If defaults[key] is in kwargs, and both defaults[key] and
 		   kwargs[key] are dicts (they have "items" methods), then
-		   
+
 			kwargs[key] = _updatekwargs(kwargs[key], defaults[key])
 
 		3. If defaults[key] is in kwargs, but at least one of
@@ -164,17 +163,18 @@ class HabisResponseAccumulator(object):
 	'''
 	def __init__(self, responses):
 		'''
-		Initialize a HabisResponseAccumulator with the provided
-		response lists.
+		Initialize a HabisResponseAccumulator with the provided mapping
+		between host (and block index, if a block command was run) and
+		result dictionaries.
 		'''
-		self.responses = list(responses)
+		self.responses = dict(responses)
 
 
 	def returncode(self):
 		'''
 		Returns the first nonzero return code, or else 0.
 		'''
-		for response in self.responses:
+		for response in self.responses.itervalues():
 			retcode = response['returncode']
 			if retcode != 0: return retcode
 
@@ -189,29 +189,22 @@ class HabisResponseAccumulator(object):
 		output = ''
 		key = 'stdout' if not stderr else 'stderr'
 
-		for i, response in enumerate(self.responses):
+		for hostid, response in sorted(self.responses.iteritems()):
 			try: text = response[key].rstrip()
 			except KeyError: text = ''
 
 			# Skip empty output
 			if len(text) < 1: continue
 
-			# Grab the "host", "actor", and "block" designators
-			serv = response.get('host', '')
-			actor = response.get('actor', '')
-			block = response.get('block', '')
+			# Pretty-print result key as a header
+			try: host, block = hostid
+			except (TypeError, ValueError): host = str(hostid)
+			else: host = str(host) + ' Block ' + str(block)
 
-			if actor:
-				actor = 'Actor ' + actor
-				serv = (serv + ' ' + actor) if serv else actor
-			if block:
-				block = 'Block ' + block
-				serv = (serv + ' ' + block) if serv else block
+			if not host:
+				host = '[Missing response identifier]'
 
-			if not serv:
-				serv = '[Missing response identifier at index %d]' % i
-
-			output += serv + '\n' + '=' * len(serv) + '\n'
+			output += host + '\n' + '=' * len(host) + '\n'
 			output += text + '\n\n'
 
 		return output.rstrip()
@@ -338,37 +331,65 @@ class HabisRemoteConductorGroup(object):
 		return d
 
 
+	@staticmethod
+	def _keybyhost(results, hosts, block=False):
+		'''
+		Create a map from the sequence hosts to results, a sequence of
+		HabisConductor remote call responses (one per host).
+
+		If block is False, results should be a sequence of outputs from
+		CommandWrapper.execute(); the resulting map will be
+
+			{ k: v for k, v in zip(hosts, results) }.
+
+		If block is True, results should be a sequence of outputs from
+		BlockCommandWrapper.execute(); the resulting map will be
+
+		{ (h, k): v for h, r in zip(hosts, results)
+				for k, v in results.iteritems() }.
+
+		If duplicate keys are found, a KeyError will be raised.
+		'''
+		keyed = { }
+		if not block:
+			for k, v in zip(hosts, results):
+				if k in keyed:
+					raise KeyError('Duplicate key %s' % (k,))
+				keyed[k] = v
+		else:
+			for h, r in zip(hosts, results):
+				for k, v in r.iteritems():
+					nk = (h, k)
+					if nk in keyed:
+						raise KeyError('Duplicate key %s' % (k,))
+					keyed[nk] = v
+
+		return keyed
+
+
 	def broadcast(self, hacmd):
 		'''
 		Invoke callRemote(cmd, *args, **kwargs) on each HabisConductor
 		object in self.conductors, where cmd, args and kwargs are
 		pulled from the HabisRemoteCommand instance hacmd.
 
-		Returns a DeferredList joining all of the callRemote deferreds.
+		Results of the remote calls are provided in a Deferred that
+		will fire with a map from remote hosts (and, if hacmd.isBlock
+		is True, unique block identifiers) to results encapsulated
+		according to CommandWrapper.encodeResult.
 		'''
-		def addhost(host):
-			# Callback factory to add a host record to each response
-			if hacmd.isBlock:
-				# Blocked commands return a list of result dicts
-				def callback(result):
-					for r in result: r['host'] = host
-					return result
-			else:
-				def callback(result):
-					result['host'] = host
-					return result
-			return callback
-
 		calls = []
 		for (addr, port), cond in self.conductors.iteritems():
 			# Try to get the args and kwargs for this server
 			args, kwargs = hacmd.argsForKey(addr)
 			d = cond.callRemote(hacmd.cmd, *args, **kwargs)
-			d.addCallback(addhost(addr))
 			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
 			calls.append(d)
 
 		dcall = defer.gatherResults(calls, consumeErrors=True)
+		# Collapse the list of results into a single mapping
+		hosts = [h[0] for h in self.conductors]
+		dcall.addCallback(self._keybyhost, hosts=hosts, block=hacmd.isBlock)
 		dcall.addErrback(self._underlyingError)
 		return dcall
 

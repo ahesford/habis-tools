@@ -9,11 +9,17 @@ def _strtup(a):
 	'''
 	If a is an iterable, convert it to a tuple of strings using
 	str(). Otherwise, a should be an integer, and the list of
-	strings is build from xrange(a).
+	strings is built from xrange(a).
+
+	After the tuple is produced, it is checked to ensure all entries are
+	unique.
 	'''
 	try: it = iter(a)
 	except TypeError: it = xrange(a)
-	return tuple(str(av) for av in it)
+	tup = tuple(str(av) for av in it)
+	if len(set(tup)) != len(tup):
+		raise ValueError('Values in sequence must be unique')
+	return tup
 
 
 class CommandWrapper(object):
@@ -129,12 +135,13 @@ class BlockCommandWrapper(CommandWrapper):
 		addition to the 'context' argument that has the same meaning as
 		in CommandWrapper:
 
-		- actors (default: 1): An integer or sequence of values, each
-		  optionally passed as a dynamic "actor argument" to the
-		  wrapped command upon execution. A dedicated thread is spawned
-		  for each actor to parallelize command execution.
+		- actors (default: 1): An integer or sequence of arbitrary
+		  unique values, each optionally passed as a dynamic "actor
+		  argument" to the wrapped command upon execution. A dedicated
+		  thread is spawned for each actor to parallelize command
+		  execution.
 
-		- blocks (default: 1): An integer or a sequence of arbitrary
+		- blocks (default: 1): An integer or a sequence of arbitrary unique
 		  values, each passed in turn as a dynamic "block argument" to
 		  the wrapped command upon execution. The "actor" threads share
 		  the block list.
@@ -221,10 +228,8 @@ class BlockCommandWrapper(CommandWrapper):
 			except Exception as e:
 				result = self.encodeResult(255, stderr='ERROR: Exception raised: %s' % e)
 
-			# Add tags identifying each block
-			result['actor'] = actor
-			result['block'] = blk
-			queue.put(result)
+			# Send result and associated block back to master
+			queue.put((blk, result))
 
 
 	def execute(self, **kwargs):
@@ -235,6 +240,12 @@ class BlockCommandWrapper(CommandWrapper):
 		among the actor subprocesses. Each actor and block value are
 		prepended to the arguments in self.args passed to the wrapped
 		command.
+
+		The return value is a mapping between unique block arguments and
+		results of the form described in CommandWrapper.execute.
+
+		If duplicate block indices are encountered when building the
+		map, a KeyError will be raised. (This should never happen.)
 		'''
 		from Queue import Queue, Empty
 		from threading import Thread
@@ -262,16 +273,19 @@ class BlockCommandWrapper(CommandWrapper):
 			t.start()
 			workthreads.append(t)
 
-		# Store the result dictionaries pulled from the threads
-		results = []
+		# Store the results pulled from the threads, keyed by block
+		results = { }
+
 		# Testing for life BEFORE checking queue contents avoids a race
 		# where threads put() results on queue and die between tests
 		while any(t.is_alive() for t in workthreads) or not q.empty():
-			try: result = q.get(timeout=1.0)
+			try: blk, result = q.get(timeout=1.0)
 			except Empty: pass
 			else:
 				q.task_done()
-				results.append(result)
+				if blk in results:
+					raise KeyError('Duplicate key %d' % (blk,))
+				results[blk] = result
 
 		# Join all threads to clean up; should just return
 		for t in workthreads: t.join()

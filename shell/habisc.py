@@ -21,15 +21,11 @@ def flattener(results):
 	return [r for result in results for r in result]
 
 
-def printResult(results, isBlock=False, clearline=True):
+def printResult(results, clearline=True):
 	'''
-	Pretty-print output from multiple remote HabisConductors. If isBlock is
-	True, results is a list-of-lists that comes from multiple remote
-	blocked commands. This list-of-lists will be flattened prior to printing.
+	Pretty-print output from HabisRemoteConductorGroup.broadcast.
 	'''
 	if results is None: return
-
-	if isBlock: results = [r for result in results for r in result]
 
 	acc = HabisResponseAccumulator(results)
 	stdout = acc.getoutput()
@@ -88,7 +84,7 @@ def configureGroup(hosts, port, cmdlist):
 			else: print 'Non-fatal error:', str(e)
 		else:
 			# Print the results of successful calls
-			printResult(result, hacmd.isBlock)
+			printResult(result)
 
 
 def findconfig(confname):
