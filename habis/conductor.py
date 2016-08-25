@@ -177,10 +177,61 @@ class HabisRemoteConductorGroup(object):
 	def throwError(self, failure, message):
 		'''
 		Throw a HabisConductorError with the provided message and a
-		reference to the underlying failure.
+		reference to the deepest-level underlying failure.
 		'''
+		from twisted.python.failure import Failure
+		if isinstance(failure, Failure): failure = failure.value
 		error = '%s, underlying failure: %s' % (message, failure)
 		raise HabisConductorError(error)
+
+
+	@staticmethod
+	def _underlyingError(result):
+		'''
+		If result is a Python Exception instance (other than
+		defer.FirstError), raise result.
+
+		Otherwise, if result is not a Twisted Failure instance, just
+		return result.
+
+		If result is a Twisted Failure instance, recursively drill down
+		the "value" attribute until an object is found that is not a
+		Failure. If this is object is an Exception, raise it.
+		Otherwise, return the deepest Failure that holds the object.
+
+		As a special case, if the value of a Failure is a FirstError,
+		the recursion continues by treating "value.subFailure" as the
+		next value to consider. This special case is only handled once;
+		if value.subFailure is itself a FirstError, then the inner
+		FirstError will be raised.
+		'''
+		from twisted.python.failure import Failure
+
+		if not isinstance(result, Failure):
+			# Handle cases when the result is not a Failure
+			if isinstance(result, Exception): raise result
+			return result
+
+		lastFailure = result
+		while True:
+			# Grab the value
+			value = lastFailure.value
+
+			if isinstance(value, defer.FirstError):
+				# Grab underlying failures in FirstError
+				value = value.subFailure
+
+			if isinstance(value, Failure):
+				# Keep drilling into deeper failures
+				lastFailure = value
+			elif isinstance(value, Exception):
+				# Raise an Exception behind the Failure
+				raise value
+			else:
+				# Value is not recognizable as an error
+				break
+
+		return lastFailure
 
 
 	def connect(self):
@@ -212,6 +263,7 @@ class HabisRemoteConductorGroup(object):
 		# Join all of the deferreds into a list, storing successful results
 		d = defer.gatherResults(connections, consumeErrors=True)
 		d.addCallback(gatherConductors)
+		d.addErrback(self._underlyingError)
 		return d
 
 
@@ -244,7 +296,10 @@ class HabisRemoteConductorGroup(object):
 			d.addCallback(addhost(addr))
 			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
 			calls.append(d)
-		return defer.gatherResults(calls, consumeErrors=True)
+
+		dcall = defer.gatherResults(calls, consumeErrors=True)
+		dcall.addErrback(self._underlyingError)
+		return dcall
 
 
 class HabisConductor(pb.Root):
