@@ -8,28 +8,11 @@ import sys
 import yaml
 
 from twisted.spread import pb
-from twisted.internet import reactor
+from twisted.internet import reactor, defer
 
 from habis.conductor import HabisRemoteConductorGroup
 from habis.conductor import HabisResponseAccumulator
 from habis.conductor import HabisRemoteCommand
-
-def fatalError(reason, hgroup=None):
-	'''
-	Print the fatal error and stop the reactor.
-	'''
-	print 'Fatal error:', reason.value
-	if hgroup is not None:
-		hgroup.fatalError = True
-	reactor.stop()
-
-
-def nonfatalError(reason):
-	'''
-	Print the non-fatal error and allow callbacks to continue.
-	'''
-	print 'Non-fatal error:', reason.value
-
 
 def flattener(results):
 	'''
@@ -71,38 +54,41 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <cmdlist.yaml> [var=value ...]' % progname
 
 
+@defer.inlineCallbacks
 def configureGroup(hosts, port, cmdlist):
+	'''
+	In a Deferred, establishes a client-side conductor group on the list of
+	hosts at the given port to run the list of HabisRemoteCommand instances
+	cmdlist.
+
+	For all HabisRemoteCommand instances with a True fatalError attribute,
+	any exception raised by HabisRemoteConductorGroup.broadcast will be
+	raised herein, which terminates execution and fires the errback chain
+	of the returned Deferred. HabisRemoteConductorGroup.connect failures
+	are similarly handled.
+
+	For all HabisRemoteCommand instances with a False fatalError attribute,
+	any exception raised will be consumed and printed to the console
+	without stopping execution.
+	'''
 	# Create the client-side conductor group
 	hgroup = HabisRemoteConductorGroup(hosts, port, reactor)
 
-	def remoteCaller(_):
-		try: hacmd = cmdlist.pop(0)
-		except IndexError: return
+	# Attempt to connect, allowing failures to fall through
+	yield hgroup.connect()
 
-		# Blocked response list-of-lists must be flattened
-		isBlock = hacmd.isBlock
-
-		if len(cmdlist) > 0:
-			def nextCallback(result):
-				printResult(result, isBlock)
-				return remoteCaller(result)
-		else: 
-			def nextCallback(result):
-				printResult(result, isBlock, False)
-				reactor.stop()
-
-		d = hgroup.broadcast(hacmd)
-		if hacmd.fatalError:
-			d.addCallbacks(nextCallback, fatalError, errbackArgs=(hgroup,))
+	for hacmd in cmdlist:
+		# Broadcast the command and wait for results
+		try:
+			result = yield hgroup.broadcast(hacmd)
+		except Exception as e:
+			# Fatal errors to fall through
+			# Non-fatal errors are notify-only
+			if hacmd.fatalError: raise e
+			else: print 'Non-fatal error:', str(e)
 		else:
-			d.addErrback(nonfatalError)
-			d.addCallback(nextCallback)
-
-	# Attempt to connect, running the desired command on success
-	d = hgroup.connect()
-	d.addCallbacks(remoteCaller, fatalError, errbackArgs=(hgroup,))
-
-	return hgroup
+			# Print the results of successful calls
+			printResult(result, hacmd.isBlock)
 
 
 def findconfig(confname):
@@ -164,10 +150,23 @@ if __name__ == "__main__":
 		print >> sys.stderr, 'Reason:', e
 		sys.exit(1)
 
-	# Configure the client proxy
-	hgroup = configureGroup(hosts, port, cmdlist)
-	reactor.run()
-	try: err = hgroup.fatalError
-	except AttributeError: err = False
+	# Track whether a fatal command caused premature exit
+	fatalError = False
 
-	sys.exit(int(err))
+	# Configure the client proxy to run the command chain
+	hgroup = configureGroup(hosts, port, cmdlist)
+
+	# Handle fatal errors (nonfatal errors are handled internally)
+	def earlyTerminator(reason):
+		print 'Fatal error:', str(reason.value)
+		fatalError = True
+	hgroup.addErrback(earlyTerminator)
+
+	# Terminate the reactor after the chain has completed
+	hgroup.addBoth(lambda _: reactor.stop())
+
+	# Run the reactor to fire the commands
+	reactor.run()
+
+	# Exit nonzero if a fatal error occurred
+	sys.exit(int(fatalError))
