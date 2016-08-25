@@ -20,12 +20,28 @@ class CommandWrapper(object):
 	'''
 	A generic wrapper class to execute a command with arguments.
 	'''
-	def __init__(self, command, *args):
+	def __init__(self, command, *args, **kwargs):
 		'''
-		Create a wrapper to call command with the given arguments.
+		Create a wrapper to call command with the given positional
+		arguments.
+
+		Exactly one keyword argument, 'context', is supported. If
+		provided, context must be a string or None. The argument is
+		stored in the 'context' attribute of the this wrapper instance
+		but is not used by the instance.
 		'''
 		if not isinstance(command, basestring):
 			raise ValueError('Command must be a string')
+
+		context = kwargs.pop('context', None)
+		if not (context is None or isinstance(context, basestring)):
+			raise ValueError('Provided context must be None or a string')
+
+		if kwargs:
+			raise TypeError("Unrecognized keyword argument '%s'" % next(iter(kwargs)))
+
+		self.context = context
+
 		self.args = args
 		self._command = command
 
@@ -107,9 +123,11 @@ class BlockCommandWrapper(CommandWrapper):
 		given positional arguments *args, plus additional "actor" and
 		"block" arguments that are dynamically generated and unique for
 		each invocation.
-		
+
 		Entries in **kwargs configure work division and the dynamic
-		generation of additional arguments. Valid keywords are:
+		generation of additional arguments. Valid keywords are, in
+		addition to the 'context' argument that has the same meaning as
+		in CommandWrapper:
 
 		- actors (default: 1): An integer or sequence of values, each
 		  optionally passed as a dynamic "actor argument" to the
@@ -136,7 +154,9 @@ class BlockCommandWrapper(CommandWrapper):
 		*** For each of actors and blocks, if an integer I is specified
 		    in place of a sequence, a list of range(I) is assumed.
 		'''
-		super(BlockCommandWrapper, self).__init__(command, *args)
+		# Initialize the underlying CommandWrapper
+		super(BlockCommandWrapper, self).__init__(command,
+				*args, context=kwargs.pop('context', None))
 
 		self.chunk = kwargs.pop('chunk', 0)
 		self.nchunks = kwargs.pop('nchunks', 1)
@@ -146,8 +166,8 @@ class BlockCommandWrapper(CommandWrapper):
 
 		self.hideactor = bool(kwargs.pop('hideactor', False))
 
-		if len(kwargs) > 0:
-			raise TypeError('Unexpected keyword arguments found')
+		if kwargs:
+			raise TypeError("Unexpected keyword argument '%s'" % next(iter(kwargs)))
 
 		self.actors = actors
 		self.blocks = blocks

@@ -8,6 +8,8 @@ Classes that conduct HABIS processes over a network.
 from twisted.spread import pb
 from twisted.internet import threads, defer
 
+from threading import Lock
+
 class HabisConductorError(Exception): pass
 
 
@@ -44,15 +46,23 @@ class HabisRemoteCommand(object):
 			raise ValueError('Command must be a string')
 
 		self.cmd = cmd
-		self.kwargmap = dict(kwargmap)
 		self.fatalError = fatalError
 
-		# Build the argmap
+		# Copy the kwargmap dictionaries
+		try: kwitems = kwargmap.iteritems()
+		except AttributeError: kwitems = kwargmap.items()
+		self.kwargmap = { k: dict(v) for k, v in kwitems }
+
+		# Copy the argmap tuples or strings
 		self.argmap = {}
-		for key, args in argmap.iteritems():
+		try:
+			pwitems = argmap.iteritems()
+		except AttributeError:
+			pwitems = argmap.items()
+		for key, args in pwitems:
 			if isinstance(args, basestring):
 				args = shsplit(args)
-			self.argmap[key] = args
+			self.argmap[key] = tuple(args)
 
 
 	@property
@@ -66,22 +76,83 @@ class HabisRemoteCommand(object):
 		return self.cmd.startswith('block_')
 
 
+	@classmethod
+	def _updatekwargs(cls, kwargs, defaults):
+		'''
+		Recursively merge nested kwargs dictionaries, preferring values
+		in kwargs to provided default values. The dictionary kwargs is
+		mutated. Behavior is as such:
+
+		1. If defaults[key] is not in kwargs, then
+
+			kwargs[key] = defaults[key]
+
+		2. If defaults[key] is in kwargs, and both defaults[key] and
+		   kwargs[key] are dicts (they have "items" methods), then
+		   
+			kwargs[key] = _updatekwargs(kwargs[key], defaults[key])
+
+		3. If defaults[key] is in kwargs, but at least one of
+		   defaults[key] or kwargs[key] are not dicts, leave
+		   kwargs[key] alone.
+
+		Assignments in 1 (or recursively in 2) are not copied.
+		'''
+		for key in defaults:
+			if not key in kwargs:
+				kwargs[key] = defaults[key]
+				continue
+
+			kv = kwargs[key]
+			dv = defaults[key]
+
+			if hasattr(kv, 'items') and hasattr(dv, 'items'):
+				cls._updatekwargs(kv, dv)
+
+
 	def argsForKey(self, key):
 		'''
-		Return a tuple (args, kwargs) corresponding entries of
-		self.argmap[key] and self.kwargmap[key]. If the key does not
-		exist in either set, the 'default' key is used as a fallback.
-		If the 'default' key does not exist, the argument collection
-		will be empty.
+		Return a tuple (args, kwargs) corresponding to entries of
+		self.argmap[key] and self.kwargmap[key].
+
+		Two special keys are forbidden as arguments and will be used as
+		follows:
+
+		__ALL_HOSTS__: Any entries in argmap or kwargmap that
+		correspond to the requested key will be augmented with a
+		corresponding entry for the special '__ALL_HOSTS__' key, if one
+		exists. __ALL_HOSTS__ entries in argmap will be appended to
+		key-specific entries; key-specific entries in kwargmap will
+		OVERRIDE any __ALL_HOSTS__ entries when there is a conflict.
+
+		__DEFAULT__: If the requested key is not found in argmap or
+		kwargmap, the corresponding entry for special key
+		'__DEFAULT__', if it exists, will be substituted.
+
+		If no specifically requested key exists in a map, and no
+		__DEFAULT__ key exists, the returned values will be () for args
+		and {} for kwargs.
+
+		*** NOTE: If __DEFAULT__ is used in place of the specifically
+		requested map key, __ALL_HOSTS__ will be ignored for that map.
 		'''
-		args = []
-		kwargs = {}
+		ahost, dhost = '__ALL_HOSTS__', '__DEFAULT__'
+		try:
+			# Pull requested positional arguments with universal augment
+			args = tuple(self.argmap[key] + self.argmap.get(ahost, ()))
+		except KeyError:
+			# Fall back to a default
+			args = tuple(self.argmap.get(dhost, ()))
 
-		if key in self.argmap: args = self.argmap[key]
-		elif 'default' in self.argmap: args = self.argmap['default']
-
-		if key in self.kwargmap: kwargs = self.kwargmap[key]
-		elif 'default' in self.kwargmap: kwargs = self.kwargmap['default']
+		try:
+			# Pull the requested keyword arguments
+			kwargs = dict(self.kwargmap[key])
+		except KeyError:
+			# Fall back to a default
+			kwargs = dict(self.kwargmap.get(dhost, {}))
+		else:
+			# Merge requested arguments with universal augment
+			self._updatekwargs(kwargs, self.kwargmap.get(ahost, {}))
 
 		return args, kwargs
 
@@ -311,6 +382,52 @@ class HabisConductor(pb.Root):
 	# Store a mapping between methods and HABIS wrappers
 	wrapmap = {}
 
+	def __init__(self,):
+		'''
+		Initialize the conductor with an empty map of context locks,
+		and a lock to control creation of new context locks. If a
+		CommandWrapper instance contains a nonempty 'context'
+		attribute, a context lock will be acquired for the given
+		'context' attribute value while the CommandWrapper executes.
+		Context locks are created on demand and will persist for the
+		life of the conductor instance.
+		'''
+		self._contextLocks = { }, Lock()
+
+
+	def _getContextLock(self, context):
+		'''
+		Return (or create and return) a lock for the given named
+		context. The context must be a nonempty string and is case
+		insensitive. This method is serialized.
+		'''
+		if not (context and isinstance(context, basestring)):
+			raise ValueError('Context argument must be a nonempty string')
+
+		# Ignore case in context naming
+		context = context.lower()
+
+		# Acquire the map lock to fetch or create the lock
+		with self._contextLocks[1]:
+			try: return self._contextLocks[0][context]
+			except KeyError:
+				self._contextLocks[0][context] = Lock()
+				return self._contextLocks[0][context]
+
+
+	def _executeWrapper(self, wrapper, **kwargs):
+		'''
+		For a CommandWrapper wrapper, invoke wrapper.execute(**kwargs).
+		If wrapper has a nonempty context attribute, this will be
+		guarded with self._getContextLock(wrapper.context).
+		'''
+		# Just execute if there is no context
+		if not wrapper.context: return wrapper.execute(**kwargs)
+		# Otherwise, guard execution with a context lock
+		with self._getContextLock(wrapper.context):
+			return wrapper.execute(**kwargs)
+
+
 	@classmethod
 	def registerWrapper(cls, name, cmd, isBlock=False):
 		'''
@@ -346,7 +463,7 @@ class HabisConductor(pb.Root):
 		def callWrapper(self, *args, **kwargs):
 			wrapinit = kwargs.pop('wrapinit', {})
 			w = Wrapper(cmd, *args, **wrapinit)
-			return threads.deferToThread(lambda : w.execute(**kwargs))
+			return threads.deferToThread(self._executeWrapper, w, **kwargs)
 
 		callWrapper.__doc__ = docfmt % cmd
 
