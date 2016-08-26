@@ -250,6 +250,88 @@ class HabisRemoteConductorGroup(object):
 
 
 	@staticmethod
+	def parseCommandFile(fn, cvars={}):
+		'''
+		Parse a file named by the string fn as a command file for a
+		HabisRemoteConductorGroup. Command files are YAML documents
+		that embody a dictionary with two root-level keys:
+
+		'connect': A dictionary continaing two keys of its own that
+		correspond to arguments to the HabisRemoteConductorGroup
+		constructor. The first, 'hosts', provides a list of remote
+		hostnames and corresponds to the 'servers' argument; the
+		second, 'port',  specifies a numeric TCP port that corresponds
+		to the constructor argument of the same name. The 'port' key is
+		optional and will default to 8090 if unspecified.
+
+		'commands': A list of dictionaries that can each be used as
+		keyword arguments to the HabisRemoteCommand constructor to
+		define a sequence of commands. That is, the i-th command for a
+		HabisRemoteConductorGroup is defined by the call
+		HabisRemoteCommand(**configuration['commands'][i]).
+
+		If the Mako template engine is available, the configuration
+		document is treated as a template and will first be rendered by
+		Mako before being parsed as YAML. Any context variables passed
+		to the renderer (as keyword arguments to the method
+		mako.template.Template.render) should be provided by cvars.
+
+		The cvars variable can have one of three forms:
+
+		1. Dictionary-like: If **cvars can be used to unpack keyword
+		   arguments, cvars is used as-is.
+
+		2. Sequence of strings: A sequence of strings of the form
+		   key=value, where the keys (context keyword variable names)
+		   and values are split by the first equal sign.
+
+		3. A single string: The string will be split using shlex.split
+		   before being treated as the above-described sequence of
+		   strings.
+
+		If the Mako template engine is unavailable, the cvars argument
+		is ignored.
+
+		The return value is (hosts, port, cmdlist), where hosts and
+		port are suitable for use as the first two arguments of the
+		constructor for HabisRemoteConductorGroup, and cmdlist is a
+		sequence of HabisRemoteCommand instances that define the
+		commands to run through HabisRemoteConductorGroup.broadcast.
+		'''
+		from .formats import renderAndLoadYaml
+
+		# Make sure cvars behaves as a keyword dict
+		try: (lambda **r: r)(**cvars)
+		except TypeError:
+			# Split a single string into a sequence
+			if isinstance(cvars, basestring):
+				from shlex import split
+				cvars = split(cvars)
+
+			# Unpack a sequence of strings into a dictionary
+			def varpair(s):
+				try: key, val = [v.strip() for v in s.split('=', 1)]
+				except IndexError:
+					raise ValueError('Missing equality in variable definition')
+				return key, val
+
+			cvars = dict(varpair(s) for s in cvars)
+
+		# Parse the configuration file
+		configuration = renderAndLoadYaml(open(fn, 'rb').read(), **cvars)
+
+		# Read connection information
+		connect = configuration['connect']
+		hosts = connect['hosts']
+		port = connect.get('port', 8090)
+
+		# Build the command list
+		cmdlist = [HabisRemoteCommand(**c) for c in configuration['commands']]
+
+		return hosts, port, cmdlist
+
+
+	@staticmethod
 	def _underlyingError(result):
 		'''
 		If result is a Python Exception instance (other than

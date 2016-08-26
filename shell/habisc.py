@@ -14,12 +14,6 @@ from habis.conductor import HabisRemoteConductorGroup
 from habis.conductor import HabisResponseAccumulator
 from habis.conductor import HabisRemoteCommand
 
-def flattener(results):
-	'''
-	Flatten a list-of-lists into a single list.
-	'''
-	return [r for result in results for r in result]
-
 
 def printResult(results, clearline=True):
 	'''
@@ -110,37 +104,11 @@ if __name__ == "__main__":
 		usage(sys.argv[0])
 		sys.exit(1)
 
-	def varpair(s):
-		try: key, val = [v.strip() for v in s.split('=', 1)]
-		except IndexError:
-			raise ValueError('Missing equality in variable definition')
-		return key, val
-
-	varlist = dict(varpair(s) for s in sys.argv[2:])
-
 	# Try to grab a configuration name
 	confname = findconfig(sys.argv[1])
 
-	try:
-		try:
-			# Mako is used for dynamic configuration is available
-			from mako.template import Template
-		except ImportError:
-			# Without Mako, just treat the configuration as raw YAML
-			print >> sys.stderr, 'WARNING: Mako template engine not found, assuming raw YAML configuration'
-			configuration = yaml.safe_load(open(confname, 'rb'))
-		else:
-			# With Mako, render the configuration before parsing
-			# Pass variable definitions from command line
-			cnftmpl = Template(filename=confname, strict_undefined=True)
-			configuration = yaml.safe_load(cnftmpl.render(**varlist))
-
-		# Read connection information
-		connect = configuration['connect']
-		hosts = connect['hosts']
-		port = connect.get('port', 8090)
-		# Parse the command list
-		cmdlist = [HabisRemoteCommand(**c) for c in configuration['commands']]
+	# Parse the configuration
+	try: hosts, port, cmdlist = HabisRemoteConductorGroup.parseCommandFile(confname, sys.argv[2:])
 	except Exception as e:
 		print >> sys.stderr, 'ERROR: could not load command file', confname
 		print >> sys.stderr, 'Reason:', e
