@@ -14,40 +14,59 @@ from habis.conductor import HabisRemoteConductorGroup as HabisRCG
 from habis.conductor import HabisResponseAccumulator
 
 
-def printResult(results, cmd, clearline=True):
+def printHeader(hdr, clearline=True, stream=sys.stdout):
+	'''
+	Print a header followed by a line of '='.
+	'''
+	hdr = '| ' + hdr + ' |'
+	pads = '+' + '=' * max(0, len(hdr) - 2) + '+'
+	print >> stream, pads
+	print >> stream, hdr
+	print >> stream, pads
+	if clearline: print >> stream, ''
+
+
+def printResult(results, cmd):
 	'''
 	Pretty-print output from HabisRemoteConductorGroup.broadcast.
 	'''
 	if results is None: return
 
 	acc = HabisResponseAccumulator(results)
+
 	stdout = acc.getoutput()
-	if len(stdout) > 0:
-		print stdout
-		if clearline:
-			print ''
 	stderr = acc.getoutput(True)
-	if len(stderr) > 0:
-		print >> sys.stderr, stderr
-		if clearline:
-			print >> sys.stderr, ''
+
+	if not stdout and not stderr:
+		printHeader('RUN COMMAND: %s (no output)' % (cmd.cmd,))
+
+	if stdout:
+		printHeader('RUN COMMAND: %s (stdout)' % (cmd.cmd,))
+		print stdout
+		print ''
+
+	if stderr:
+		printHeader('RUN COMMAND: %s (stderr)' % (cmd.cmd,))
+		print stderr
+		print ''
 
 	retcode = acc.returncode()
-	if retcode != 0:
-		print >> sys.stderr, 'ERROR: nonzero return status %d' % retcode
+	if retcode:
+		print 'ERROR: nonzero return status %d' % retcode
+		print ''
 
 	return results
 
 
 def notifyError(err, cmd):
 	'''
-	Print an error encountered in a remote command invocation and, if
-	cmd.fatalError is True, re-raise the error.
+	Print non-fatal errors to the console, simply re-raise fatal ones.
 	'''
-	if cmd.fatalError:
-		print 'Fatal error in command %s: %s' % (cmd.cmd, err)
-		raise err
-	print 'Non-fatal error in command %s: %s' % (cmd.cmd, err)
+	if cmd.fatalError: raise err
+
+	printHeader('NON-FATAL ERROR IN COMMAND: %s' % (cmd.cmd,), False)
+	print err
+	print ''
 
 
 def usage(progname):
@@ -80,15 +99,21 @@ if __name__ == "__main__":
 	# Track occurrence of a fatal error
 	fatalError = False
 	def noteFatalError(reason):
+		printHeader('FATAL ERROR ENCOUNTERED (WILL TERMINATE)', False, sys.stderr)
+		print >> sys.stderr, reason.value
 		fatalError = True
 		return reason
 
 	# Try to find a configuration file
 	confname = findconfig(sys.argv[1])
 
-	# Execute the commands from the identified configuration file
-	cseq = HabisRCG.executeCommandFile(confname,
-			printResult, notifyError, sys.argv[2:], reactor)
+	try:
+		# Execute the commands from the identified configuration file
+		cseq = HabisRCG.executeCommandFile(confname,
+				printResult, notifyError, sys.argv[2:], reactor)
+	except Exception as e:
+		print >> sys.stderr, 'Cannot process conductor script:', e
+		sys.exit(1)
 
 	# Register a fatal error
 	cseq.addErrback(noteFatalError)

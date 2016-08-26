@@ -181,10 +181,13 @@ class HabisResponseAccumulator(object):
 		return 0
 
 
-	def getoutput(self, stderr=False):
+	def getoutput(self, stderr=False, hdrsep='-'):
 		'''
 		Return distilled output from the 'stdout' or 'stderr' result
-		keys if stderr is, respectively, False or True.
+		keys if stderr is, respectively, False or True. The host names
+		(and block indices, for a block command) are printed as
+		headers, separated from output by a line of repeated hdrsep
+		characters.
 		'''
 		output = ''
 		key = 'stdout' if not stderr else 'stderr'
@@ -204,7 +207,7 @@ class HabisResponseAccumulator(object):
 			if not host:
 				host = '[Missing response identifier]'
 
-			output += host + '\n' + '=' * len(host) + '\n'
+			output += host + '\n' + hdrsep * len(host) + '\n'
 			output += text + '\n\n'
 
 		return output.rstrip()
