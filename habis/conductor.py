@@ -222,7 +222,7 @@ class HabisRemoteConductorGroup(object):
 		conductor lists from the provided servers, each listening on
 		the given port.
 
-		If reactor is not None, a reference to will be captured in
+		If reactor is not None, a reference to it will be captured in
 		self.reactor. Otherwise, the default twisted.internet.reactor
 		will be installed and referenced in self.reactor.
 		'''
@@ -247,6 +247,90 @@ class HabisRemoteConductorGroup(object):
 		if isinstance(failure, Failure): failure = failure.value
 		error = '%s, underlying failure: %s' % (message, failure)
 		raise HabisConductorError(error)
+
+
+	@defer.inlineCallbacks
+	def runcommands(self, cmds, cb=None, eb=None):
+		'''
+		Invoke the sequence of HabisRemoteCommand instances in cmds, in
+		order, on hosts associated with this HabisRemoteConductorGroup.
+		The broadcast method is used to run each command. If this group
+		is not connected, it will connect to the remote hosts before
+		attempting to run the commands.
+
+		The return value of this method is a Deferred that will fire
+		after remote command execution has finished. After all remote
+		commands have been completed successfully, the Deferred will
+		fire its callback chain with a result of None. Early
+		termination of the command sequence (because of an error) will
+		case the Deferred to fire its errback chain with a Failure
+		indicating the nature of the error.
+
+		If provided, the callable cb will be called as cb(result, cmd)
+		after each HabisRemoteCommand cmd completes succesfully. The
+		result argument is the mapping returned by the Deferred
+		provided by HabisRemoteConductorGroup.broadcast. If cb is not
+		provided, the default implementation will ignore the output and
+		return status of all remote commands.
+
+		*** NOTE: A remotely executed command that returns a nonzero
+		status (and, therefore, may not have run as expected) does not
+		constitute a failure in HabisRemoteConductorGroup.broadcast
+		and, therefore, still counts as a successful run.
+
+		If provided, the callable eb will be called as eb(err, cmd) for
+		each failed HabisRemoteCommand cmd. Within eb, consume err
+		(which should be an Exception) to ignore the failure and
+		continue executing the next command. Raise an Exception within
+		eb to terminate early with an error.
+
+		If eb is not provided, the default implementation ignores any
+		errors raised by commands with 'fatalError' attribute values of
+		False, and re-raises any error raised by commands with
+		'fatalError' attribute values of True (and terminates remote
+		execution thereafter).
+		'''
+		if not cb:
+			# The default callback just ignores the result
+			def cb(result, cmd): return
+
+		if not eb:
+			# The default errback fails only for fatal errors
+			def eb(err, cmd):
+				if not cmd.fatalError: return
+				raise err
+
+		if not self.connected:
+			# Attempt to connect (failures fall through)
+			yield self.connect()
+
+			if not self.connected:
+				# The attempt to connect has failed
+				raise HabisConductorError('Connection attempt failed')
+
+		# Now step through the commands in sequence
+		for cmd in cmds:
+			try: res = yield self.broadcast(cmd)
+			except Exception as err: eb(err, cmd)
+			else: cb(res, cmd)
+
+	@classmethod
+	def executeCommandFile(cls, fn, cb=None, eb=None, cvars={}, reactor=None):
+		'''
+		A convience method to parse a command file and run the
+		discovered sequence of commands remotely. The sequence is:
+
+		1. (hosts, port, cmds) = cls.parseCommandFile(fn, cvars)
+		2. cgrp = cls(hosts, port, reactor)
+		3. cgrp.runcommands(cmds, cb, eb)
+
+		The return values from this call is the Deferred returned by
+		the call to cgrp.runcommands.
+		'''
+		# Parse the command file and create a conductor group
+		(hosts, port, cmds) = cls.parseCommandFile(fn, cvars)
+		cgrp = cls(hosts, port, reactor)
+		return cgrp.runcommands(cmds, cb, eb)
 
 
 	@staticmethod
