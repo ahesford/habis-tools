@@ -150,7 +150,7 @@ class HabisRepeater(LineReceiver):
 
 	def lineReceived(self, line):
 		'''
-		Respond to safetyd commands defined in self.commands.
+		Respond to HabisRepeater commands defined in self.commands.
 		'''
 		# Split the line to pull out optional arguments
 		cmd = line.split(',', 1)
