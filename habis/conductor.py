@@ -7,6 +7,8 @@ Classes that conduct HABIS processes over a network.
 
 from twisted.spread import pb
 from twisted.internet import threads, defer
+from twisted.protocols.basic import LineReceiver
+from twisted.internet.protocol import Factory
 
 from threading import Lock
 
@@ -690,3 +692,257 @@ class HabisConductor(pb.Root):
 		response = dict((k.replace(pfix, '', 1) if k.startswith(pfix) else k, v)
 				for k, v in self.wrapmap.iteritems())
 		return CommandWrapper.encodeResult(0, str(response))
+
+class HabisRepeaterFactory(Factory):
+	'''
+	Spawn instances of HabisRepeater.
+	'''
+	def buildProtocol(self, addr):
+		'''
+		Spawn a new HabisRepeater instance to handle inbound connections.
+		'''
+		return HabisRepeater()
+
+
+class HabisRepeater(LineReceiver):
+	'''
+	Listen for commands from a remote host and, in response, create a
+	HabisRemoteConductorGroup to run associated remote commands on HABIS
+	hardware.
+	'''
+
+	# Configurable commands
+	_commands = { }
+
+	# System-only commands
+	_syscommands = { 'LASTRESULT', 'QUIT' }
+
+	@classmethod
+	def registerCommand(cls, name, script):
+		'''
+		Associate the HabisRepeater command name with the given script
+		for HABISRemoteConductorGroup.executeCommandFile. Names are
+		always stripped and converted to uppercase.
+
+		Raises a KeyError if the name is already registered, or an
+		IOError if the specified script file does not exist.
+		'''
+		from os.path import isfile
+		# Command name is case insensitive
+		name = name.strip().upper()
+		if name in cls._commands or name in cls._syscommands:
+			raise KeyError("HabisRepeater command '%s' already registered" % (name,))
+		if not isfile(script):
+			raise IOError("HABIS command script '%s' does not exist" % (script,))
+		cls._commands[name] = script
+
+
+	@classmethod
+	def deregisterCommand(cls, name, ignore_missing=True):
+		'''
+		Remove a previously registered HabisRepeater command name from
+		the HabisRepeater class. Names are always stripped and
+		converted to uppercase.
+
+		Raises a KeyError if ignore_missing is False and the name was
+		not previously registered. Otherwise, if the name was not
+		previously registered, nothing is done.
+		'''
+		# Command name is case insensitive
+		name = name.strip().upper()
+		if name in cls._commands:
+			del cls._commands[name]
+		elif not ignore_missing:
+			if name in cls._syscommands:
+				errmsg = "Command '%s' is a system command"
+			else:
+				errmsg = "Unrecognized command '%s'"
+			raise KeyError(errmsg % (name,))
+
+
+	def __init__(self, maxerrs=3, reactor=None):
+		'''
+		Initialize the HabisRepeater protocol.
+
+		The optional reactor argument is captured and passed to any
+		instance of the HabisRemoteConductorGroup class used to run
+		commands. This argument is otherwise unused.
+
+		If a total of maxerrs command errors are encountered without
+		an intervening successful command, the connection will be
+		dropped.
+		'''
+		# Serialize command processing
+		self.lock = Lock()
+
+		# Track connection errors to terminate bad clients
+		self.errcount = 0
+		self.maxerrs = maxerrs
+
+		self.reactor = reactor
+
+		# Capture results of the last HABIS command execution
+		self.lastresult = []
+
+
+	def sendResponse(self, msg):
+		'''
+		Send, using self.sendLine, the string msg after validation. If
+		msg does not contain self.delimiter, it remains unchanged. If
+		msg does contain self.delimiter, it will be truncated
+		immediately before the first occurrence of self.delimiter prior
+		to transmission.
+		'''
+		# Find the delimiter in the message, if it exists
+		parts = msg.split(self.delimiter, 1)
+		self.sendLine(parts[0] if len(parts) > 2 else msg)
+
+
+	def hangup(self, reason=''):
+		'''
+		Send a QUIT message and drop the connection.
+		'''
+		self.sendResponse('QUIT,' + str(reason))
+		self.transport.loseConnection()
+
+
+	def sendError(self, msg):
+		'''
+		Send an ERR response with the given informational message (as a
+		string) and increment the error counter. Terminate if the error
+		count meets or exceeds self.maxerrs.
+
+		*** NOTE: The 'ERR,' response prefix is prepended to msg
+		automatically.
+		'''
+		self.sendResponse('ERR,' + msg)
+		self.errcount += 1
+		if self.errcount >= self.maxerrs:
+			self.hangup('Error count too great')
+
+
+	def recordCommandSuccess(self, result, cmd):
+		'''
+		Append to self.lastresult the tuple (cmd, result), where result
+		is produced by the method HabisRemoteConductorGroup.broadcast
+		for the noted cmd (an instance of HabisRemoteCommand).
+
+		The result is expected to be a mapping from remote hostnames
+		(and, for a block command, block indices) in the underlying
+		HabisRemoteConductorGroup to per-host result dictionaries
+		produced in accordance with CommandWrapper.encodeResult.
+		'''
+		self.lastresult.append((cmd.cmd, result))
+
+
+	def recordCommandFailure(self, error, cmd):
+		'''
+		Append to self.lastresult a tuple
+
+			(cmd, { '__ERROR__': str(error) }),
+
+		where cmd is a HabisRemoteCommand and the error is an exception
+		describing a failed HabisRemoteConductorGroup.broadcast call.
+
+		If cmd.fatalError is True, the error will be raised after the
+		append.
+		'''
+		self.lastresult.append((cmd.cmd, { '__ERROR__': str(error) }))
+		# Signal the recorded error to the caller
+		if cmd.fatalError: raise error
+
+
+	def encodeLastResult(self):
+		'''
+		If self.lastresult is not empty, encode and return, in base64,
+		a YAML representation of the list self.lastresult.
+
+		If self.lastresult is empty, just return an empty string.
+
+		If self.lastresult cannot be encoded with basic YAML tags, a
+		descendant of yaml.YAMLError will be raised.
+		'''
+		if not self.lastresult: return ''
+
+		from base64 import b64encode
+		from yaml import safe_dump
+
+		# Encode the lastresult list or raise an error
+		y = safe_dump(self.lastresult)
+		return b64encode(y)
+
+
+	def lineReceived(self, line):
+		'''
+		Respond to HabisRepeater commands from a client
+		'''
+		try: from yaml import YAMLError
+		except ImportError:
+			# Define a dummy YAMLError if the yaml module does not exist
+			class YAMLError(Exception): pass
+
+		# Split the line to pull out optional arguments
+		cmd = line.split(',', 1)
+
+		if len(cmd) > 1 and cmd[1]:
+			# Split arguments provided to the command
+			from shlex import split as shsplit
+			args = shsplit(cmd[1])
+		else: args = []
+
+		cmd = cmd[0].upper()
+
+		if cmd not in self._commands and cmd not in self._syscommands:
+			# Note an error if the command is not found
+			self.sendError('Command %s not recognized' % (cmd,))
+
+		# Reset the error count on successful command
+		self.errcount = 0
+
+		if cmd == 'QUIT':
+			self.hangup('Goodbye')
+			return
+		elif cmd == 'LASTRESULT':
+			try:
+				result = self.encodeLastResult()
+			except (YAMLError, ImportError) as e:
+				self.sendError('Cannot encode last command result')
+				print 'ERROR: unable to encode command results', e
+			else:
+				# Write the length of the result string
+				nresult = len(result)
+				self.sendResponse('LASTRESULT,%d' % (nresult))
+				if nresult:
+					# Dump encoded result in "raw mode"
+					self.transport.write(result)
+			return
+
+		# The lastresult list must be cleared for the to-be-run command
+		self.lastresult = []
+
+		# Lock the conductor repeater for exclusive access
+		self.lock.acquire()
+
+		try:
+			# Execute appropriate command script and capture results
+			cseq = HabisRemoteConductorGroup.executeCommandFile(
+					self._commands[cmd],
+					self.recordCommandSuccess,
+					self.recordCommandFailure,
+					args, self.reactor)
+
+			# Signal successful and failed completion to the client
+			cseq.addCallbacks(lambda _: self.sendResponse('SUCCESS,' + cmd),
+					lambda _: self.sendResponse('FAILURE,' + cmd))
+			# Release the command lock to allow subsequent requests
+			cseq.addBoth(lambda _: self.lock.release())
+		except Exception as e:
+			# Release the lock if the command execution failed
+			# (On successful invocation, callbacks and errbacks do this)
+			self.lock.release()
+			# Store failed execution attempts in lastresult
+			errmsg = 'Unable to process conductor script: ' + str(e)
+			# There is no command associated with this failure
+			self.lastresult.append((None, { '__ERROR__': errmsg }))
+			# Signal failure to the caller
+			self.sendResponse('FAILURE,' + cmd)
