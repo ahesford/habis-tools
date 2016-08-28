@@ -8,73 +8,144 @@ from twisted.internet.protocol import Factory
 
 from twisted.application import service, internet
 
-class SafetyCommandFactory(Factory):
-	'''
-	Spawn instances of SafetyCommandListener bound by a common
-	serialization lock.
-	'''
-	def __init__(self):
-		from threading import Lock
-		self.lock = Lock()
+import yaml, base64
 
+from habis.conductor import HabisRemoteConductorGroup as HabisRCG
 
+class HabisRepeaterFactory(Factory):
+	'''
+	Spawn instances of HabisRepeater.
+	'''
 	def buildProtocol(self, addr):
 		'''
-		Spawn a new SafetyCommandListener with a reference to the
-		global lock.
+		Spawn a new HabisRepeater instance to handle inbound connections.
 		'''
-		return SafetyCommandListener(lock=self.lock)
+		return HabisRepeater()
 
 
-class SafetyCommandListener(LineReceiver):
+class HabisRepeater(LineReceiver):
 	'''
-	Listen for string commands from a LabView safety measurement VI and
-	fire habisc.py to control HABIS hardware.
+	Listen for commands from a remote host and, in response, create a
+	HabisRemoteConductorGroup to run associated remote commands on HABIS
+	hardware.
 	'''
 
 	commands = {
 			'FIRE': '/opt/habis/share/calib/calib.fire.yaml',
 			'INIT': '/opt/habis/share/calib/calib.init.yaml',
 			'STOP': '/opt/habis/share/calib/calib.stop.yaml',
+			'ECHO': '/opt/habis/share/habisc/echo.yaml',
+			'LASTRESULT': None,
 			'QUIT': None
 	}
 
-	def __init__(self, lock=None):
+	def __init__(self, maxerrs=3, reactor=None):
 		'''
-		Initialize the protocol with an optional mutex for
-		serialization of habisc commands.
+		Initialize the HabisRepeater protocol.
+
+		The optional reactor argument is captured and passed to any
+		instance of the HabisRemoteConductorGroup class used to run
+		commands. This argument is otherwise unused.
+
+		If a total of maxerrs command errors are encountered without
+		an intervening successful command, the connection will be
+		dropped.
 		'''
+		# Serialize command processing
+		from threading import Lock
+		self.lock = Lock()
+
+		# Track connection errors to terminate bad clients
 		self.errcount = 0
-		self.lock = lock
+		self.maxerrs = maxerrs
+
+		self.reactor = reactor
+
+		# Capture results of the last HABIS command execution
+		self.lastresult = []
+
+
+	def sendResponse(self, msg):
+		'''
+		Send, using self.sendLine, the string msg after validation. If
+		msg does not contain self.delimiter, it remains unchanged. If
+		msg does contain self.delimiter, it will be truncated
+		immediately before the first occurrence of self.delimiter prior
+		to transmission.
+		'''
+		# Find the delimiter in the message, if it exists
+		parts = msg.split(self.delimiter, 1)
+		self.sendLine(parts[0] if len(parts) > 2 else msg)
 
 
 	def hangup(self, reason=''):
 		'''
 		Send a QUIT message and drop the connection.
 		'''
-		self.sendLine('QUIT,' + reason)
+		self.sendResponse('QUIT,' + str(reason))
 		self.transport.loseConnection()
 
 
-	def runhabisc(self, script, args=None):
+	def sendError(self, msg):
 		'''
-		Invoke habisc to interact with the HABIS conductor;
-		raises a subprocess.CalledProcessError on error.
+		Send an ERR response with the given informational message (as a
+		string) and increment the error counter. Terminate if the error
+		count meets or exceeds self.maxerrs.
 
-		If args is not None, it should be an extra list of string
-		arguments that will be appended to the habisc command line.
+		*** NOTE: The 'ERR,' response prefix is prepended to msg
+		automatically.
 		'''
-		from subprocess32 import check_call, CalledProcessError
-		habisc = '/opt/custom-python/bin/habisc.py'
+		self.sendResponse('ERR,' + msg)
+		self.errcount += 1
+		if self.errcount >= self.maxerrs:
+			self.hangup('Error count too great')
 
-		try: self.lock.acquire()
-		except AttributeError: pass
 
-		try:
-			check_call([habisc, script] + (args or []))
-		finally:
-			try: self.lock.release()
-			except AttributeError: pass
+	def recordCommandSuccess(self, result, cmd):
+		'''
+		Append to self.lastresult the tuple (cmd, result), where result
+		is produced by the method HabisRemoteConductorGroup.broadcast
+		for the noted cmd (an instance of HabisRemoteCommand).
+
+		The result is expected to be a mapping from remote hostnames
+		(and, for a block command, block indices) in the underlying
+		HabisRemoteConductorGroup to per-host result dictionaries
+		produced in accordance with CommandWrapper.encodeResult.
+		'''
+		self.lastresult.append((cmd.cmd, result))
+
+
+	def recordCommandFailure(self, error, cmd):
+		'''
+		Append to self.lastresult a tuple
+
+			(cmd, { '__ERROR__': str(error) }),
+
+		where cmd is a HabisRemoteCommand and the error is an exception
+		describing a failed HabisRemoteConductorGroup.broadcast call.
+
+		If cmd.fatalError is True, the error will be raised after the
+		append.
+		'''
+		self.lastresult.append((cmd.cmd, { '__ERROR__': str(error) }))
+		# Signal the recorded error to the caller
+		if cmd.fatalError: raise error
+
+
+	def encodeLastResult(self):
+		'''
+		If self.lastresult is not empty, encode and return, in base64,
+		a YAML representation of the list self.lastresult.
+
+		If self.lastresult is empty, just return an empty string.
+
+		If self.lastresult cannot be encoded with basic YAML tags, a
+		descendant of yaml.YAMLError will be raised.
+		'''
+		if not self.lastresult: return ''
+		# Encode the lastresult list or raise an error
+		y = yaml.safe_dump(self.lastresult)
+		return base64.b64encode(y)
 
 
 	def lineReceived(self, line):
@@ -92,11 +163,8 @@ class SafetyCommandListener(LineReceiver):
 		cmd = cmd[0].upper()
 
 		if cmd not in self.commands:
-			self.sendLine('ERR,Command %s not recognized' % cmd)
-			self.errcount += 1
-			if self.errcount >= 3:
-				self.hangup('Error count too great')
-			return
+			# Note an error if the command is not found
+			self.sendError('Command %s not recognized' % (cmd,))
 
 		# Reset the error count on successful command
 		self.errcount = 0
@@ -104,16 +172,51 @@ class SafetyCommandListener(LineReceiver):
 		if cmd == 'QUIT':
 			self.hangup('Goodbye')
 			return
+		elif cmd == 'LASTRESULT':
+			try:
+				result = self.encodeLastResult()
+			except yaml.YAMLError as e:
+				self.sendError('Cannot encode last command result')
+				print e
+			else:
+				# Write the length of the result string
+				nresult = len(result)
+				self.sendResponse('LASTRESULT,%d' % (nresult))
+				if nresult:
+					# Dump encoded result in "raw mode"
+					self.transport.write(result)
+			return
 
-		# Run the desired process in the background
-		from twisted.internet.threads import deferToThread
-		d = deferToThread(self.runhabisc, self.commands[cmd], args)
-		d.addCallbacks(lambda _ : self.sendLine('SUCCESS,' + cmd),
-				lambda _ : self.sendLine('FAILURE,' + cmd))
+		# The lastresult list must be cleared for the to-be-run command
+		self.lastresult = []
 
+		# Lock the conductor repeater for exclusive access
+		self.lock.acquire()
+
+		try:
+			# Execute appropriate command script and capture results
+			cseq = HabisRCG.executeCommandFile(self.commands[cmd],
+					self.recordCommandSuccess,
+					self.recordCommandFailure, args, self.reactor)
+
+			# Signal successful and failed completion to the client
+			cseq.addCallbacks(lambda _: self.sendResponse('SUCCESS,' + cmd),
+					lambda _: self.sendResponse('FAILURE,' + cmd))
+			# Release the command lock to allow subsequent requests
+			cseq.addBoth(lambda _: self.lock.release())
+		except Exception as e:
+			# Release the lock if the command execution failed
+			# (On successful invocation, callbacks and errbacks do this)
+			self.lock.release()
+			# Store failed execution attempts in lastresult
+			errmsg = 'Unable to process conductor script: ' + str(e)
+			# There is no command associated with this failure
+			self.lastresult.append((None, { '__ERROR__': errmsg }))
+			# Signal failure to the caller
+			self.sendResponse('FAILURE,' + cmd)
 
 # Create the twisted application object
 application = service.Application("HABIS Conductor Repeater")
 
-service = internet.TCPServer(8089, SafetyCommandFactory(), interface='')
+service = internet.TCPServer(8089, HabisRepeaterFactory(), interface='')
 service.setServiceParent(application)
