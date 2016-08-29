@@ -574,50 +574,119 @@ class HabisConductor(pb.Root):
 	# Store a mapping between methods and HABIS wrappers
 	wrapmap = {}
 
+	# A set of context names for which exclusive locks can be acquired
+	namedContexts = { 'gpu', 'cpu', 'mem', 'habis' }
+
+
 	def __init__(self,):
 		'''
-		Initialize the conductor with an empty map of context locks,
-		and a lock to control creation of new context locks. If a
-		CommandWrapper instance contains a nonempty 'context'
-		attribute, a context lock will be acquired for the given
-		'context' attribute value while the CommandWrapper executes.
-		Context locks are created on demand and will persist for the
-		life of the conductor instance.
+		Initialize the conductor with a map of locks for exclusive
+		access to all contexts in the self.namedContexts set.
+
+		If a CommandWrapper instance contains a nonempty 'context'
+		attribute, it should be a list of names in the set
+		self.namedContexts for which locks will be acquired prior to
+		execution.
 		'''
-		self._contextLocks = { }, Lock()
+		self._contextLocks = { k: Lock() for k in self.namedContexts }
 
 
-	def _getContextLock(self, context):
+	def _lockContexts(self, contexts):
 		'''
-		Return (or create and return) a lock for the given named
-		context. The context must be a nonempty string and is case
-		insensitive. This method is serialized.
+		Acquire all context locks in the collection 'contexts' in the
+		order defined by sort(contexts), where each item in contexts is
+		first stripped and converted to lowercase.
+
+		This method blocks until all requested locks are acquired or
+		until an error occurs. No value is returned.
+
+		A KeyError will be raised if a context name does not refer to a
+		previously defined context. Any exceptions raised by
+		Lock.acquire will be passed through. Any successfully acquired
+		locks will be released if an error is raised.
 		'''
-		if not (context and isinstance(context, basestring)):
-			raise ValueError('Context argument must be a nonempty string')
+		# Keep track of the acquired locks to release on error
+		acquired = [ ]
 
-		# Ignore case in context naming
-		context = context.lower()
+		# Clean up and sort context names
+		try:
+			for ctx in sorted(c.strip().lower() for c in contexts):
+				try: lk = self._contextLocks[ctx]
+				except KeyError: raise KeyError("Invalid context '%s'" % (ctx,))
+				lk.acquire()
+				acquired.append(ctx)
+		except Exception as e:
+			# Release locks in case of error
+			for ctx in reversed(acquired):
+				# Ignore release errors to ensure all are released
+				try: lk = self._contextLocks[ctx].release()
+				except Exception: pass
+			# Reraise the original error
+			raise e
 
-		# Acquire the map lock to fetch or create the lock
-		with self._contextLocks[1]:
-			try: return self._contextLocks[0][context]
-			except KeyError:
-				self._contextLocks[0][context] = Lock()
-				return self._contextLocks[0][context]
+
+	def _releaseContexts(self, contexts):
+		'''
+		Release all context locks in the collection 'contexts' in the
+		order defined by reversed(sort(contexts)), where each item in
+		contexts is first stripped and converted to lowercase.
+
+		It is the caller's responsibility to ensure that the requested
+		locks were locked by the calling thread (with a preceding call
+		to _lockContexts) and not some other thread; the locks will be
+		released regardless.
+
+		Any errors (invalid context names, lock issues) will be caught
+		and reraised by this method after all requested locks that can
+		be released have been.
+		'''
+		if isinstance(contexts, basestring): contexts = [contexts]
+
+		lastError = None
+		for ctx in reversed(sorted(c.strip().lower() for c in contexts)):
+			try:
+				try: lk = self._contextLocks[ctx]
+				except KeyError: raise KeyError("Invalid context '%s'" % (ctx,))
+				lk.release()
+			except Exception as e:
+				# Capture the error and allow releases to continue
+				lastError = e
+
+		# Raise a previously captured error
+		if lastError: raise lastError
 
 
 	def _executeWrapper(self, wrapper, **kwargs):
 		'''
 		For a CommandWrapper wrapper, invoke wrapper.execute(**kwargs).
-		If wrapper has a nonempty context attribute, this will be
-		guarded with self._getContextLock(wrapper.context).
+		If wrapper has a nonempty context attribute, guard the execution
+		with self._lockContexts(wrapper.context). If wrapper.context is
+		a string instead of a collection, it is converted to a
+		collection by calling shlex.split(wrapper.context).
 		'''
 		# Just execute if there is no context
 		if not wrapper.context: return wrapper.execute(**kwargs)
-		# Otherwise, guard execution with a context lock
-		with self._getContextLock(wrapper.context):
+
+		# Create a copy of the wrapper context for locking
+		if isinstance(wrapper.context, basestring):
+			from shlex import split
+			contexts = split(wrapper.context)
+		else:
+			contexts = [c for c in wrapper.context]
+
+		# Try to lock requested contexts
+		try: self._lockContexts(contexts)
+		except Exception as e:
+			raise HabisConductorError('Unable to lock contexts: ' + str(e))
+
+		try:
+			# Run the wrapper after contexts have been locked
 			return wrapper.execute(**kwargs)
+		finally:
+			# Make sure the locked contexts are freed
+			try: self._releaseContexts(contexts)
+			except Exception as e:
+				raise HabisConductorError('Context unlock error: ' + str(e))
 
 
 	@classmethod
