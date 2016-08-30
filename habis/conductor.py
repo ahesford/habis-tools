@@ -591,45 +591,67 @@ class HabisConductor(pb.Root):
 		self._contextLocks = { k: Lock() for k in self.namedContexts }
 
 
-	def _lockContexts(self, contexts):
+	def _lockContexts(self, contexts, wait=True):
 		'''
-		Acquire all context locks in the collection 'contexts' in the
-		order defined by sort(contexts), where each item in contexts is
-		first stripped and converted to lowercase.
+		Acquire, without deadlocking, all context locks in the
+		collection 'contexts' in an arbitrary order, where each item in
+		contexts is first stripped and converted to lowercase.
 
-		This method blocks until all requested locks are acquired or
-		until an error occurs. No value is returned.
-
+		If wait is True, this method blocks until all requested locks
+		are acquired or until an error occurs. If wait is False, the
+		method will raise a HabisConductorError if at least one
+		requested context lock would block.
+		
 		A KeyError will be raised if a context name does not refer to a
 		previously defined context. Any exceptions raised by
 		Lock.acquire will be passed through. Any successfully acquired
 		locks will be released if an error is raised.
+
+		No value is returned is returned by this method.
 		'''
 		# Keep track of the acquired locks to release on error
 		acquired = [ ]
 
-		# Clean up and sort context names
-		try:
-			for ctx in sorted(c.strip().lower() for c in contexts):
-				try: lk = self._contextLocks[ctx]
-				except KeyError: raise KeyError("Invalid context '%s'" % (ctx,))
-				lk.acquire()
-				acquired.append(ctx)
-		except Exception as e:
-			# Release locks in case of error
-			for ctx in reversed(acquired):
-				# Ignore release errors to ensure all are released
-				try: lk = self._contextLocks[ctx].release()
-				except Exception: pass
-			# Reraise the original error
-			raise e
+		# Clean up context names, ensure uniqueness, and pick an ordering
+		contexts = list({ c.strip().lower() for c in contexts })
+
+		while True:
+			try:
+				# Try to acquire locks in order
+				for i, ctx in enumerate(contexts):
+					try: lock = self._contextLocks[ctx]
+					except KeyError:
+						raise KeyError("Invalid context '%s'" % (ctx,))
+					# Acquire lock, blocking for first if needed
+					if lock.acquire(wait and not i):
+						# Record a successful acquisition
+						acquired.append(ctx)
+					else:
+						# Cycle blocked lock to front
+						contexts = contexts[i:] + contexts[:i]
+						# Silently release held locks
+						self._releaseContexts(acquired, True)
+						# Now no locks are held
+						acquired = [ ]
+						break
+				else:
+					# All locks were successfully acquired
+					return
+			except Exception as e:
+				# Silently release held locks
+				self._releaseContexts(acquired, True)
+				raise e
+
+			# Throw an error if waiting is not allowed
+			if not wait:
+				raise HabisConductorError('Context locks would block')
 
 
-	def _releaseContexts(self, contexts):
+	def _releaseContexts(self, contexts, silent=False):
 		'''
-		Release all context locks in the collection 'contexts' in the
-		order defined by reversed(sort(contexts)), where each item in
-		contexts is first stripped and converted to lowercase.
+		Release all context locks in the collection 'contexts' in an
+		arbitrary order, where each item in contexts is first stripped
+		and converted to lowercase.
 
 		It is the caller's responsibility to ensure that the requested
 		locks were locked by the calling thread (with a preceding call
@@ -637,13 +659,12 @@ class HabisConductor(pb.Root):
 		released regardless.
 
 		Any errors (invalid context names, lock issues) will be caught
-		and reraised by this method after all requested locks that can
-		be released have been.
+		and, if silent is False, reraised by this method after all
+		requested locks that can be released have been. If silent is
+		True, the caught errors will be ignored.
 		'''
-		if isinstance(contexts, basestring): contexts = [contexts]
-
 		lastError = None
-		for ctx in reversed(sorted(c.strip().lower() for c in contexts)):
+		for ctx in { c.strip().lower() for c in contexts }: 
 			try:
 				try: lk = self._contextLocks[ctx]
 				except KeyError: raise KeyError("Invalid context '%s'" % (ctx,))
@@ -653,7 +674,7 @@ class HabisConductor(pb.Root):
 				lastError = e
 
 		# Raise a previously captured error
-		if lastError: raise lastError
+		if lastError and not silent: raise lastError
 
 
 	def _executeWrapper(self, wrapper, **kwargs):
@@ -674,8 +695,8 @@ class HabisConductor(pb.Root):
 		else:
 			contexts = [c for c in wrapper.context]
 
-		# Try to lock requested contexts
-		try: self._lockContexts(contexts)
+		# Try to lock requested contexts, waiting if desired
+		try: self._lockContexts(contexts, wrapper.contextWait)
 		except Exception as e:
 			raise HabisConductorError('Unable to lock contexts: ' + str(e))
 

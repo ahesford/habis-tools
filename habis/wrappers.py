@@ -31,22 +31,24 @@ class CommandWrapper(object):
 		Create a wrapper to call command with the given positional
 		arguments.
 
-		Exactly one keyword argument, 'context', is supported. If
-		provided, context must be a string or None. The argument is
-		stored in the 'context' attribute of the this wrapper instance
-		but is not used by the instance.
+		Two keyword arguments, 'context', and 'contextWait', are
+		supported. If provided, context must be a string or None. The
+		argument is stored in the 'context' attribute of the this
+		wrapper instance but is not used by the instance. If provided,
+		contextWait must be a Boolean (the default value is True). This
+		is stored
 		'''
 		if not isinstance(command, basestring):
 			raise ValueError('Command must be a string')
 
-		context = kwargs.pop('context', None)
-		if not (context is None or isinstance(context, basestring)):
+		self.context = kwargs.pop('context', None)
+		if not (self.context is None or isinstance(self.context, basestring)):
 			raise ValueError('Provided context must be None or a string')
+
+		self.contextWait = bool(kwargs.pop('contextWait', True))
 
 		if kwargs:
 			raise TypeError("Unrecognized keyword argument '%s'" % next(iter(kwargs)))
-
-		self.context = context
 
 		self.args = args
 		self._command = command
@@ -161,9 +163,12 @@ class BlockCommandWrapper(CommandWrapper):
 		*** For each of actors and blocks, if an integer I is specified
 		    in place of a sequence, a list of range(I) is assumed.
 		'''
-		# Initialize the underlying CommandWrapper
-		super(BlockCommandWrapper, self).__init__(command,
-				*args, context=kwargs.pop('context', None))
+		# Initialize the underlying CommandWrapper; pull kwargs for super
+		skwargs = { }
+		for skw in { 'context', 'contextWait' }:
+			try: skwargs[skw] = kwargs.pop(skw)
+			except KeyError: pass
+		super(BlockCommandWrapper, self).__init__(command, *args, **skwargs)
 
 		self.chunk = kwargs.pop('chunk', 0)
 		self.nchunks = kwargs.pop('nchunks', 1)
