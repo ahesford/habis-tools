@@ -609,6 +609,9 @@ class HabisConductor(pb.Root):
 
 		No value is returned is returned by this method.
 		'''
+		# Sleep for a random interval to avoid cyclic contentions
+		import random, time
+
 		# Keep track of the acquired locks to release on error
 		acquired = [ ]
 
@@ -645,6 +648,9 @@ class HabisConductor(pb.Root):
 			# Throw an error if waiting is not allowed
 			if not wait:
 				raise HabisConductorError('Context locks would block')
+
+			# Sleep for a random time to avoid conflicts
+			time.sleep(random.uniform(0., 0.1))
 
 
 	def _releaseContexts(self, contexts, silent=False):
