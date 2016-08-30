@@ -202,7 +202,10 @@ class HabisResponseAccumulator(object):
 			if len(text) < 1: continue
 
 			# Pretty-print result key as a header
-			try: host, block = hostid
+			try:
+				if isinstance(hostid, basestring):
+					raise ValueError('Fall-through')
+				host, block = hostid
 			except (TypeError, ValueError): host = str(hostid)
 			else: host = str(host) + ' Block ' + str(block)
 
@@ -683,16 +686,16 @@ class HabisConductor(pb.Root):
 		if lastError and not silent: raise lastError
 
 
-	def _executeWrapper(self, wrapper, **kwargs):
+	def _executeWrapper(self, wrapper):
 		'''
-		For a CommandWrapper wrapper, invoke wrapper.execute(**kwargs).
-		If wrapper has a nonempty context attribute, guard the execution
+		For a CommandWrapper wrapper, invoke wrapper.execute(). If
+		wrapper has a nonempty context attribute, guard the execution
 		with self._lockContexts(wrapper.context). If wrapper.context is
 		a string instead of a collection, it is converted to a
 		collection by calling shlex.split(wrapper.context).
 		'''
 		# Just execute if there is no context
-		if not wrapper.context: return wrapper.execute(**kwargs)
+		if not wrapper.context: return wrapper.execute()
 
 		# Create a copy of the wrapper context for locking
 		if isinstance(wrapper.context, basestring):
@@ -708,7 +711,7 @@ class HabisConductor(pb.Root):
 
 		try:
 			# Run the wrapper after contexts have been locked
-			return wrapper.execute(**kwargs)
+			return wrapper.execute()
 		finally:
 			# Make sure the locked contexts are freed
 			try: self._releaseContexts(contexts)
@@ -724,11 +727,9 @@ class HabisConductor(pb.Root):
 		create an instance of habis.wrappers.CommandWrapper or
 		habis.wrappers.BlockCommandWrapper, respectively, to execute
 		the command cmd and return the results of its execute() method
-		asynchronously over the network. Positional arguments to the
-		remote_<name> method are passed to the wrapper constructor,
-		along with an option 'wrapinit' keyword argument (passed to the
-		constructor as **wrapinit). Any other keyword arguments are
-		passed to the execute() method of the wrapper instance.
+		asynchronously over the network. Positional and keyword
+		arguments to the remote_<name> method are passed to the wrapper
+		constructor.
 		'''
 		from types import MethodType
 
@@ -749,9 +750,8 @@ class HabisConductor(pb.Root):
 			from habis.wrappers import BlockCommandWrapper as Wrapper
 
 		def callWrapper(self, *args, **kwargs):
-			wrapinit = kwargs.pop('wrapinit', {})
-			w = Wrapper(cmd, *args, **wrapinit)
-			return threads.deferToThread(self._executeWrapper, w, **kwargs)
+			w = Wrapper(cmd, *args, **kwargs)
+			return threads.deferToThread(self._executeWrapper, w)
 
 		callWrapper.__doc__ = docfmt % cmd
 
