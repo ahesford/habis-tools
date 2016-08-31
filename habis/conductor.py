@@ -578,20 +578,20 @@ class HabisConductor(pb.Root):
 	wrapmap = {}
 
 	# A set of context names for which exclusive locks can be acquired
-	namedContexts = { 'gpu', 'cpu', 'mem', 'habis' }
+	_namedContexts = { 'gpu', 'cpu', 'mem', 'habis' }
 
 
 	def __init__(self,):
 		'''
 		Initialize the conductor with a map of locks for exclusive
-		access to all contexts in the self.namedContexts set.
+		access to all contexts in the self._namedContexts set.
 
 		If a CommandWrapper instance contains a nonempty 'context'
 		attribute, it should be a list of names in the set
-		self.namedContexts for which locks will be acquired prior to
+		self._namedContexts for which locks will be acquired prior to
 		execution.
 		'''
-		self._contextLocks = { k: Lock() for k in self.namedContexts }
+		self._contextLocks = { k: Lock() for k in self._namedContexts }
 
 
 	def _lockContexts(self, contexts, wait=True):
@@ -604,11 +604,14 @@ class HabisConductor(pb.Root):
 		are acquired or until an error occurs. If wait is False, the
 		method will raise a HabisConductorError if at least one
 		requested context lock would block.
-		
+
 		A KeyError will be raised if a context name does not refer to a
-		previously defined context. Any exceptions raised by
-		Lock.acquire will be passed through. Any successfully acquired
-		locks will be released if an error is raised.
+		defined context. The sole exception is when contexts contains a
+		single entry, '__all__',  which indicates that all defined
+		contexts should be locked. A KeyError will be raised if
+		'__all__' is specified alongside specific contexts.
+
+		Any acquired locks are released prior to raising an error.
 
 		No value is returned is returned by this method.
 		'''
@@ -619,7 +622,7 @@ class HabisConductor(pb.Root):
 		acquired = [ ]
 
 		# Clean up context names, ensure uniqueness, and pick an ordering
-		contexts = list({ c.strip().lower() for c in contexts })
+		contexts = list(self._parseContexts(contexts))
 
 		while True:
 			try:
@@ -664,8 +667,8 @@ class HabisConductor(pb.Root):
 
 		It is the caller's responsibility to ensure that the requested
 		locks were locked by the calling thread (with a preceding call
-		to _lockContexts) and not some other thread; the locks will be
-		released regardless.
+		to _lockContexts) and not some other thread; the locks
+		will be released regardless.
 
 		Any errors (invalid context names, lock issues) will be caught
 		and, if silent is False, reraised by this method after all
@@ -673,7 +676,7 @@ class HabisConductor(pb.Root):
 		True, the caught errors will be ignored.
 		'''
 		lastError = None
-		for ctx in { c.strip().lower() for c in contexts }: 
+		for ctx in self._parseContexts(contexts):
 			try:
 				try: lk = self._contextLocks[ctx]
 				except KeyError: raise KeyError("Invalid context '%s'" % (ctx,))
@@ -686,26 +689,51 @@ class HabisConductor(pb.Root):
 		if lastError and not silent: raise lastError
 
 
+	def _parseContexts(self, contexts):
+		'''
+		If contexts is a collection, return a set
+
+			{ c.strip().lower() for c in contexts }.
+
+		If contexts is a string, return the same set after setting
+
+			contexts = shlex.split(contexts).
+
+		In either case, if the resulting set contains a single entry of
+		'__all__', substitute the set of keys from self._contextLocks.
+		Specifying the '__all__' context with additional contexts will
+		raise a HabisConductorError.
+
+		If bool(contexts) is False, just return an empty set.
+		'''
+		if not contexts: return set()
+
+		# Split string context specifies
+		if isinstance(contexts, basestring):
+			from shlex import split
+			contexts = split(contexts)
+
+		# Ensure uniqueness and case insensitivity
+		contexts = { c.strip().lower() for c in contexts }
+
+		# Handle the special '__all__' keyword
+		if '__all__' in contexts:
+			if len(contexts) > 1:
+				raise HabisConductorError("Context '__all__' must be specified alone")
+			contexts = set(self._contextLocks.iterkeys())
+
+		print contexts
+
+		return contexts
+
+
 	def _executeWrapper(self, wrapper):
 		'''
-		For a CommandWrapper wrapper, invoke wrapper.execute(). If
-		wrapper has a nonempty context attribute, guard the execution
-		with self._lockContexts(wrapper.context). If wrapper.context is
-		a string instead of a collection, it is converted to a
-		collection by calling shlex.split(wrapper.context).
+		For a CommandWrapper wrapper, invoke wrapper.execute(), guarded
+		by self._lockContexts(wrapper.context) if appropriate.
 		'''
-		# Just execute if there is no context
-		if not wrapper.context: return wrapper.execute()
-
-		# Create a copy of the wrapper context for locking
-		if isinstance(wrapper.context, basestring):
-			from shlex import split
-			contexts = split(wrapper.context)
-		else:
-			contexts = [c for c in wrapper.context]
-
 		# Try to lock requested contexts, waiting if desired
-		try: self._lockContexts(contexts, wrapper.contextWait)
+		try: self._lockContexts(wrapper.context, wrapper.contextWait)
 		except Exception as e:
 			raise HabisConductorError('Unable to lock contexts: ' + str(e))
 
@@ -714,7 +742,7 @@ class HabisConductor(pb.Root):
 			return wrapper.execute()
 		finally:
 			# Make sure the locked contexts are freed
-			try: self._releaseContexts(contexts)
+			try: self._releaseContexts(wrapper.context)
 			except Exception as e:
 				raise HabisConductorError('Context unlock error: ' + str(e))
 
@@ -745,9 +773,9 @@ class HabisConductor(pb.Root):
 		docfmt = 'Instantiate a %s wrapper, asynchronously launch, and return the output'
 
 		if not isBlock:
-			from habis.wrappers import CommandWrapper as Wrapper
+			from .wrappers import CommandWrapper as Wrapper
 		else:
-			from habis.wrappers import BlockCommandWrapper as Wrapper
+			from .wrappers import BlockCommandWrapper as Wrapper
 
 		def callWrapper(self, *args, **kwargs):
 			w = Wrapper(cmd, *args, **kwargs)
@@ -780,14 +808,34 @@ class HabisConductor(pb.Root):
 	def remote_cmdlist(self):
 		'''
 		Return the class's mapping between remote methods and programs
-		to execute. The 'remote_' prefix is stripped from the remote
-		method names.
+		to execute. YAML block style is used to present the mapping.
+		The 'remote_' prefix is stripped from the remote method names.
 		'''
-		from habis.wrappers import CommandWrapper
+		from .wrappers import CommandWrapper
+		from yaml import safe_dump
+
 		pfix = 'remote_'
-		response = dict((k.replace(pfix, '', 1) if k.startswith(pfix) else k, v)
-				for k, v in self.wrapmap.iteritems())
-		return CommandWrapper.encodeResult(0, str(response))
+		response = { }
+
+		for attr in dir(self):
+			# Only consider remote_<method> attributes
+			if not attr.startswith(pfix): continue
+
+			# Strip the remote_ prefix
+			key = attr.replace(pfix, '', 1)
+
+			try:
+				# Look for a registered command for this attribute
+				cmd = self.wrapmap[attr]
+			except KeyError:
+				# Unregistered attributes are internal commands
+				cmd = { 'command': '__INTERNAL__', 'isBlock': False }
+
+			response[key] = cmd
+
+		response = safe_dump(response, default_flow_style=False)
+		return CommandWrapper.encodeResult(0, response)
+
 
 class HabisRepeaterFactory(Factory):
 	'''
