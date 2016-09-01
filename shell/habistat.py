@@ -8,6 +8,9 @@ import uptime
 import yaml
 import glob
 
+from itertools import izip
+from collections import OrderedDict
+
 def habistat():
 	'''
 	Return, as a YAML block-formatted string, the system uptime, the load
@@ -33,10 +36,9 @@ def habistat():
 
 		utime = tstr
 
-	try:
-		loadavgs = os.getloadavg()
-	except Exception as e:
-		loadavgs = 'Indeterminate'
+	try: loadavgs = os.getloadavg()
+	except Exception as e: loadavgs = 'Indeterminate'
+	else: loadavgs = dict(izip((1, 5, 15), loadavgs))
 
 	hadevs = sorted(glob.glob('/dev/habis[0-9]*'))
 
