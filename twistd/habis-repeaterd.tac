@@ -5,11 +5,11 @@
 
 from twisted.spread import pb
 from twisted.application import service, internet
+from twisted.internet.protocol import Factory
 
-from habis.conductor import HabisPerspectiveRepeater
+from habis.conductor import HabisPerspectiveRepeater, HabisLineRepeater
 
-def configureRepeater():
-
+def configurePerspectiveRepeater():
 	# The port and address on which the server will listen
 	port = 8091
 	addr = ''
@@ -19,7 +19,24 @@ def configureRepeater():
 
 	return internet.TCPServer(port, factory, interface=addr)
 
+def configureLineRepeater():
+	# The port and address on which the server will listen
+	port = 8089
+	addr = ''
+
+	factory = Factory.forProtocol(HabisLineRepeater)
+
+	return internet.TCPServer(port, factory, interface=addr)
+
 # Create the twisted application object
-application = service.Application("HABIS Conductor Perspective Repeater")
-service = configureRepeater()
-service.setServiceParent(application)
+application = service.Application("HABIS Conductor Repeater")
+
+# Multiplex the two repeater services
+mserv = service.MultiService()
+
+# Configure each repeater service and attach to the multiservice
+configureLineRepeater().setServiceParent(mserv)
+configurePerspectiveRepeater().setServiceParent(mserv)
+
+# Attach the multiservice to the application
+mserv.setServiceParent(application)
