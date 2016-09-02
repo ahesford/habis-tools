@@ -5,14 +5,28 @@ Classes that conduct HABIS processes over a network.
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
+import os
+
+import yaml
+
+import zope.interface
+
 from twisted.spread import pb
 from twisted.internet import threads, defer
 from twisted.protocols.basic import LineReceiver
-from twisted.internet.protocol import Factory
 
 from threading import Lock
 
-class HabisConductorError(Exception): pass
+def _validateCommandDirectory(directory):
+	'''
+	Return a canonicalized directory if it exists, otherwise raise IOError.
+	'''
+	directory = os.path.realpath(os.path.expanduser(directory))
+	if not os.path.isdir(directory):
+		raise IOError("Command directory '%s' does not exist" % (directory,))
+	return directory
+
+class HabisConductorError(pb.Error): pass
 
 class HabisRemoteCommand(object):
 	'''
@@ -266,20 +280,12 @@ class HabisRemoteConductorGroup(object):
 		is not connected, it will connect to the remote hosts before
 		attempting to run the commands.
 
-		The return value of this method is a Deferred that will fire
-		after remote command execution has finished. After all remote
-		commands have been completed successfully, the Deferred will
-		fire its callback chain with a result of None. Early
-		termination of the command sequence (because of an error) will
-		case the Deferred to fire its errback chain with a Failure
-		indicating the nature of the error.
-
 		If provided, the callable cb will be called as cb(result, cmd)
 		after each HabisRemoteCommand cmd completes succesfully. The
 		result argument is the mapping returned by the Deferred
 		provided by HabisRemoteConductorGroup.broadcast. If cb is not
-		provided, the default implementation will ignore the output and
-		return status of all remote commands.
+		provided, its default implementation returns None, ignoring the
+		output and return status of all remote commands.
 
 		*** NOTE: A remotely executed command that returns a nonzero
 		status (and, therefore, may not have run as expected) does not
@@ -292,11 +298,20 @@ class HabisRemoteConductorGroup(object):
 		continue executing the next command. Raise an Exception within
 		eb to terminate early with an error.
 
-		If eb is not provided, the default implementation ignores any
-		errors raised by commands with 'fatalError' attribute values of
-		False, and re-raises any error raised by commands with
-		'fatalError' attribute values of True (and terminates remote
-		execution thereafter).
+		If eb is not provided, its default implementation returns None,
+		ignoring any errors raised by commands with 'fatalError'
+		attribute values of False and re-raising any error raised by
+		commands with 'fatalError' attribute values of True (this
+		terminates remote execution).
+
+		The return value of this method is a Deferred that will fire
+		after remote command execution has finished. After successful
+		completion (or consumption of errors) of all remote commands,
+		the Deferred will fire its callback chain with the result of
+		the last-invoked callback or errback. Early termination of the
+		command sequence (because of an error) will case the Deferred
+		to fire its errback chain with a Failure indicating the nature
+		of the error.
 		'''
 		if not cb:
 			# The default callback just ignores the result
@@ -316,11 +331,21 @@ class HabisRemoteConductorGroup(object):
 				# The attempt to connect has failed
 				raise HabisConductorError('Connection attempt failed')
 
+		# Keep the result of the last command
+		lastResult = None
+
 		# Now step through the commands in sequence
 		for cmd in cmds:
-			try: res = yield self.broadcast(cmd)
-			except Exception as err: eb(err, cmd)
-			else: cb(res, cmd)
+			try:
+				res = yield self.broadcast(cmd)
+			except Exception as err:
+				lastResult = eb(err, cmd)
+			else:
+				lastResult = cb(res, cmd)
+
+		# Return the last available result
+		defer.returnValue(lastResult)
+
 
 	@classmethod
 	def executeCommandFile(cls, fn, cb=None, eb=None, cvars={}, reactor=None):
@@ -556,7 +581,7 @@ class HabisRemoteConductorGroup(object):
 		for (addr, port), cond in self.conductors.iteritems():
 			# Try to get the args and kwargs for this server
 			args, kwargs = hacmd.argsForKey(addr)
-			d = cond.callRemote(hacmd.cmd, *args, **kwargs)
+			d = cond.callRemote('execute', hacmd.cmd, *args, **kwargs)
 			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
 			calls.append(d)
 
@@ -573,24 +598,27 @@ class HabisConductor(pb.Root):
 	A means for wrapping commands on the server side, executing the
 	commands asynchronously, and returning the output to a client.
 	'''
-
-	# Store a mapping between methods and HABIS wrappers
-	wrapmap = {}
+	# Look for conductor commands in this directory
+	cmddir = '/opt/habis/share/conductor'
 
 	# A set of context names for which exclusive locks can be acquired
 	_namedContexts = { 'gpu', 'cpu', 'mem', 'habis' }
 
 
-	def __init__(self,):
+	def __init__(self, cmddir=None):
 		'''
 		Initialize the conductor with a map of locks for exclusive
-		access to all contexts in the self._namedContexts set.
+		access to all contexts in the self._namedContexts set. If
+		cmddir is specified, it must be an existing directory that
+		contains a collection of executables that will be mapped to
+		commands used as the first argument to self.remote_execute.
 
 		If a CommandWrapper instance contains a nonempty 'context'
 		attribute, it should be a list of names in the set
 		self._namedContexts for which locks will be acquired prior to
 		execution.
 		'''
+		self.cmddir = _validateCommandDirectory(cmddir or self.cmddir)
 		self._contextLocks = { k: Lock() for k in self._namedContexts }
 
 
@@ -722,8 +750,6 @@ class HabisConductor(pb.Root):
 				raise HabisConductorError("Context '__all__' must be specified alone")
 			contexts = set(self._contextLocks.iterkeys())
 
-		print contexts
-
 		return contexts
 
 
@@ -747,166 +773,78 @@ class HabisConductor(pb.Root):
 				raise HabisConductorError('Context unlock error: ' + str(e))
 
 
-	@classmethod
-	def registerWrapper(cls, name, cmd, isBlock=False):
+	def remote_execute(self, cmd, *args, **kwargs):
 		'''
-		Create a remote_<name> (if isBlock is False) or
-		remote_block_<name> (if isBlock is True) method that will
-		create an instance of habis.wrappers.CommandWrapper or
-		habis.wrappers.BlockCommandWrapper, respectively, to execute
-		the command cmd and return the results of its execute() method
-		asynchronously over the network. Positional and keyword
-		arguments to the remote_<name> method are passed to the wrapper
-		constructor.
+		Try to invoke self.remote_<cmd>(*args, **kwargs) if the method
+		exists. Otherwise, look for an executable in self.cmddir named
+		by cmd and wrap the command as a habis.wrappers.CommandWrapper
+		or, if the cmd starts with 'block_', a BlockCommandWrapper and
+		execute the wrapper on a background thread. Remaining
+		positional and keyword arguments are passed to the wrapper
+		initializer.
+
+		The return value is a deferred that will fire when the
+		execution finishes.
 		'''
-		from types import MethodType
+		# Try internal commands first
+		if hasattr(self, 'remote_' + cmd):
+			return getattr(self, 'remote_' + cmd)(*args, **kwargs)
 
-		if name.startswith('block_') and not isBlock:
-			raise ValueError('Non-block command names cannot start with "block_"')
+		# Only basenames are allowed in executable names
+		if os.path.sep in cmd:
+			raise HabisConductorError("Invalid character '%s' in command name" % (os.path.sep,))
 
-		# Ensure that the method does not already exist
-		methodName = ('remote_' if not isBlock else 'remote_block_') + name
+		# Make sure the command exists and is executable
+		fcmd = os.path.join(self.cmddir, cmd)
+		if not os.access(fcmd, os.X_OK):
+			raise HabisConductorError("Unable to execute '%s'" % (cmd,))
 
-		if hasattr(cls, methodName):
-			raise AttributeError('Attribute %s already exists in %s' % (methodName, cls.__name__))
-
-		docfmt = 'Instantiate a %s wrapper, asynchronously launch, and return the output'
-
-		if not isBlock:
-			from .wrappers import CommandWrapper as Wrapper
-		else:
+		if cmd.startswith('block_'):
 			from .wrappers import BlockCommandWrapper as Wrapper
+		else:
+			from .wrappers import CommandWrapper as Wrapper
 
-		def callWrapper(self, *args, **kwargs):
-			w = Wrapper(cmd, *args, **kwargs)
-			return threads.deferToThread(self._executeWrapper, w)
-
-		callWrapper.__doc__ = docfmt % cmd
-
-		# Add the method to the class
-		setattr(cls, methodName, MethodType(callWrapper, None, cls))
-		# Record the mapping between method name and wrapped command
-		cls.wrapmap[methodName] = { 'command': cmd, 'isBlock': isBlock }
-
-
-	@classmethod
-	def deregisterWrapper(cls, name, isBlock=False):
-		'''
-		Remove the remote_<name> or remote_block_<name> method
-		(according to the truth value of isBlock) that invokes an
-		associated habis.wrappers.CommandWrapper instance.
-		'''
-		methodName = ('remote_' if not isBlock else 'remote_block_') + name
-		if methodName not in cls.wrapmap:
-			raise AttributeError('Method was not previously registered with registerWrapper')
-
-		# Delete the function and mapping
-		delattr(cls, methodName)
-		del cls.wrapmap[methodName]
+		# Wrap and execute the command
+		wrap = Wrapper(fcmd, *args, **kwargs)
+		return threads.deferToThread(self._executeWrapper, wrap)
 
 
 	def remote_cmdlist(self):
 		'''
-		Return the class's mapping between remote methods and programs
-		to execute. YAML block style is used to present the mapping.
-		The 'remote_' prefix is stripped from the remote method names.
+		Return, in YAML block style, a list of commands available as
+		first arguments to remote_execute.
 		'''
 		from .wrappers import CommandWrapper
-		from yaml import safe_dump
+		from glob import glob
 
-		pfix = 'remote_'
-		response = { }
+		# Identify all commands in the command directory
+		responses = [ ]
 
-		for attr in dir(self):
-			# Only consider remote_<method> attributes
-			if not attr.startswith(pfix): continue
+		for f in sorted(glob(os.path.join(self.cmddir, '*'))):
+			# Make sure the command is executable
+			if os.access(f, os.X_OK):
+				responses.append(os.path.basename(f))
 
-			# Strip the remote_ prefix
-			key = attr.replace(pfix, '', 1)
-
-			try:
-				# Look for a registered command for this attribute
-				cmd = self.wrapmap[attr]
-			except KeyError:
-				# Unregistered attributes are internal commands
-				cmd = { 'command': '__INTERNAL__', 'isBlock': False }
-
-			response[key] = cmd
-
-		response = safe_dump(response, default_flow_style=False)
+		response = yaml.safe_dump(responses, default_flow_style=False)
 		return CommandWrapper.encodeResult(0, response)
 
 
-class HabisRepeaterFactory(Factory):
-	'''
-	Spawn instances of HabisRepeater.
-	'''
-	def buildProtocol(self, addr):
-		'''
-		Spawn a new HabisRepeater instance to handle inbound connections.
-		'''
-		return HabisRepeater()
-
-
-class HabisRepeater(LineReceiver):
+class HabisLineRepeater(LineReceiver):
 	'''
 	Listen for commands from a remote host and, in response, create a
 	HabisRemoteConductorGroup to run associated remote commands on HABIS
 	hardware.
 	'''
+	# Look in this directory for conductor scripts
+	cmddir = '/opt/habis/share/linerepeater'
 
-	# Configurable commands
-	_commands = { }
-
-	# System-only commands
-	_syscommands = { 'LASTRESULT', 'QUIT' }
-
-	@classmethod
-	def registerCommand(cls, name, script):
+	def __init__(self, cmddir=None, maxerrs=3, reactor=None):
 		'''
-		Associate the HabisRepeater command name with the given script
-		for HABISRemoteConductorGroup.executeCommandFile. Names are
-		always stripped and converted to uppercase.
+		Initialize the HabisLineRepeater protocol.
 
-		Raises a KeyError if the name is already registered, or an
-		IOError if the specified script file does not exist.
-		'''
-		from os.path import isfile
-		# Command name is case insensitive
-		name = name.strip().upper()
-		if name in cls._commands or name in cls._syscommands:
-			raise KeyError("HabisRepeater command '%s' already registered" % (name,))
-		if not isfile(script):
-			raise IOError("HABIS command script '%s' does not exist" % (script,))
-		cls._commands[name] = script
-
-
-	@classmethod
-	def deregisterCommand(cls, name, ignore_missing=True):
-		'''
-		Remove a previously registered HabisRepeater command name from
-		the HabisRepeater class. Names are always stripped and
-		converted to uppercase.
-
-		Raises a KeyError if ignore_missing is False and the name was
-		not previously registered. Otherwise, if the name was not
-		previously registered, nothing is done.
-		'''
-		# Command name is case insensitive
-		name = name.strip().upper()
-		if name in cls._commands:
-			del cls._commands[name]
-		elif not ignore_missing:
-			if name in cls._syscommands:
-				errmsg = "Command '%s' is a system command"
-			else:
-				errmsg = "Unrecognized command '%s'"
-			raise KeyError(errmsg % (name,))
-
-
-	def __init__(self, maxerrs=3, reactor=None):
-		'''
-		Initialize the HabisRepeater protocol.
+		The optional cmddir specifies the directory in which command
+		scripts for HabisRemoteConductorGroup (those files ending in
+		'.yaml') will be searched for valid repeater commands.
 
 		The optional reactor argument is captured and passed to any
 		instance of the HabisRemoteConductorGroup class used to run
@@ -916,6 +854,9 @@ class HabisRepeater(LineReceiver):
 		an intervening successful command, the connection will be
 		dropped.
 		'''
+		# Canonicalize the conductor command directory
+		self.cmddir = _validateCommandDirectory(cmddir or self.cmddir)
+
 		# Serialize command processing
 		self.lock = Lock()
 
@@ -1009,22 +950,16 @@ class HabisRepeater(LineReceiver):
 		if not self.lastresult: return ''
 
 		from base64 import b64encode
-		from yaml import safe_dump
 
 		# Encode the lastresult list or raise an error
-		y = safe_dump(self.lastresult)
+		y = yaml.safe_dump(self.lastresult)
 		return b64encode(y)
 
 
 	def lineReceived(self, line):
 		'''
-		Respond to HabisRepeater commands from a client
+		Respond to HabisLineRepeater commands from a client.
 		'''
-		try: from yaml import YAMLError
-		except ImportError:
-			# Define a dummy YAMLError if the yaml module does not exist
-			class YAMLError(Exception): pass
-
 		# Split the line to pull out optional arguments
 		cmd = line.split(',', 1)
 
@@ -1036,10 +971,6 @@ class HabisRepeater(LineReceiver):
 
 		cmd = cmd[0].upper()
 
-		if cmd not in self._commands and cmd not in self._syscommands:
-			# Note an error if the command is not found
-			self.sendError('Command %s not recognized' % (cmd,))
-
 		# Reset the error count on successful command
 		self.errcount = 0
 
@@ -1049,16 +980,26 @@ class HabisRepeater(LineReceiver):
 		elif cmd == 'LASTRESULT':
 			try:
 				result = self.encodeLastResult()
-			except (YAMLError, ImportError) as e:
+			except (yaml.YAMLError, ImportError) as e:
 				self.sendError('Cannot encode last command result')
 				print 'ERROR: unable to encode command results', e
 			else:
 				# Write the length of the result string
 				nresult = len(result)
-				self.sendResponse('LASTRESULT,%d' % (nresult))
+				self.sendResponse('%s,%d' % (cmd, nresult))
 				if nresult:
 					# Dump encoded result in "raw mode"
 					self.transport.write(result)
+			return
+		elif os.path.sep in cmd:
+			self.sendError("Invalid character '%s' in command" % (os.path.sep,))
+			return
+
+		# Try to map the command to a script
+		fcmd = os.path.join(self.cmddir, cmd.lower() + '.yaml')
+		if not os.path.isfile(fcmd):
+			# Note an error if the command is not found
+			self.sendError('Command %s not recognized' % (cmd,))
 			return
 
 		# The lastresult list must be cleared for the to-be-run command
@@ -1070,10 +1011,8 @@ class HabisRepeater(LineReceiver):
 		try:
 			# Execute appropriate command script and capture results
 			cseq = HabisRemoteConductorGroup.executeCommandFile(
-					self._commands[cmd],
-					self.recordCommandSuccess,
-					self.recordCommandFailure,
-					args, self.reactor)
+					fcmd, self.recordCommandSuccess,
+					self.recordCommandFailure, args, self.reactor)
 
 			# Signal successful and failed completion to the client
 			cseq.addCallbacks(lambda _: self.sendResponse('SUCCESS,' + cmd),
@@ -1090,3 +1029,91 @@ class HabisRepeater(LineReceiver):
 			self.lastresult.append((None, { '__ERROR__': errmsg }))
 			# Signal failure to the caller
 			self.sendResponse('FAILURE,' + cmd)
+
+
+class HabisPerspectiveRepeater(pb.Root):
+	'''
+	Provide a facility for invoking HabisRemoteConductorGroup command
+	scripts on behalf of a client, and returning the results to that
+	client.
+	'''
+	# Look in this directory for conductor scripts
+	cmddir = '/opt/habis/share/perspectiverepeater'
+
+	def __init__(self, cmddir=None):
+		'''
+		Initialize the perspective repeater. If cmddir is set, it will
+		override the default location in which command scripts for the
+		HabisRemoteConductorGroup will be searched.
+		'''
+		self.cmddir = _validateCommandDirectory(cmddir or self.cmddir)
+
+
+	@staticmethod
+	def _resultAccumulators():
+		'''
+		Prepare and return functions (cb, eb) as, respectively, a
+		callback and errback suitable for use in the method
+		HabisRemoteConductorGroup.runcommands.
+
+		The functions share access to an initially empty list that will
+		accumulate the successful and failed results of individual
+		command invocations as tuples
+
+			(cmd.cmd, result) for successful results, or
+			(cmd.cmd, { '__ERROR__': str(error) }) for failures
+
+		where cmd is a HabisRemoteCommand and result or error is the
+		value passed to the callback or errback, respecitvely.
+
+		The functions each return the list, so the Deferred returned by
+		HabisRemoteConductorGroup.runcommands will fire with the fully
+		populated result list if no fatal errors are encountered. The
+		errback will reraise its error if cmd.fatalError is True.
+		'''
+		# Prepare result storage
+		results = []
+
+		# Accumulate the result in the callback
+		def cb(result, cmd):
+			results.append((cmd.cmd, result))
+			return results
+
+		# Accumulate the error in the callback; terminate if fatal
+		def eb(error, cmd):
+			results.append((cmd.cmd, { '__ERROR__': str(error) }))
+			if cmd.fatalError: raise error
+			return results
+
+		return cb, eb
+
+
+	def remote_execute(self, cmd, **kwargs):
+		'''
+		Validate the existence of the specified command script (the
+		'.yaml' extension will be appended) and, if the script is
+		found, invoke a HabisRemoteConductorGroup instance to run the
+		script. The keyword arguments are passed as a Mako rendering
+		context to HabisRemoteConductorGroup.executeCommandFile.
+
+		The return value is a Deferred that will fire when the group
+		has finished executing the script.
+
+		A callback and errback are created to accumulate the results of
+		individual commands. The callback (and errback, when errors are
+		not fatal) return the accumulated list, so the Deferred
+		returned by this method will fire with the results as long as
+		execution is not terminated early.
+		'''
+		# Only allow basenames
+		if os.path.sep in cmd:
+			raise HabisConductorError("Invalid character '%s' in command name" % (os.path.sep,))
+
+		# Make sure the script exists
+		fcmd = os.path.join(self.cmddir, cmd + '.yaml')
+		if not os.path.isfile(fcmd):
+			raise HabisConductorError("Command script '%s' does not exist" % (cmd,))
+
+		# Build the accumulators
+		cb, eb = self._resultAccumulators()
+		return HabisRemoteConductorGroup.executeCommandFile(fcmd, cb, eb, kwargs)
