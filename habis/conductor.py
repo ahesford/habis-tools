@@ -906,7 +906,7 @@ class HabisLineRepeater(LineReceiver):
 			self.hangup('Error count too great')
 
 
-	def recordCommandSuccess(self, result, cmd):
+	def _recordCommandSuccess(self, result, cmd):
 		'''
 		Append to self.lastresult the tuple (cmd, result), where result
 		is produced by the method HabisRemoteConductorGroup.broadcast
@@ -920,24 +920,24 @@ class HabisLineRepeater(LineReceiver):
 		self.lastresult.append((cmd.cmd, result))
 
 
-	def recordCommandFailure(self, error, cmd):
+	def _recordCommandFailure(self, error, cmd):
 		'''
-		Append to self.lastresult a tuple
+		If cmd.fatalError is True, just reraise the error.
+
+		Otherwise, append to self.lastresult a tuple
 
 			(cmd, { '__ERROR__': str(error) }),
 
 		where cmd is a HabisRemoteCommand and the error is an exception
 		describing a failed HabisRemoteConductorGroup.broadcast call.
-
-		If cmd.fatalError is True, the error will be raised after the
-		append.
 		'''
-		self.lastresult.append((cmd.cmd, { '__ERROR__': str(error) }))
 		# Signal the recorded error to the caller
 		if cmd.fatalError: raise error
 
+		self.lastresult.append((cmd.cmd, { '__ERROR__': str(error) }))
 
-	def encodeLastResult(self):
+
+	def _encodeLastResult(self):
 		'''
 		If self.lastresult is not empty, encode and return, in base64,
 		a YAML representation of the list self.lastresult.
@@ -979,7 +979,7 @@ class HabisLineRepeater(LineReceiver):
 			return
 		elif cmd == 'LASTRESULT':
 			try:
-				result = self.encodeLastResult()
+				result = self._encodeLastResult()
 			except (yaml.YAMLError, ImportError) as e:
 				self.sendError('Cannot encode last command result')
 				print 'ERROR: unable to encode command results', e
@@ -995,6 +995,20 @@ class HabisLineRepeater(LineReceiver):
 			self.sendError("Invalid character '%s' in command" % (os.path.sep,))
 			return
 
+		# Process the line as a remote command
+		self._runRemoteCommand(cmd, args)
+
+
+	@defer.inlineCallbacks
+	def _runRemoteCommand(self, cmd, args):
+		'''
+		Attempt to run the given command (in self.cmddir, after
+		appending '.yaml' to the command name), with the given
+		arguments, through a HabisRemoteConductorGroup instance. If the
+		run is possible, it will be guarded by self.lock and the
+		results will be accumulated as self.lastresult. A SUCCESS or
+		FAILURE response will be sent after execution.
+		'''
 		# Try to map the command to a script
 		fcmd = os.path.join(self.cmddir, cmd.lower() + '.yaml')
 		if not os.path.isfile(fcmd):
@@ -1010,25 +1024,22 @@ class HabisLineRepeater(LineReceiver):
 
 		try:
 			# Execute appropriate command script and capture results
-			cseq = HabisRemoteConductorGroup.executeCommandFile(
-					fcmd, self.recordCommandSuccess,
-					self.recordCommandFailure, args, self.reactor)
-
-			# Signal successful and failed completion to the client
-			cseq.addCallbacks(lambda _: self.sendResponse('SUCCESS,' + cmd),
-					lambda _: self.sendResponse('FAILURE,' + cmd))
-			# Release the command lock to allow subsequent requests
-			cseq.addBoth(lambda _: self.lock.release())
+			yield HabisRemoteConductorGroup.executeCommandFile(
+					fcmd,
+					self._recordCommandSuccess,
+					self._recordCommandFailure,
+					args,
+					self.reactor)
 		except Exception as e:
-			# Release the lock if the command execution failed
-			# (On successful invocation, callbacks and errbacks do this)
-			self.lock.release()
-			# Store failed execution attempts in lastresult
-			errmsg = 'Unable to process conductor script: ' + str(e)
-			# There is no command associated with this failure
-			self.lastresult.append((None, { '__ERROR__': errmsg }))
-			# Signal failure to the caller
+			# Encode the specific failure in the lastresult buffer
+			errmsg = 'FATAL ERROR: Unable to process script: ' + str(e)
+			self.lastresult.append((None, { ' __ERROR__': errmsg }))
 			self.sendResponse('FAILURE,' + cmd)
+		else:
+			self.sendResponse('SUCCESS,' + cmd)
+		finally:
+			# Make sure the lock is released
+			self.lock.release()
 
 
 class HabisPerspectiveRepeater(pb.Root):
@@ -1049,27 +1060,34 @@ class HabisPerspectiveRepeater(pb.Root):
 		self.cmddir = _validateCommandDirectory(cmddir or self.cmddir)
 
 
-	@staticmethod
-	def _resultAccumulators():
+	@defer.inlineCallbacks
+	def _execute(self, fcmd, **kwargs):
 		'''
-		Prepare and return functions (cb, eb) as, respectively, a
-		callback and errback suitable for use in the method
-		HabisRemoteConductorGroup.runcommands.
+		Use HabisRemoteConductorGroup.executeCommandFile to invoke the
+		command script at the path fcmd. The keyword arguments are
+		passed as Mako rendering context when parsing the script.
 
-		The functions share access to an initially empty list that will
-		accumulate the successful and failed results of individual
-		command invocations as tuples
+		The results of the remote execution will be accumulated in a
+		list with elements of the form
 
-			(cmd.cmd, result) for successful results, or
-			(cmd.cmd, { '__ERROR__': str(error) }) for failures
+			(cmd.cmd, result),
 
-		where cmd is a HabisRemoteCommand and result or error is the
-		value passed to the callback or errback, respecitvely.
+		where cmd is a HabisRemoteCommand and result is either a
+		successful result (a mapping between hostnames and dictionaries
+		in the style of CommandWrapper.encodeResult) or, if the command
+		was not successful, a one-element mapping
 
-		The functions each return the list, so the Deferred returned by
-		HabisRemoteConductorGroup.runcommands will fire with the fully
-		populated result list if no fatal errors are encountered. The
-		errback will reraise its error if cmd.fatalError is True.
+			result = { '__ERROR__': str(error) }
+
+		If a fatal error is raised (either prior to command execution,
+		or if cmd.fatalError is True for a failed command), an
+		Exception will be raised to describe the failure.
+
+		The return value of this method is a Deferred. On successful
+		completion, the Deferred will fire its callback chain with the
+		accumulated results list. If an Exception is thrown to indicate
+		a fatal error, the errback chain will be fired with a Failure
+		describing the failure.
 		'''
 		# Prepare result storage
 		results = []
@@ -1077,15 +1095,21 @@ class HabisPerspectiveRepeater(pb.Root):
 		# Accumulate the result in the callback
 		def cb(result, cmd):
 			results.append((cmd.cmd, result))
-			return results
 
 		# Accumulate the error in the callback; terminate if fatal
 		def eb(error, cmd):
-			results.append((cmd.cmd, { '__ERROR__': str(error) }))
 			if cmd.fatalError: raise error
-			return results
+			results.append((cmd.cmd, { '__ERROR__': str(error) }))
 
-		return cb, eb
+		try:
+			# Attempt to run the script
+			yield HabisRemoteConductorGroup.executeCommandFile(fcmd, cb, eb, kwargs)
+		except Exception as e:
+			# Exceptions raised here are all fatal
+			raise HabisConductorError('FATAL: ' + str(e))
+
+		# After a successful run, return the result list
+		defer.returnValue(results)
 
 
 	def remote_execute(self, cmd, **kwargs):
@@ -1107,13 +1131,12 @@ class HabisPerspectiveRepeater(pb.Root):
 		'''
 		# Only allow basenames
 		if os.path.sep in cmd:
-			raise HabisConductorError("Invalid character '%s' in command name" % (os.path.sep,))
+			raise HabisConductorError("FATAL: Invalid character '%s' in command name" % (os.path.sep,))
 
 		# Make sure the script exists
 		fcmd = os.path.join(self.cmddir, cmd + '.yaml')
 		if not os.path.isfile(fcmd):
-			raise HabisConductorError("Command script '%s' does not exist" % (cmd,))
+			raise HabisConductorError("FATAL: script '%s' does not exist" % (cmd,))
 
-		# Build the accumulators
-		cb, eb = self._resultAccumulators()
-		return HabisRemoteConductorGroup.executeCommandFile(fcmd, cb, eb, kwargs)
+		# Perform the execution
+		return self._execute(fcmd, **kwargs)
