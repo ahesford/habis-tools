@@ -26,6 +26,9 @@ class CommandWrapper(object):
 	'''
 	A generic wrapper class to execute a command with arguments.
 	'''
+	# Attempt to compress results with lengths longer than 4k chars
+	compressLimit = 4 * 1024
+
 	def __init__(self, command, *args, **kwargs):
 		'''
 		Create a wrapper to call command with the given positional
@@ -69,17 +72,88 @@ class CommandWrapper(object):
 		self._args = tuple(str(s) for s in a)
 
 
-	@staticmethod
-	def encodeResult(retcode, stdout=None, stderr=None):
+	@classmethod
+	def _compress(cls, message):
+		'''
+		If message has a length greater than cls.compressLimit, attempt
+		to compress the message. If compression can be performed, and
+		the compressed string is shorter than the input string, return
+		(compressedMessage, True), where compressedMessage is the
+		compressed version of the input message. Otherwise, return
+		(message, False).
+		'''
+		try:
+			if len(message) <= cls.compressLimit:
+				raise ValueError('Message too short to compress')
+			compressedMessage = message.encode('zlib')
+			if len(compressedMessage) >= len(message):
+				raise ValueError('Compression does not shorten message')
+			return (compressedMessage, True)
+		except Exception:
+			# Return the original message if anything went wrong
+			return (message, False)
+
+
+	@classmethod
+	def encodeResult(cls, retcode, stdout=None, stderr=None):
 		'''
 		Encode the given return code and optional stdout and stderr
 		strings into a dictionary response with corresponding keys
 		"returncode", "stdout", "stdin".
+
+		An additional key, 'compression', holds a set that will contain
+		'stdout' if stdout was compressed with stdout.encode('zlib'),
+		and 'stderr' if stderr was similarly compressed.
 		'''
-		result = { 'returncode': retcode }
-		if stdout is not None: result['stdout'] = stdout
-		if stderr is not None: result['stderr'] = stderr
+		result = { 'returncode': retcode, 'compression': set() }
+
+		for k, v in zip(('stdout', 'stderr'), (stdout, stderr)):
+			if not v: continue
+			v, compressed = cls._compress(v)
+			result[k] = v
+			if compressed: result['compression'].add(k)
+
 		return result
+
+
+	@staticmethod
+	def decodeResult(result):
+		'''
+		If the input result looks like the output dictionary from
+		CommandWrapper.encodeResult, undo any compression done by
+		encodeResult.
+
+		If the result contains a 'compression' key, all keys in the
+		input result (except for the 'compression' key) will be copied
+		into an output dictionary, but the values assigned to keys that
+		are in result['compression'] will be decoded (if possible)
+		using value.decode('zlib'). Undecodable values are copied
+		as-is. The output will not contain a 'compression' key.
+
+		In the case of any error (besides the copy of an undecodable
+		value), the result will be returned without modification.
+		'''
+		try:
+			compression = result['compression']
+
+			output = { }
+
+			for k in result:
+				# Skip a 'compression' key
+				if k == 'compression': continue
+
+				v = result[k]
+
+				if k in compression:
+					# Decompress the key, if possible
+					try: output[k] = v.decode('zlib')
+					except Exception: output[k] = v
+				else: output[k] = v
+
+			return output
+		except Exception:
+			# Default to returning the untouched result
+			return result
 
 
 	@classmethod

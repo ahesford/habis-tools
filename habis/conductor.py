@@ -17,8 +17,10 @@ from twisted.protocols.basic import LineReceiver
 
 from threading import Lock
 
-# Override Banana encoding size limit (allow at least 50-MB sequences)
-banana.SIZE_LIMIT = max(banana.SIZE_LIMIT, 50 * 1024**2)
+from .wrappers import CommandWrapper, BlockCommandWrapper
+
+# Override Banana encoding size limit (allow at least 10-MB sequences)
+banana.SIZE_LIMIT = max(banana.SIZE_LIMIT, 10 * 1024**2)
 # The class variable sizeLimit seems unused, but may be important some day
 banana.Banana.sizeLimit = max(banana.Banana.sizeLimit, banana.SIZE_LIMIT)
 
@@ -587,6 +589,8 @@ class HabisRemoteConductorGroup(object):
 			# Try to get the args and kwargs for this server
 			args, kwargs = hacmd.argsForKey(addr)
 			d = cond.callRemote('execute', hacmd.cmd, *args, **kwargs)
+			# Decompress any compressed output
+			d.addCallback(CommandWrapper.decodeResult)
 			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
 			calls.append(d)
 
@@ -805,9 +809,9 @@ class HabisConductor(pb.Root):
 			raise HabisConductorError("Unable to execute '%s'" % (cmd,))
 
 		if cmd.startswith('block_'):
-			from .wrappers import BlockCommandWrapper as Wrapper
+			Wrapper = BlockCommandWrapper
 		else:
-			from .wrappers import CommandWrapper as Wrapper
+			Wrapper = CommandWrapper
 
 		# Wrap and execute the command
 		wrap = Wrapper(fcmd, *args, **kwargs)
@@ -819,7 +823,6 @@ class HabisConductor(pb.Root):
 		Return, in YAML block style, a list of commands available as
 		first arguments to remote_execute.
 		'''
-		from .wrappers import CommandWrapper
 		from glob import glob
 
 		# Identify all commands in the command directory
