@@ -11,11 +11,16 @@ import yaml
 
 import zope.interface
 
-from twisted.spread import pb
+from twisted.spread import pb, banana
 from twisted.internet import threads, defer
 from twisted.protocols.basic import LineReceiver
 
 from threading import Lock
+
+# Override Banana encoding size limit (allow at least 50-MB sequences)
+banana.SIZE_LIMIT = max(banana.SIZE_LIMIT, 50 * 1024**2)
+# The class variable sizeLimit seems unused, but may be important some day
+banana.Banana.sizeLimit = max(banana.Banana.sizeLimit, banana.SIZE_LIMIT)
 
 def _validateCommandDirectory(directory):
 	'''
