@@ -538,20 +538,25 @@ class HabisRemoteConductorGroup(object):
 
 
 	@staticmethod
-	def _keybyhost(results, hosts, block=False):
+	def _decodebyhost(results, hosts, block=False):
 		'''
 		Create a map from the sequence hosts to results, a sequence of
 		HabisConductor remote call responses (one per host).
 
+		The results are also decoding using CommandWrapper.decodeResult
+		to undo any compression that may have occurred.
+
 		If block is False, results should be a sequence of outputs from
 		CommandWrapper.execute(); the resulting map will be
 
-			{ k: v for k, v in zip(hosts, results) }.
+			{ k: CommandWrapper.decodeResult(v)
+				for k, v in zip(hosts, results) }.
 
 		If block is True, results should be a sequence of outputs from
 		BlockCommandWrapper.execute(); the resulting map will be
 
-		{ (h, k): v for h, r in zip(hosts, results)
+		{ (h, k): CommandWrapper.decodeResult(v)
+			for h, r in zip(hosts, results)
 				for k, v in results.iteritems() }.
 
 		If duplicate keys are found, a KeyError will be raised.
@@ -561,14 +566,14 @@ class HabisRemoteConductorGroup(object):
 			for k, v in zip(hosts, results):
 				if k in keyed:
 					raise KeyError('Duplicate key %s' % (k,))
-				keyed[k] = v
+				keyed[k] = CommandWrapper.decodeResult(v)
 		else:
 			for h, r in zip(hosts, results):
 				for k, v in r.iteritems():
 					nk = (h, k)
 					if nk in keyed:
 						raise KeyError('Duplicate key %s' % (k,))
-					keyed[nk] = v
+					keyed[nk] = CommandWrapper.decodeResult(v)
 
 		return keyed
 
@@ -589,15 +594,13 @@ class HabisRemoteConductorGroup(object):
 			# Try to get the args and kwargs for this server
 			args, kwargs = hacmd.argsForKey(addr)
 			d = cond.callRemote('execute', hacmd.cmd, *args, **kwargs)
-			# Decompress any compressed output
-			d.addCallback(CommandWrapper.decodeResult)
 			d.addErrback(self.throwError, 'Remote call at %s:%d failed' % (addr, port))
 			calls.append(d)
 
 		dcall = defer.gatherResults(calls, consumeErrors=True)
 		# Collapse the list of results into a single mapping
 		hosts = [h[0] for h in self.conductors]
-		dcall.addCallback(self._keybyhost, hosts=hosts, block=hacmd.isBlock)
+		dcall.addCallback(self._decodebyhost, hosts=hosts, block=hacmd.isBlock)
 		dcall.addErrback(self._underlyingError)
 		return dcall
 
