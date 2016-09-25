@@ -12,11 +12,9 @@ import multiprocessing
 from habis.habiconf import matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat
 from habis.sigtools import Window
-from pycwp import process, mio
+from pycwp import process, mio, cutil
 
 def specwin(nsamp, freqs=None):
-	from habis.sigtools import Window
-
 	# Ensure default None is encapsulated
 	if freqs is None: freqs = (None,)
 
@@ -31,7 +29,7 @@ def specwin(nsamp, freqs=None):
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s [-p p] [-h] [-f s:e:w] [-t] [-n n] [-z] [-b] [-s s] [-o outpath] -g g <measurements>' % binfile
+	print >> sys.stderr, 'USAGE: %s [-p p] [-h] [-m tgcmap] [-l n] [-w s:l] [-f s:e:w] [-t] [-n n] [-z] [-b] [-s s] [-o outpath] -g g <measurements>' % binfile
 	print >> sys.stderr, '''
   Preprocess HABIS measurement data by Hadamard decoding transmissions and
   Fourier transforming the time-domain data. Measurement data is contained in
@@ -47,9 +45,12 @@ def usage(progname=None, fatal=False):
   OPTIONAL ARGUMENTS:
   -p: Use p processors (default: all available processors)
   -h: Suppress Hadamard decoding
-  -f: Retain only DFT bins s:e, with a tail filter of width w (default: all) 
+  -m: Use the given 2-column TGC map to convert nominal gain to realized gain
+  -l: Apply each TGC value to n samples in the acquisition window (default: 16)
+  -f: Retain only DFT bins s:e, with a tail filter of width w (default: all)
   -t: Output time-domain, rather than frequency-domain, waveforms
-  -n: Override acquisition window to n samples in WaveformSet files
+  -n: Override acquisition window length to n samples in WaveformSet files
+  -w: Set start (s, assuming 0 f2c) and length (l) of universal acquisition window
   -z: Subtract a DC bias from the waveforms before processing
   -b: Write output as a simple 3-D matrix rather than a WaveformSet file
   -s: Correct the decoded signs with the given sign map (default: skip)
@@ -121,9 +122,14 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	transmission
 
 		j = grpmap[i][0] + grpmap[i][1] * wset.txgrps.size
-	    
+
 	for wset = WaveformSet.fromfile(infile).
-	
+
+	Any TGC parameters in the input, accessible as a byte array at
+	wset.extrabytes['tgc'] and converted to an array of 32-bit floats using
+	numpyp.frombuffer, will be used to adjust the amplitudes of the
+	waveforms prior to applying Hadamard and Fourier transforms.
+
 	The kwargs contain optional values or default overrides:
 
 	* freqs (default: None): When not None, a sequence (start, end) to be
@@ -131,6 +137,42 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	* nsamp (default: None): When not None, the nsamp property of the input
 	  WaveformSet is forced to this value prior to processing.
+
+	* window (default: None): When not None, a sequence (start, length)
+	  that specifies the start (relative to a 0 f2c) and length of a global
+	  data window that will be extracted from all waveform records. The
+	  start must no less than the f2c of each input file because the
+	  file-local start of the window (start - wset.f2c) must be nonnegative.
+
+	  This option and nsamp are mutually exclusive.
+
+	* tgcsamps (default: 16): The number of temporal samples to which
+	  a single TGC parameter applies. If
+
+	  	tgc = np.frombuffer(wset.extrabytes['tgc'], dtype=np.float32)
+
+	  and ntgc = len(tgc), then the multiplier used to scale a full-length
+	  signal (starting at file sample 0, or universal sample wset.f2c) is
+
+	  	mpy = ((10.**(-tgc[:,np.newaxis] / 20.)) *
+			np.ones((ntgc, tgcsamps), dtype=np.float32)).ravel('C').
+
+	  Set tgcsamps to 0 (or None) to disable compensation. If the
+	  WaveformSet includes TGC parameters and tgcsamps is a positive
+	  integer, then len(mpy) must be at least long enough to encompass all
+	  data windows encoded in the file.
+
+	* tgcmap (default: None): If provided, should be a two-column, rank-2
+	  Numpy array (or compatible sequence) that relates nominal gains in
+	  column 0 to actual gains in column 1. The rows of the array will be
+	  used as control points in a piecewise linear interpolation (using
+	  numpy.interp) that will map TGC parameters specified in the
+	  WaveformSet file to actual gains. In other words, the TGC values
+	  described above will be replaced with
+
+		tgc = np.interp(tgc, tgcmap[:,0], tgcmap[:,1])
+
+	  whenever tgcmap is provided.
 
 	* dofht (default: True): Set to False to disable Hadamard decoding.
 
@@ -162,6 +204,11 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	'''
 	# Override acquisition window, if desired
 	nsamp = kwargs.pop('nsamp', None)
+	window = kwargs.pop('window', None)
+
+	# Enforce exclusivity
+	if window and nsamp is not None:
+		raise TypeError('Arguments "window" and "nsamp" are mutually exclusive')
 
 	# Grab synchronization mechanisms
 	try: lock = kwargs.pop('lock')
@@ -188,14 +235,34 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	# Determine whether the waveforms should be debiased
 	debias = kwargs.pop('debias', False)
 
+	# Grab the number of samples per TGC value
+	tgcsamps = kwargs.pop('tgcsamps', 16)
+	if not tgcsamps: tgcsamps = 0
+
+	tgcmap = kwargs.pop('tgcmap', None)
+
 	if len(kwargs):
 		raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
 
 	# Open the input and create a corresponding output
 	wset = WaveformSet.fromfile(infile)
 
-	if nsamp is not None: wset.nsamp = nsamp
-	else: nsamp = wset.nsamp
+	if not window:
+		if nsamp is not None:
+			# Force the sample count according to preference
+			wset.nsamp = nsamp
+		else:
+			# Record the sample count according to preference
+			nsamp = wset.nsamp
+
+		# Copy the f2c from the input
+		f2c = wset.f2c
+	else:
+		# Validate and unpack the window
+		try:
+			f2c, nsamp = window
+		except (TypeError, ValueError):
+			raise ValueError('Argument "window" must have form (start, length)')
 
 	ntx = wset.ntx
 
@@ -210,10 +277,30 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	# Map global indices to transmission number
 	outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.iteritems()))
 
+	# Handle TGC compensation if necessary
+	try: tgc = np.frombuffer(wset.extrabytes['tgc'], dtype=np.float32)
+	except (KeyError, AttributeError): tgc = np.array([], dtype=np.float32)
+
+	if tgcmap is not None:
+		# Make sure that the TGC map is sorted and interpolate
+		tgx, tgy = zip(*sorted((k, v) for k, v in tgcmap))
+		# TGC curves are always float32, regardless of tgcmap types
+		tgc = np.interp(tgc, tgx, tgy).astype(np.float32)
+
+	# Linearize, invert, and expand the TGC curves
+	tgc = ((10.**(-tgc[:,np.newaxis] / 20.) *
+		np.ones((len(tgc), tgcsamps), dtype=np.float32))).ravel('C')
+
+	if len(tgc):
+		# Figure out the data type of compensated waveforms
+		itype = np.dtype(wset.dtype.type(0) * tgc.dtype.type(0))
+	else:
+		itype = wset.dtype
+
 	# Create a WaveformSet object to hold the ungrouped data
-	ftype = _r2c_datatype(wset.dtype)
-	otype = ftype if not tdout else wset.dtype
-	oset = WaveformSet(len(outidx), 0, nsamp, wset.f2c, otype)
+	ftype = _r2c_datatype(itype)
+	otype = ftype if not tdout else itype
+	oset = WaveformSet(len(outidx), 0, nsamp, f2c, otype)
 	# Check the output keys for sanity and set the transmit parameters in oset
 	oset.txidx = outidx.keys()
 
@@ -226,7 +313,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 		if signs is not None:
 			# Ensure signs has values 0 or 1 in the right type
-			signs = np.asarray([1 - 2 * s for s in signs], dtype=wset.dtype)
+			signs = np.asarray([1 - 2 * s for s in signs], dtype=itype)
 			if signs.ndim != 1 or len(signs) != gsize:
 				raise ValueError('Sign array must have shape (wset.txgrps[1],)')
 
@@ -247,7 +334,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	# Create intermediate (FHT) and output (FHFFT) arrays
 	# FFT axis is contiguous for FFT performance
 	b = pyfftw.n_byte_align_empty((ntx, nsamp),
-			pyfftw.simd_alignment, wset.dtype, order='C')
+			pyfftw.simd_alignment, itype, order='C')
 
 	if dofft:
 		# Create FFT output and a plan
@@ -280,18 +367,45 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			event.set()
 
 	for rxc in wset.rxidx[start::stride]:
-		# Grab the waveform record
-		hdr, data = wset.getrecord(rxc)
+		# Find the input window relative to 0 f2c
+		iwin = wset.getheader(rxc).win.shift(wset.f2c)
+		owin = (oset.f2c, oset.nsamp)
+
+		try:
+			# Find overlap of global input and output windows
+			ostart, istart, dlength = cutil.overlap(owin, iwin)
+		except TypeError:
+			# Default to 0-length windows at start of acquisition
+			iwin = Window(0, 0, nonneg=True)
+			owin = Window(0, 0, nonneg=True)
+		else:
+			# Convert input and output windows from global f2c to file f2c
+			iwin = Window(istart, dlength, nonneg=True)
+			owin = Window(ostart, dlength, nonneg=True)
+
+		# Read the data on input and convert the header window to output
+		hdr, data = wset.getrecord(rxc, window=iwin)
+		hdr = hdr.copy(win=owin)
+
+		if len(tgc) and iwin.length:
+			# Time-gain compensation
+			owin = (0, len(tgc))
+			try:
+				ostart, istart, dlength = cutil.overlap(owin, iwin)
+				if dlength != iwin.length: raise ValueError
+			except (TypeError, ValueError):
+				raise ValueError('TGC curve does not encompass data window for channel %d' % (rxc,))
+			data = data * tgc[np.newaxis,ostart:ostart+dlength]
 
 		# Remove a signal bias, if appropriate
-		if debias:
+		if debias and iwin.length:
 			data -= np.mean(data, axis=1)[:,np.newaxis]
 
 		# Clear the data array
 		b[:,:] = 0.
 		ws, we = hdr.win.start, hdr.win.end
 
-		if dofht:
+		if dofht and iwin.length:
 			# Ensure that the FHT axis is contiguous for performance
 			data = np.asarray(data, order='F')
 
@@ -350,7 +464,7 @@ if __name__ == '__main__':
 	grpmap, outpath = None, None
 	nprocs = process.preferred_process_count()
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'htp:f:n:o:bg:s:z')
+	optlist, args = getopt.getopt(sys.argv[1:], 'htp:f:n:o:bg:s:w:m:l:z')
 
 	# Don't populate default options
 	kwargs = {}
@@ -363,7 +477,7 @@ if __name__ == '__main__':
 		elif opt[0] == '-p':
 			nprocs = int(opt[1])
 		elif opt[0] == '-f':
-			kwargs['freqs'] = tuple((int(s, base=10) if len(s) else None) for s in opt[1].split(':'))
+			kwargs['freqs'] = tuple((int(s) if len(s) else None) for s in opt[1].split(':'))
 		elif opt[0] == '-n':
 			kwargs['nsamp'] = int(opt[1])
 		elif opt[0] == '-o':
@@ -374,6 +488,12 @@ if __name__ == '__main__':
 			grpmap = loadkeymat(opt[1], dtype=np.uint32)
 		elif opt[0] == '-s':
 			kwargs['signs'] = np.loadtxt(opt[1], dtype=bool)
+		elif opt[0] == '-w':
+			kwargs['window'] = tuple(int(s) for s in opt[1].split(':'))
+		elif opt[0] == '-l':
+			kwargs['tgcsamps'] = int(opt[1])
+		elif opt[0] == '-m':
+			kwargs['tgcmap'] = np.loadtxt(opt[1], dtype=np.float32)
 		elif opt[0] == '-z':
 			kwargs['debias'] = True
 		else:
