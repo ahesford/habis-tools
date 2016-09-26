@@ -35,8 +35,8 @@ def concatenate(infiles, outfile, corrtx=False, defzero=False):
 
 	No options are passed to WaveformSet.store when storing the output, so
 	the merge will choose a default output format version and may be
-	destructive. At a minimum, the extrabytes property of each input will
-	not appear in the output.
+	destructive. At a minimum, the context property of each input will not
+	appear in the output.
 	'''
 	# Open the input WaveformSets (sort in case corrtx is desired)
 	wsets = [WaveformSet.fromfile(infile) for infile in sorted(infiles)]

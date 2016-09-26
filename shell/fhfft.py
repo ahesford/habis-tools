@@ -125,10 +125,9 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	for wset = WaveformSet.fromfile(infile).
 
-	Any TGC parameters in the input, accessible as a byte array at
-	wset.extrabytes['tgc'] and converted to an array of 32-bit floats using
-	numpyp.frombuffer, will be used to adjust the amplitudes of the
-	waveforms prior to applying Hadamard and Fourier transforms.
+	Any TGC parameters in the input, accessible as wset.context['tgc'],
+	will be used to adjust the amplitudes of the waveforms prior to
+	applying Hadamard and Fourier transforms.
 
 	The kwargs contain optional values or default overrides:
 
@@ -146,16 +145,16 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	  This option and nsamp are mutually exclusive.
 
-	* tgcsamps (default: 16): The number of temporal samples to which
-	  a single TGC parameter applies. If
+	* tgcsamps (default: 16 [for integer datatypes] or 0 [else]): The
+	  number of temporal samples to which a single TGC parameter applies.
+	  Signals will be scaled by an appropriate section of the multiplier
 
-	  	tgc = np.frombuffer(wset.extrabytes['tgc'], dtype=np.float32)
+	    mpy = (invtgc[:,np.newaxis] *
+		    np.ones((ntgc, tgcsamps), dtype=np.float32)).ravel('C'),
 
-	  and ntgc = len(tgc), then the multiplier used to scale a full-length
-	  signal (starting at file sample 0, or universal sample wset.f2c) is
-
-	  	mpy = ((10.**(-tgc[:,np.newaxis] / 20.)) *
-			np.ones((ntgc, tgcsamps), dtype=np.float32)).ravel('C').
+	  where the values invtgc = 10.**(-wset.context['tgc'] / 20.) and
+	  ntgc = len(wset.context['tgc']). The multiplier mpy is defined over a
+	  window that starts at file sample 0 (global time wset.f2c).
 
 	  Set tgcsamps to 0 (or None) to disable compensation. If the
 	  WaveformSet includes TGC parameters and tgcsamps is a positive
@@ -236,8 +235,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	debias = kwargs.pop('debias', False)
 
 	# Grab the number of samples per TGC value
-	tgcsamps = kwargs.pop('tgcsamps', 16)
-	if not tgcsamps: tgcsamps = 0
+	tgcsamps = kwargs.pop('tgcsamps', None)
 
 	tgcmap = kwargs.pop('tgcmap', None)
 
@@ -278,7 +276,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.iteritems()))
 
 	# Handle TGC compensation if necessary
-	try: tgc = np.frombuffer(wset.extrabytes['tgc'], dtype=np.float32)
+	try: tgc = np.asarray(wset.context['tgc'], dtype=np.float32)
 	except (KeyError, AttributeError): tgc = np.array([], dtype=np.float32)
 
 	if tgcmap is not None:
@@ -286,6 +284,10 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		tgx, tgy = zip(*sorted((k, v) for k, v in tgcmap))
 		# TGC curves are always float32, regardless of tgcmap types
 		tgc = np.interp(tgc, tgx, tgy).astype(np.float32)
+
+	# Pick a suitable default value for tgcsamps
+	if tgcsamps is None:
+		tgcsamps = 16 if np.issubdtype(wset.dtype, np.integer) else 0
 
 	# Linearize, invert, and expand the TGC curves
 	tgc = ((10.**(-tgc[:,np.newaxis] / 20.) *

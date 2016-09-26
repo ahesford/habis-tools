@@ -24,7 +24,7 @@ if __name__ == '__main__':
 		oname = os.path.splitext(f)[0] + '.tgc.txt'
 
 		try:
-			tgc = np.fromstring(wset.extrabytes['tgc'], dtype=np.float32)
+			tgc = wset.context['tgc']
 		except (KeyError, AttributeError):
 			print 'File', f, 'specifies no TGC bytes'
 		except Exception as e:

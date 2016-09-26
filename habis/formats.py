@@ -811,13 +811,18 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def empty_like(cls, wset):
+	def empty_like(cls, wset, with_context=True):
 		'''
 		Create a new instance of WaveformSet configured exactly as
 		wset, except without any waveform records.
+
+		If with_context is True, the dictionary wset.context will be
+		copied (shallowly) into the created WaveformSet. Otherwise, the
+		context of the created WaveformSet will be empty
 		'''
 		nwset = cls(wset.ntx, wset.txstart, wset.nsamp, wset.f2c, wset.dtype, wset.txgrps)
-		nwset.extrabytes = dict(wset.extrabytes.iteritems())
+		if with_context: nwset.context = dict(wset.context.iteritems())
+		else: nwset.context = { }
 		return nwset
 
 
@@ -864,9 +869,10 @@ class WaveformSet(object):
 		# Initialize the group configuration as specified
 		self.txgrps = txgrps
 
-		# Extra bytes can be read from a file header and are passed on
-		# when writing compatible versions, but are not interpreted
-		self.extrabytes = { }
+		# Extra scan context can be read from a file header and is
+		# passed on when writing compatible versions, but is never
+		# inherently interpreted
+		self.context = { }
 
 
 	def _verify_file_version(self, version, write=False):
@@ -886,18 +892,18 @@ class WaveformSet(object):
 
 		if not write:
 			# Support all currently defined formats for reading
-			if not (0 <= minor < 5):
+			if not (0 <= minor < 6):
 				raise ValueError('Unsupported minor version for reading')
 			return (major, minor)
 
-		# Only version-4 writes are supported
-		if minor != 4:
+		# Only version-5 writes are supported
+		if minor != 5:
 			raise ValueError('Unsupported minor version for writing')
 
 		return major, minor
 
 
-	def store(self, f, append=False, ver=(1,4)):
+	def store(self, f, append=False, ver=(1,5)):
 		'''
 		Write the WaveformSet object to the data file in f (either a
 		name or a file-like object that allows writing).
@@ -917,7 +923,7 @@ class WaveformSet(object):
 		if isinstance(f, basestring):
 			f = open(f, mode=('wb' if not append else 'ab'))
 
-		# Only version (1,4) is supported for output
+		# Only version (1,5) is supported for output
 		major, minor = self._verify_file_version(ver, write=True)
 
 		# A missing transmit-group configuration takes the special value (0,0)
@@ -925,22 +931,29 @@ class WaveformSet(object):
 		except (TypeError, ValueError): gcount, gsize = 0, 0
 
 		if not append:
-			# Encode the magic number, file version and datatype
+			# Encode the magic number and file version
+			hbytes = struct.pack('<4s2I', 'WAVE', major, minor)
+
+			# Encode temperature values
+			temps = self.context.get('temps', [float('nan')]*2)
+			hbytes += np.asarray(temps, dtype=np.float32).tobytes()
+
+			# Encode the datatype
 			typecode = self.typecodes.inverse[np.dtype(self.dtype).name][0]
-			hbytes = struct.pack('<4s2I2s', 'WAVE', major, minor, typecode)
+			hbytes += struct.pack('<2s', typecode)
 
 			# Encode transmission parameters
 			hbytes += struct.pack('<4I2HI', self.f2c, self.nsamp,
 					self.nrx, self.ntx, gcount, gsize, self.txstart)
 
 			# Unspecified TGC parameters default to 0
-			try: tgc = self.extrabytes['tgc']
-			except KeyError: tgc = np.zeros(256, dtype=np.float32).tobytes()
+			try: tgc = self.context['tgc']
+			except KeyError: tgc = np.zeros(256, dtype=np.float32)
 
-			if len(tgc) != 1024:
-				raise ValueError('File version (1,4) requires 1024 TGC bytes')
+			if len(tgc) != 256:
+				raise ValueError('File version (1,4) requires 256 TGC floats')
 
-			hbytes += tgc
+			hbytes += tgc.tobytes()
 
 			f.write(hbytes)
 
@@ -994,13 +1007,22 @@ class WaveformSet(object):
 			sz = struct.calcsize(fmt)
 			return struct.unpack(fmt, f.read(sz))
 
-		# Read the magic number, file version, and datatype
-		magic, major, minor, typecode = funpack('<4s2I2s')
+		# Read the magic number and file version
+		magic, major, minor = funpack('<4s2I')
 
 		if magic != 'WAVE':
 			raise ValueError('Invalid magic number in file')
 
 		major, minor = self._verify_file_version((major, minor))
+
+		if minor > 4:
+			# Read temperature context
+			try: self.context['temps'] = np.fromfile(f, dtype=np.float32, count=2)
+			except ValueError:
+				raise ValueError('Temperature section of header must contain 2 floats')
+
+		# Read the type code for this file
+		typecode = funpack('<2s')[0]
 		dtype = np.dtype(self.typecodes[typecode])
 
 		# Clear the record array
@@ -1037,11 +1059,13 @@ class WaveformSet(object):
 
 				self.txgrps = count, size
 
-			# For version (1,4), read an explicit txstart
-			if minor == 4: self.txstart = funpack('<I')[0]
+			# For version (1,4) and above, read an explicit txstart
+			if minor >= 4: self.txstart = funpack('<I')[0]
 
-			# Read 1024 bytes of TGC parameters
-			self.extrabytes['tgc'] = f.read(1024)
+			# Read 256 TGC parameters in the header
+			try: self.context['tgc'] = np.fromfile(f, dtype=np.float32, count=256)
+			except ValueError:
+				raise ValueError('TGC section of header must contain 256 floats')
 		elif minor == 0:
 			# Verion 0 uses an explicit 1-based transmit-index list
 			self.txidx = np.fromfile(f, dtype=np.uint32, count=ntx) - 1
