@@ -1104,6 +1104,12 @@ class Waveform(object):
 		  deviation (computed using pycwp.stats.rolling_variance; see
 		  the 'noisewin' kwarg).
 
+		* useheight: If False (default), the 'prominence' used to
+		  filter peaks according to minprom and prommode is the
+		  topographical prominence (the difference between the height
+		  of the peak and the height of its key col); if True,
+		  'prominence' is simply the height of the peak above 0.
+
 		* noisewin: If prommode is 'noisedb', this optional kwarg
 		  specifies the width of the pycwp.stats.rolling_variance
 		  window used to estimate noise standard deviation. Defaults to
@@ -1142,6 +1148,7 @@ class Waveform(object):
 		noisewin = kwargs.pop('noisewin', 100)
 		minwidth = kwargs.pop('minwidth', 0)
 		maxshift = kwargs.pop('maxshift', None)
+		useheight = kwargs.pop('useheight', False)
 
 		if len(kwargs):
 			raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
@@ -1176,11 +1183,12 @@ class Waveform(object):
 			except TypeError:
 				# Width of dominant peak is to far end of data window
 				width = max(i, self.datawin.length - i)
-				# Prominence of dominant peak is its height
+				# Prominence of dominant peak is always its height
 				prom = v
 			else:
-				# Prominence is height above key col
-				prom = v - kv
+				# True prominence is height above key col
+				if useheight: prom = v
+				else: prom = v - kv
 
 				try:
 					si, sv = pk['subcol']
