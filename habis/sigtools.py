@@ -586,7 +586,7 @@ class Waveform(object):
 			# Find the maximum index and value
 			i = self._data.argmax() if mx else self._data.argmin()
 			v = self._data[i]
-		except TypeError:
+		except (TypeError, AttributeError):
 			# If there is no data, the maximum is just 0
 			return (0, 0)
 
@@ -708,10 +708,13 @@ class Waveform(object):
 		if not self.isReal:
 			raise TypeError('Envelope only works for real-valued signals')
 
+		dstart, dlen = self.datawin
+		if not dlen: return Waveform(self.nsamp)
+
 		# Find the envelope in the data window
 		env = np.abs(hilbert(self._data))
 		# Encapsulate in a new Waveform object
-		return Waveform(self.nsamp, env, self._datastart)
+		return Waveform(self.nsamp, env, dstart)
 
 
 	def specidx(self, n=None, real=None):
