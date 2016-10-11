@@ -64,7 +64,14 @@ def loadmatlist(files, *a, **k):
 
 		OrderedDict(sorted(kv for f in files
 				for kv in loadkeymat(f, *a, **k).iteritems()))
+
+	If files is a string instead of any other iterable, it will be replaced
+	with glob.glob(files) before being inserted into the above constructor.
 	'''
+	if isinstance(files, basestring):
+		from glob import glob
+		files = glob(files)
+
 	return OrderedDict(sorted(kv for f in files
 		for kv in loadkeymat(f, *a, **k).iteritems()))
 

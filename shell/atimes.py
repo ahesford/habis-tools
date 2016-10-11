@@ -134,6 +134,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	* nsamp: Override datafile.nsamp. Useful mainly for bandpass filtering.
 
+	* negcorr: A Boolean (default: False) passed to Waveform.delay as the
+	  'negcorr' argument to consider negative cross-correlation.
+
 	* bandpass: A dictionary of keyword arguments passed to
 	  habis.sigtools.Waveform.bandpass() that will filter each waveform
 	  prior to further processing.
@@ -331,6 +334,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	if peaks is not None:
 		nearmap = peaks.pop('nearmap', { })
 
+	# Determine whether to allow negative correlations
+	negcorr = kwargs.pop('negcorr', False)
+
 	# Grab an optional delay cache
 	delaycache = kwargs.pop('delaycache', { })
 
@@ -399,7 +405,12 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		if compenv: sig = sig.envelope()
 
 		# Compute and record the delay
-		result[(tid, rid)] = sig.delay(ref, osamp) + data.f2c
+		dl = sig.delay(ref, osamp, negcorr)
+		if negcorr:
+			if dl[1] < 0:
+				print 'Negative cross-correlation selected for Tx %d, Rx %d' % (tid, rid)
+			dl = dl[0]
+		result[(tid, rid)] = dl + data.f2c
 
 	try: queue.put(result)
 	except AttributeError: pass
@@ -552,6 +563,7 @@ def atimesEngine(config):
 	optimize = config.get(asec, 'optimize', mapper=bool, default=False)
 	cachedelay = config.get(asec, 'cachedelay', mapper=bool, default=True)
 	kwargs['compenv'] = config.get(asec, 'compenv', mapper=bool, default=False)
+	kwargs['negcorr'] = config.get(asec, 'negcorr', mapper=bool, default=False)
 
 	try:
 		# Remove the nearmap file key
