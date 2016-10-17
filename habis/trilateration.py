@@ -56,7 +56,7 @@ class ArrivalTimeFinder(object):
 		Assign the given arrival-time map, which characterizes the
 		arrival time from transmission element txelts[i] to receive
 		element rxelts[j] as atmap[i,j].
-		
+
 		The map may be a masked array; masked values will not be used
 		in optimization.
 
@@ -82,18 +82,18 @@ class ArrivalTimeFinder(object):
 		except AttributeError:
 			# Copy an array-like map, preserving any masks
 			atmap = ma.array(atmap, copy=True) 
-			
+
 			try:
 				ntx, nrx = atmap.shape
 			except ValueError:
 				raise TypeError('Arrival-time map must be of rank 2') 
-			
+
 			if txelts is None: txelts = tuple(xrange(ntx))
 			else:
 				if len(txelts) != ntx:
 					raise ValueError('Length of txelts must match row count in atmap')
 				txelts = tuple(txelts)
-				
+
 			if rxelts is None: rxelts = tuple(xrange(nrx))
 			else:
 				if len(rxelts) != nrx:
@@ -160,58 +160,58 @@ class ArrivalTimeFinder(object):
 
 class MultiPointTrilateration(object):
 	'''
-	Use the fixed positions of known elements, embedded in a medium of
-	known wave speed, to simultaneously determine the unknown positions of
-	additional elements using the measured arrival times of signals
-	reflected from the known elements.
+	Use the fixed positions of known elements to determine the unknown
+	positions of a collection of targets using the measured arrival times
+	of backscatter signals measured by the known elements from the targets.
 
-	Optionally, the sound speed can be recovered along with the positions.
+	The sound speed and radius can be optionally recovered with positions.
 	'''
-	def __init__(self, centers, rad=0., c=1.507):
+	def __init__(self, centers, optc=False, optr=False):
 		'''
-		Create a trilateration object using a collection of elements
-		whose center positions are specified along rows of the rank-2
-		array centers. Each element has a radius rad such that
-		reflections are assumed to come from a point that is a distance
-		rad from the center position. The wave speed c is used to
-		relate round-trip arrival times to distances.
+		Create a trilateration object using a collection of known
+		elements whose center positions are specified along rows of the
+		rank-2 array centers.
+
+		If optc is True, Newton optimizations that recover the unknown
+		target positions will also recover an optimum wave speed.
+
+		If optr is True, the Newton optimizations will also recover an
+		optimum target radius.
 		'''
 		# Make a copy of the centers array, ensure it is rank 2
 		self.centers = np.array(centers)
 		if np.ndim(centers) != 2:
 			raise TypeError('Element centers must be a rank-2 array')
-		# Copy the wave speed and radius
-		self.c = c
-		self.rad = rad
+
+		# Record the preferences for optimized wave speed and radius
+		self.optc = optc
+		self.optr = optr
 
 
-	def cost(self, pos, times, c=None):
+	def cost(self, pos, times, c=1.5, r=0.0):
 		'''
 		Compute the cost function associated with Newton-Raphson
 		iterations for acoustic trilateration as configured in the
-		object instance. The rank-2 position array pos specifies,
-		row-wise, the estimated coordinates of all unknown elements.
+		object instance.
+
+		The rank-2 position array pos specifies, row-wise, the
+		estimated coordinates of all unknown targets.
 
 		The rank-2 array times specifies along its rows arrival times
 		that characterize the separations between the corresponding
-		element in pos and each of the previously configured elements.
+		target in pos and each of the previously configured elements.
 
-		The value c is the wave speed to use when evaluating the cost.
-		If c is None, the value of self.c is used instead.
+		When computing the cost, the wave speed is given by the value c
+		and unknown targets are all assumed to have a radius r. The
+		cost function is a concatenation of individual, per-traget
+		trilateration costs. The block for target k takes the form
 
-		The cost function is the concatenation of the cost functions
-		for independent, per-element trilateration problems. A block k
-		of the cost function takes the form
-
-			F[k,i] = self.rad + c * times[k,i] / 2 -
+			F[k,i] = r + c * times[k,i] / 2 -
 					sqrt(sum((centers[i] - pos[k])**2)).
 		'''
 		# Treat the positions and times as a rank-2 array
 		pos = cutil.asarray(pos, 2, False)
 		times = cutil.asarray(times, 2, False)
-
-		# Make sure the sound speed is appropriate
-		if c is None: c = self.c
 
 		# The position vector has one extra row for normal components
 		nelts, ncols = pos.shape
@@ -230,7 +230,7 @@ class MultiPointTrilateration(object):
 		dist = np.sqrt(np.sum((cenpad - pospad)**2, axis=-1))
 
 		# Flatten in proper order and include time term
-		return self.rad + c * times.ravel('C') / 2 - dist.ravel('C')
+		return r + c * times.ravel('C') / 2 - dist.ravel('C')
 
 
 	def jacobian(self, pos, times=None):
@@ -257,15 +257,21 @@ class MultiPointTrilateration(object):
 
 			dist(k,i) = sqrt(sum(centers[i,j] - pos[k,j], j)).
 
-		If times is not None, the Jacobian includes an extra column
+		If self.optc is False, the argument times is ignored. When
+		self.optc is True, the Jacobian will include an extra column
 		taking the form
 
 			times.ravel('C') / 2
 
 		to model variations in wave speed.
 
+		If self.optr is True, the Jacobian will include an extra column
+		of all ones to model variations in target radius.
+
 		The vector acted on by the LinearOperator should follow the
-		form of the argument pos, flattened in row-major order.
+		form of the argument pos, flattened in row-major order. A wave
+		speed or target radius will need to be appended to the vector
+		when self.optc or self.optr, respectively, are True.
 		'''
 		# Treat the positions and times as rank-2 arrays
 		pos = cutil.asarray(pos, 2, False)
@@ -274,11 +280,11 @@ class MultiPointTrilateration(object):
 		nelts, ncols = pos.shape
 		nrows, ndim = self.centers.shape
 
-		varc = times is not None
-
 		if ncols != ndim:
 			raise TypeError('Element positions must have same dimensionality of reference points')
-		if varc:
+		if self.optc:
+			if times is None:
+				raise TypeError('Argument times must not be None when self.optc is True')
 			if times.shape[0] != nelts:
 				raise TypeError('Numbers of rows in pos must match that of times')
 			if times.shape[1] != nrows:
@@ -292,13 +298,14 @@ class MultiPointTrilateration(object):
 		jacs = (cenpad - pospad) / dist[:,:,np.newaxis]
 
 		# Figure the shape of the Jacobian
-		jshape = (nelts * nrows, nelts * ndim + (1 if varc else 0))
+		nx = nelts * ndim
+		jshape = (nelts * nrows, nx + int(self.optc) + int(self.optr))
 
 		# Build the block-diagonal spatial MVP and adjoint
 		def mv(x):
 			# Treat element coordinates blockwise
 			x = np.reshape(x, (nelts, ndim), order='C')
-			# Fill output vector blockwise
+			# Create and fill output vector blockwise
 			y = np.empty((nelts, nrows), dtype=self.centers.dtype)
 			for yv, j, xv in izip(y, jacs, x):
 				yv[:] = np.dot(j, xv)
@@ -307,27 +314,45 @@ class MultiPointTrilateration(object):
 		def mvt(y):
 			# Treat input vector blockwise
 			y = np.reshape(y, (nelts, nrows), order='C')
-			# Fill output vector blockwise
+			# Create an output if one was not provided
 			x = np.empty((nelts, ndim), dtype=self.centers.dtype)
+			# Fill output vector blockwise
 			for xv, j, yv in izip(x, jacs, y):
 				xv[:] = np.dot(j.T, yv)
 			return x.ravel('C')
 
-		if varc:
-			# Add a component for speed variations
+		if self.optc:
+			# Modify Jacobian operators to account for variable speed
 			smv = mv
 			def mv(x):
-				# Add the speed contribution to the spatial part
-				return smv(x[:-1]) + x[-1] * times.ravel('C')
+				# Add contribution of final speed column
+				return smv(x[:nx]) + x[nx] * times.ravel('C')
 
 			smvt = mvt
 			def mvt(y):
-				# Make an output array with room for the speed part
+				# Output needs room for speed part
+				xe = np.empty(nx + 1, dtype=self.centers.dtype)
+				# Fill in the spatial part
+				xe[:nx] = smvt(y)
+				# Fill in the speed part
+				xe[nx] = np.dot(times.ravel('C'), y)
+				return xe
+
+		if self.optr:
+			# Modify Jacobian operators to account for variable radius
+			pmv = mv
+			def mv(x):
+				# A new last column accounts for variable radius
+				return pmv(x[:-1]) + x[-1]
+
+			pmvt = mvt
+			def mvt(y):
+				# Ouptut needs room for radius part
 				xe = np.empty(jshape[1], dtype=self.centers.dtype)
-				#  Fill in the spatial part
-				xe[:-1] = smvt(y)
-				# Compute the speed part
-				xe[-1] = np.dot(times.ravel('C'), y)
+				# Fill in spatial (and maybe speed) part
+				xe[:-1] = pmvt(y)
+				# Fill in the radius part
+				xe[-1] = np.sum(y)
 				return xe
 
 		jac = LinearOperator(shape=jshape, matvec=mv,
@@ -335,7 +360,7 @@ class MultiPointTrilateration(object):
 		return jac
 
 
-	def newton(self, times, pos=None, varc=False, maxit=100, tol=1e-6, itargs={}):
+	def newton(self, times, pos=None, c=1.5, r=0., maxit=100, tol=1e-6, itargs={}):
 		'''
 		Use Newton-Raphson iteration to recover the positions of
 		unknown element associated with the provided round-trip arrival
@@ -346,9 +371,9 @@ class MultiPointTrilateration(object):
 		zero by default. The rank-2 array pos should specifies the
 		estimated coordinates of one element along each row.
 
-		If varc is True, the wave speed is treated as a variable and
-		will be recovered along with the element positions. The initial
-		guess for wave speed is always self.c.
+		The assumed wave speed is provided in c, while the assumed
+		target radius is provided in r. These values may be adjusted by
+		optimization according to self.optc or self.optr, respectively.
 
 		Iterations will stop after maxit iterations or when the norm of
 		a computed update is less than tol times the norm of the guess
@@ -358,10 +383,17 @@ class MultiPointTrilateration(object):
 		algorithm (scipy.sparse.linalg.lsmr). The dictionary itargs is
 		passed to the LSMR function as its kwargs.
 
-		The return value is an array of shape (nelts, ndim), where
-		nelts is the number of rows in times and ndim is the
-		dimensionality of each element in self.centers. If varc is
-		True, a second return value will be the recovered sound speed.
+		If self.optc and self.optr are both False, the return value is
+		an array of target centers with shape (ntarg, ndim), where
+		ntarg is the number of rows in times and ndim is the
+		dimensionality of each element in self.centers.
+
+		If at least one of self.optc and self.optr is True, the return
+		value will be a tuple whose first element is the
+		above-described array of target centers. If self.optc is True,
+		the next return element will be the optimized sound speed. If
+		self.optr is True, the final return element will be the
+		optimized target radius.
 		'''
 		times = cutil.asarray(times, 2, False)
 		pos = cutil.asarray(pos, 2, False)
@@ -377,35 +409,39 @@ class MultiPointTrilateration(object):
 		else: pos = np.zeros((nelts, ndim), dtype=self.centers.dtype)
 
 		if pos.shape != (nelts, ndim):
-			raise TypeError('Shape of pos must be (times.shape[0], self.centers.shape[1])')
+			raise TypeError('Expected pos.shape to be (%d, %d), not %s' % (times.shape[0], self.centers.shape[1], pos.shape))
 
-		c = self.c
 		n = nelts * ndim
 
 		for i in range(maxit):
 			# Build the Jacobian and right-hand side
-			jac = self.jacobian(pos, times if varc else None)
-			cost = self.cost(pos, times, c)
+			jac = self.jacobian(pos, times)
+			cost = self.cost(pos, times, c, r)
 			# Use LSMR to invert the system
 			delt = lsmr(jac, cost, **itargs)[0]
 			# Check for convergence
 			conv = (la.norm(delt[:n]) < tol * la.norm(pos))
 			# Add the update and break when converged
 			pos -= delt[:n].reshape((nelts, ndim), order='C')
-			if varc: c -= delt[-1]
+			# Include speed and radius updates as appropriate
+			if self.optc: c -= delt[n]
+			if self.optr: r -= delt[-1]
 			if conv: break
 
-		return (pos, c) if varc else pos
+		ret = (pos,)
+		if self.optc: ret = ret + (c,)
+		if self.optr: ret = ret + (r,)
+
+		return ret[0] if len(ret) == 1 else ret
 
 
 class PlaneTrilateration(MultiPointTrilateration):
 	'''
 	Use the fixed positions of known elements, embedded in a medium of
 	known wave speed, to determine the unknown position of a collection of
-	additional elements using the measured arrival times of signals
-	reflected from the known elements. As additional constraints, the
-	positions of the recovered elements will be constrained to
-	approximately lie on a plane.
+	targets using the measured arrival times of signals reflected from the
+	known elements. As additional constraints, the positions of the
+	recovered elements will be constrained to approximately lie on a plane.
 	'''
 	def jacobian(self, pos, *args, **kwargs):
 		'''
@@ -488,6 +524,7 @@ class PlaneTrilateration(MultiPointTrilateration):
 		The cost function is the concatenation of the cost functions
 		for independent, per-element trilateration problems, followed
 		by constraints that all unknown elements should be coplanar.
+
 		The extra args and kwargs are forwarded to super.cost().
 		'''
 		# Treat the positions as a rank-2 array

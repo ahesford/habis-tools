@@ -22,30 +22,40 @@ def usage(progname):
 
 def getreflpos(args):
 	'''
-	For args = (times, elocs, guess, rad, c, varc, tol), with a list of N
-	round-trip arrival times and an N-by-3 matrix elocs of reference
+	For args = (times, elocs, guess, rad, c, optc, optr, tol), with a list
+	of N round-trip arrival times and an N-by-3 matrix elocs of reference
 	element locatations, use habis.trilateration.MultiPointTrilateration to
 	determine, starting with the provided 3-dimensional guess position, the
-	position of a reflector with radius rad in a medium with sound speed c.
+	position of a target with radius rad in a medium with wave speed c.
 
-	If varc is True, the MultiPointTrilateration is allowed to recover
-	variable sound speed in addition to element position.
+	If optc is True, the MultiPointTrilateration is allowed to optimize for
+	wave speed in addition to target position. If optr is True, the
+	MultiPointTrilateration is allowed to optimize for target radius in
+	addition to position and (possibly) wave speed.
 
 	The argument tol specifies the convergence tolerance passed to
 	MultiPointTrilateration.newton.
 
-	The return value is a 4-dimensional vector in which the first three
-	dimensions are the element position and the last dimension is the
-	recovered sound speed. If varc is False, the fourth dimension just
-	copies the input parameter c.
+	The return value is a 5-dimensional vector in which the first three
+	dimensions are the target position, the fourth dimension is the
+	optimized wave speed, and the fifth is the optimized target radius. If
+	the wave speed or the radius are not optimized, the original value is
+	returned in place of an optimized one.
 	'''
-	times, elemlocs, guess, rad, c, varc, tol = args
-	t = trilateration.MultiPointTrilateration(elemlocs, rad, c)
-	rval = t.newton(times, pos=guess, varc=varc, tol=tol)
+	times, elemlocs, guess, rad, c, optc, optr, tol = args
+	t = trilateration.MultiPointTrilateration(elemlocs, optc, optr)
+	rval = t.newton(times, pos=guess, c=c, r=rad, tol=tol)
 	# Unpack the recovered solution
-	pos, c = rval if varc else (rval, c)
-	# Expand the position to include sound speed
-	pos = np.concatenate([pos, [[c]] * pos.shape[0]], axis=1)
+	if not (optc or optr):
+		pos = rval
+	else:
+		pos = rval[0]
+		if optc: c = rval[1]
+		if optr: rad = rval[-1]
+
+	# Expand the position to include wave speed and radius
+	nt = pos.shape[0]
+	pos = np.concatenate([pos, [[c]] * nt, [[rad]] * nt], axis=1)
 	return pos.squeeze()
 
 
@@ -56,15 +66,18 @@ def geteltpos(args):
 	  * eltpos maps element indices to guess coordinates (x, y, z),
 	  * times maps element indices to a length-N sequence of round-trip
 	    arrival times from that element to each of N reflectors,
-	  * reflectors is a length-N sequence (x, y, z, c) specifying the
-	    position and background sound speed for each reflector,
-	  * rad is the (common) radius of the reflectors,
-	  * c is the (uniform) background sound speed,
+	  * reflectors is an array of shape (N, 5) that specifies values
+	    (x, y, z, c, r) across columns, specifying the position (x, y, z),
+	    background wave speed c, and radius r for each of N reflectors,
+	  * c is an arbitrary (uniform) background wave speed,
+	  * rad is an arbitrary (uniform) reflector radius,
 	  * and tol is a tolerance for Newton-Raphson iteraton,
 
 	use habis.trilateration.PlaneTrilaterion (if len(elts) > 2) or
 	habis.trilateration.MultiPointTrilateration to recover the positions of
-	each element in elts.
+	each element in elts. Per-reflector arrival times (with a possibly
+	unique radius and wave speed) will be converted to effective times for
+	a common sound speed and target radius before trilateration.
 
 	The return value is a map from element indices to final coordinates.
 	'''
@@ -72,15 +85,15 @@ def geteltpos(args):
 
 	# Pull the element coordinates
 	celts = np.array([eltpos[e] for e in elts])
-	# Pull the arrival times, converted to background speed
-	ctimes = (np.array([times[e] for e in elts]) *
-			(reflectors[:,-1] / c)[np.newaxis,:])
-
+	# Pull the arrival times, convert to common radius and wave speed
+	ctimes = ((np.array([times[e] for e in elts]) *
+			(reflectors[:,-2] / c)[np.newaxis,:]) +
+			(2 * (reflectors[:,-1] - rad) / c)[np.newaxis,:])
 	# No need to enforce coplanarity for one or two elements
 	tcls = (trilateration.PlaneTrilateration if len(elts) > 2
 			else trilateration.MultiPointTrilateration)
-	pltri = tcls(reflectors[:,:-1], rad, c)
-	repos = pltri.newton(ctimes, pos=celts, tol=tol)
+	pltri = tcls(reflectors[:,:-2])
+	repos = pltri.newton(ctimes, pos=celts, c=c, r=rad, tol=tol)
 
 	return dict(izip(elts, repos))
 
@@ -154,9 +167,16 @@ def trilaterationEngine(config):
 
 	try:
 		# Determine whether variable sound speeds are allowed
-		varc = config.get(tsec, 'varc', mapper=bool, default=False)
+		optc = config.get(tsec, 'optc', mapper=bool, default=False)
 	except Exception as e:
-		err = 'Invalid specification of optional varc in [%s]' % tsec
+		err = 'Invalid specification of optional optc in [%s]' % tsec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine whether variable target radii are allowed
+		optr = config.get(tsec, 'optr', mapper=bool, default=False)
+	except Exception as e:
+		err = 'Invalid specification of optional optr in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -193,11 +213,14 @@ def trilaterationEngine(config):
 
 	# Pull the reflector guess as a 2-D matrix
 	guess = np.loadtxt(guessfile, ndmin=2)
-	# Ensure that the reflector has a sound-speed guess
-	if guess.shape[1] == 3:
-		guess = np.concatenate([guess, [[c]] * guess.shape[0]], axis=1)
-	elif guess.shape[1] != 4:
-		raise ValueError('Guess file must contain 3 or 4 columns')
+	nt, nd = guess.shape
+	# Ensure that the reflector has a guess for wave speed and radius
+	if nd == 3:
+		guess = np.concatenate([guess, [[c, radius]] * nt], axis=1)
+	elif nd == 4:
+		guess = np.concatenate([guess, [[radius]] * nt], axis=1)
+	elif nd != 5:
+		raise ValueError('Guess file must contain 3, 4, or 5 columns')
 
 	# Allocate a multiprocessing pool
 	pool = multiprocessing.Pool(processes=nproc)
@@ -221,7 +244,7 @@ def trilaterationEngine(config):
 		# Compute the reflector positions in parallel
 		# Use async calls to correctly handle keyboard interrupts
 		result = pool.map_async(getreflpos,
-				((t, celts, g[:-1], radius, g[-1], varc, tol)
+				((t, celts, g[:-2], g[-1], g[-2], optc, optr, tol)
 					for t, g in izip(ctimes.T, guess)))
 		while True:
 			try:
@@ -233,12 +256,13 @@ def trilaterationEngine(config):
 		# Save the reflector positions
 		np.savetxt(outreflector, reflectors, fmt='%16.8f')
 
-		rfldist = norm(reflectors[:,:-1] - guess[:,:-1], axis=-1)
+		rfldist = norm(reflectors[:,:-2] - guess[:,:-2], axis=-1)
 		print 'Iteration', rnd, 'mean reflector shift', np.mean(rfldist), 'stdev', np.std(rfldist)
 
 		# Skip trilateration of element positions if there is no ouptut file
 		if not outelements: break
 
+		# Replace guess with reflector positions for next round
 		guess = reflectors
 
 		# Compute the element positions in parallel by facet

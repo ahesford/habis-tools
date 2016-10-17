@@ -59,11 +59,8 @@ def wavepaths(elements, reflectors, nargs={}):
 
 def propanglesEngine(config):
 	'''
-	Use the MultiPointTrilateration and PlaneTrilateration classes in
-	habis.trilateration to determine, iteratively from a set of
-	measurements of round-trip arrival times, the unknown positions of
-	a set of reflectors followed by estimates of the positions of the
-	hemisphere elements.
+	Calculate the propagation angles and distances between elements and a
+	set of reflectors.
 	'''
 	psec = 'propangles'
 	msec = 'measurement'

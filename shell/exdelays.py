@@ -48,15 +48,18 @@ def exdelayEngine(config):
 	times = {}
 	for elt, epos in eltspos.iteritems():
 		nedim = len(epos)
-		if nedim != nrdim != nedim + 1:
-			raise ValueError('Reflector and element dimensionalities are incompatible')
+		if not nedim <= nrdim <= nedim + 2:
+			raise ValueError('Incompatible reflector and element dimensionalities')
 		# Determine one-way distances between element and reflector centers
 		dx = norm(epos[np.newaxis,:] - reflpos[:,:nedim], axis=-1)
-		# Use encoded sound speeds if possible, otherwise use global speed
+		# Use encoded wave speed if possible, otherwise use global speed
 		try: lc = reflpos[:,nedim]
 		except IndexError: lc = c
+		# Use encoded radius if possible, otherwise use global radius
+		try: lr = reflpos[:,nedim+1]
+		except IndexError: lr = r
 		# Convert distances to round-trip arrival times
-		times[elt,elt] = 2 * (dx - r) / lc
+		times[elt,elt] = 2 * (dx - lr) / lc
 
 	# Save the estimated arrival times
 	savez_keymat(timefile, times)

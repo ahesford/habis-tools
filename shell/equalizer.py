@@ -173,11 +173,7 @@ def dirwidths(phis, thetas, dists):
 
 def equalizerEngine(config):
 	'''
-	Use the MultiPointTrilateration and PlaneTrilateration classes in
-	habis.trilateration to determine, iteratively from a set of
-	measurements of round-trip arrival times, the unknown positions of
-	a set of reflectors followed by estimates of the positions of the
-	hemisphere elements.
+	Attempt to equalize the spectral responses of distinct elements.
 	'''
 	esec = 'equalizer'
 	msec = 'measurement'
