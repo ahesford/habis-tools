@@ -11,7 +11,7 @@ from collections import defaultdict
 from pycwp import stats, cutil
 
 from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
-from habis.formats import loadkeymat, loadmatlist
+from habis.formats import loadmatlist, savez_keymat, savetxt_keymat
 
 def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
@@ -59,7 +59,7 @@ def wavesfcEngine(config):
 	# Read the element positions and backscatter arrival times
 	elements = loadmatlist(eltfiles, nkeys=1)
 	times = { k[0]: v
-			for k, v in loadmatlist(timefiles, nkeys=2).iteritems()
+			for k, v in loadmatlist(timefiles, scalar=False, nkeys=2).iteritems()
 			if k[0] == k[1] }
 
 	reflectors = np.loadtxt(rflfile, ndmin=2)
@@ -77,7 +77,7 @@ def wavesfcEngine(config):
 	# Keep a list of control points for each reflectors
 	cpts = [ ]
 
-	for refl in reflectors:
+	for ridx, refl in enumerate(reflectors):
 		pos = refl[:3]
 		lc = refl[3]
 
@@ -90,7 +90,7 @@ def wavesfcEngine(config):
 			ll = norm(dl)
 			dl /= ll
 			# Convert arrival time to distance from center along ray
-			ds = ll - times[el] * lc / 2.0
+			ds = ll - times[el][ridx] * lc / 2.0
 			# Valid points will be inside segment or opposite reflector
 			if ds <= ll:
 				# Record distance and ray
@@ -102,21 +102,26 @@ def wavesfcEngine(config):
 			for el, (ds, _) in pdists.iteritems():
 				pgrps[int(el / olgroup)][el] = ds
 			# Filter outliers from each group and add remaining points
-			cpts.append([pos + pdists[el][0] * pdists[el][1]
+			cpts.append({ el: pos + pdists[el][0] * pdists[el][1]
 				for pgrp in pgrps.itervalues()
-				for el in stats.mask_outliers(pgrp, olrange)])
+				for el in stats.mask_outliers(pgrp, olrange) })
 		else:
 			# Add all control points if no outlier exclusion is needed
-			cpts.append([pos + ds * dl for ds, dl in pdists.itervalues()])
+			cpts.append({ el: pos + ds * dl
+				for el, (ds, dl) in pdists.iteritems() })
 
-	if len(cpts) == 1 and outfile.endswith('.txt'):
-		# A single output can be stored in text format if desired
-		np.savetxt(outfile, cpts[0])
-	else:
-		# Multiple targets or different extensions always demand npz format
-		ndig = cutil.numdigits(len(cpts))
-		tfmt = 'target%%0%dd' % (ndig,)
-		np.savez(outfile, **{ tfmt % i: v for i, v in enumerate(cpts) })
+	# Split the file name and extension
+	fbase, fext = os.path.splitext(outfile)
+	txtout = fext.lower() == '.txt'
+
+	# Add a target specifier to outputs for multiple targets
+	if len(cpts) == 1: idfmt = ''
+	else: idfmt = '.Target{{0:0{width}d}}'.format(width=cutil.numdigits(len(cpts)))
+
+	for i, v in enumerate(cpts):
+		fname = fbase + idfmt.format(i) + fext
+		if txtout: savetxt_keymat(fname, v, fmt='%d %.18e %.18e %.18e')
+		else: savez_keymat(fname, v)
 
 
 if __name__ == '__main__':
