@@ -1405,7 +1405,7 @@ def aprony(maxdeg, x0, h, y, rcond=-1):
 
 	# Characterize the error and select the most significant contributors
 	x = x0 + h * np.arange(len(y)).astype(complex)
-	rms = [cutil.mse(y - cv * np.exp(x * lv), y) for lv, cv in zip(lm, c)]
+	rms = [cutil.mse((y - cv * np.exp(x * lv)).flat, y.flat) for lv, cv in zip(lm, c)]
 	rms, c, lm = [np.array(f) for f in zip(*sorted(zip(rms, c, lm))[-adeg:])]
 	return lm, c, rms
 
