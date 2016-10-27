@@ -197,6 +197,7 @@ def backprojectionEngine(config):
 		outfile = config.get(bsec, 'outfile')
 	except Exception as e:
 		err = 'Configuration must specify outfile in [%s]' % bsec
+		raise HabisConfigError.fromException(err, e)
 
 	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 
