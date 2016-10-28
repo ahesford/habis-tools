@@ -6,6 +6,8 @@
 import os, sys, numpy as np
 from numpy.linalg import norm
 
+from scipy.spatial import Delaunay
+
 from collections import defaultdict
 
 from pycwp import stats, cutil
@@ -74,8 +76,13 @@ def wavesfcEngine(config):
 	# Identify elements for which coordinates and arrival times are known
 	celts = sorted(set(times).intersection(elements))
 
-	# Keep a list of control points for each reflectors
-	cpts = [ ]
+	# Split the file name and extension
+	fbase, fext = os.path.splitext(outfile)
+
+	# Add a target specifier to outputs for multiple targets
+	nrefl = len(reflectors)
+	if nrefl == 1: idfmt = ''
+	else: idfmt = '.Target{{0:0{width}d}}'.format(width=cutil.numdigits(nrefl))
 
 	for ridx, refl in enumerate(reflectors):
 		pos = refl[:3]
@@ -102,26 +109,42 @@ def wavesfcEngine(config):
 			for el, (ds, _) in pdists.iteritems():
 				pgrps[int(el / olgroup)][el] = ds
 			# Filter outliers from each group and add remaining points
-			cpts.append({ el: pos + pdists[el][0] * pdists[el][1]
+			cpts = np.array([ pos + pdists[el][0] * pdists[el][1]
 				for pgrp in pgrps.itervalues()
-				for el in stats.mask_outliers(pgrp, olrange) })
+				for el in stats.mask_outliers(pgrp, olrange) ])
 		else:
 			# Add all control points if no outlier exclusion is needed
-			cpts.append({ el: pos + ds * dl
-				for el, (ds, dl) in pdists.iteritems() })
+			cpts = np.array([ pos + ds * dl
+				for el, (ds, dl) in pdists.iteritems() ])
 
-	# Split the file name and extension
-	fbase, fext = os.path.splitext(outfile)
-	txtout = fext.lower() == '.txt'
+		fname = fbase + idfmt.format(ridx) + fext
 
-	# Add a target specifier to outputs for multiple targets
-	if len(cpts) == 1: idfmt = ''
-	else: idfmt = '.Target{{0:0{width}d}}'.format(width=cutil.numdigits(len(cpts)))
+		# Project control points for tesselation
+		zmin = np.min(cpts[:,-1])
+		zmax = np.max(cpts[:,-1])
 
-	for i, v in enumerate(cpts):
-		fname = fbase + idfmt.format(i) + fext
-		if txtout: savetxt_keymat(fname, v, fmt='%d %.18e %.18e %.18e')
-		else: savez_keymat(fname, v)
+		if np.allclose(zmin, zmax):
+			# For flat structures, just use x-y
+			tris = Delaunay(cpts[:,:2])
+		else:
+			# Otherwise, project radially
+			zdiff = zmax - zmin
+			prctr = np.mean(cpts, axis=0)
+			prctr[-1] = zmax + zdiff
+			prref = np.array(prctr)
+			prref[-1] = zmin
+
+			l = cpts - prctr[np.newaxis,:]
+			d = (prref - prctr)[-1] / l[:,-1]
+
+			if np.any(np.isinf(d)) or np.any(np.isnan(d)):
+				raise ValueError('Failure in projection for tesselation')
+
+			ppts = prctr[np.newaxis,:] + d[:,np.newaxis] * l
+			tris = Delaunay(ppts[:,:2])
+
+		# Save the control points and triangles
+		np.savez(fname, nodes=cpts, triangles=tris.simplices)
 
 
 if __name__ == '__main__':
