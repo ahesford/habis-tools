@@ -106,8 +106,6 @@ def tracerEngine(config):
 	# Convert the triangle node maps to triangle objects
 	nodes, triangles = mesh['nodes'], mesh['triangles']
 	triangles = [ boxer.Triangle3D([nodes[c] for c in v]) for v in triangles ]
-	# Compute bounding boxes for the triangles
-	trbbox = [ tr.bbox() for tr in triangles ]
 
 	# Compute an overall bounding box and an Octree for the space
 	rootbox = boxer.Box3D(*zip(*((min(j), max(j))
@@ -120,7 +118,7 @@ def tracerEngine(config):
 		print 'Creating Octree decomposition (%d levels)' % (otree.level,)
 
 	# Classify triangles according to overlaps with boxes in tree
-	def inbox(b, i): return trbbox[i].overlaps(b) and triangles[i].overlaps(b)
+	def inbox(b, i): return triangles[i].overlaps(b)
 	otree.addleaves(xrange(len(triangles)), inbox, True)
 
 	MPI.COMM_WORLD.Barrier()
