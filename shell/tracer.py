@@ -96,6 +96,17 @@ def tracerEngine(config):
 	except Exception as e:
 		_throw('Optional vclip is invalid', e)
 
+	try:
+		# Use a histogram to determine background sound speed when possible
+		vhist = config.getlist(tsec, 'vhist', mapper=float, default=None)
+		if vhist:
+			if len(vhist) != 3:
+				raise ValueError('Specify vhist as [min, max, nbins]')
+			# Make sure the bin count is an integer
+			vhist = tuple(vhist[:-1] + [int(vhist[-1]),])
+
+	except Exception as e: _throw('Optional vhist is invalid', e)
+
 	try: outfile = config.get(tsec, 'outfile')
 	except Exception as e: _throw('Configuration must specify outfile', e)
 
@@ -188,15 +199,26 @@ def tracerEngine(config):
 
 	if not mpirank: print 'Finished tracing segments'
 
-	# Find the average background sound speed for target misses
-	nmiss = MPI.COMM_WORLD.allreduce(len(misses))
-	tmiss = MPI.COMM_WORLD.allreduce(sum(spds[k] for k in misses))
-
-	if nmiss > 0:
-		# Override the nominal background speed based on misses
-		vbg = tmiss / float(nmiss)
-		if not mpirank:
-			print 'Inferred background speed %0.3f (%d paths)' % (vbg, nmiss)
+	if vhist:
+		# Count the total number of misses
+		nmiss = MPI.COMM_WORLD.allreduce(len(misses))
+		if nmiss:
+			# Find background speed for paths that miss the target
+			bspds = [spds[k] for k in misses
+					if vhist[0] <= spds[k] <= vhist[1]]
+			cts, bins = np.histogram(bspds, bins=vhist[-1], range=vhist[:2])
+			# Accumulate counts on root (returns None on other ranks)
+			cts = MPI.COMM_WORLD.reduce(cts)
+			if not mpirank:
+				# Find the mode and compute the midpoint of its bin
+				mdi = np.argmax(cts)
+				# Override background speed if count is positive
+				if cts[mdi] > 0:
+					vbg = 0.5 * (bins[mdi] + bins[mdi + 1])
+					print ('Inferred background speed '
+						'%0.3f (%d paths)' % (vbg, cts[mdi]))
+			# Make sure all ranks have the updated sound speed
+			vbg = MPI.COMM_WORLD.bcast(vbg)
 
 	for k, (infrac, exfrac) in hits.iteritems():
 		# Update the interior speed for hits
