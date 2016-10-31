@@ -108,14 +108,13 @@ def wavesfcEngine(config):
 			pgrps = defaultdict(dict)
 			for el, (ds, _) in pdists.iteritems():
 				pgrps[int(el / olgroup)][el] = ds
-			# Filter outliers from each group and add remaining points
-			cpts = np.array([ pos + pdists[el][0] * pdists[el][1]
-				for pgrp in pgrps.itervalues()
-				for el in stats.mask_outliers(pgrp, olrange) ])
-		else:
-			# Add all control points if no outlier exclusion is needed
-			cpts = np.array([ pos + ds * dl
-				for el, (ds, dl) in pdists.iteritems() ])
+			# Filter outliers from each group and flatten map
+			pdists = { el: pdists[el] for pg in pgrps.itervalues()
+					for el in stats.mask_outliers(pg, olrange) }
+
+		# Sort remaining values, separate indices and control points
+		cpel = sorted(pdists.iterkeys())
+		cpts = np.array([ pos + pdists[el][0] * pdists[el][1] for el in cpel ])
 
 		fname = fbase + idfmt.format(ridx) + fext
 
@@ -144,7 +143,7 @@ def wavesfcEngine(config):
 			tris = Delaunay(ppts[:,:2])
 
 		# Save the control points and triangles
-		np.savez(fname, nodes=cpts, triangles=tris.simplices)
+		np.savez(fname, nodes=cpts, triangles=tris.simplices, elements=cpel)
 
 
 if __name__ == '__main__':
