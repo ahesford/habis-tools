@@ -110,7 +110,7 @@ def loadkeymat(f, scalar=None, dtype=None, nkeys=None):
 	return mapping
 
 
-def savez_keymat(f, mapping, sortrows=True, compressed=False):
+def savez_keymat(f, mapping, sortrows=True, compressed=False, comment=None):
 	'''
 	Stores mapping, which maps one or more integers to one or more
 	numerical values, into f (which may be a string providing a file name,
@@ -137,7 +137,15 @@ def savez_keymat(f, mapping, sortrows=True, compressed=False):
 	If the lengths of the value lists for all keys are the same, the
 	'lengths' array may be just a scalar value, in which case 'lengths[i]'
 	should be interpreted as '([lengths] * len(keys))[i]'.
+
+	If comment is not None, it should be a string that will be stored as an
+	extra array, called 'comment', in the output file. The comment will be
+	ignored when loading the file.
 	'''
+	# Make sure any comment is a string
+	if comment is not None: exargs = { 'comment': str(comment) }
+	else: exargs = { }
+
 	keys = sorted(mapping.iterkeys()) if sortrows else mapping.keys()
 
 	# Build the length array and flattened value array
@@ -172,7 +180,7 @@ def savez_keymat(f, mapping, sortrows=True, compressed=False):
 		raise TypeError('Keys in mapping consist of one more integers and must have consistent cardinality')
 
 	savez = np.savez_compressed if compressed else np.savez
-	savez(f, keys=keys, values=values, lengths=lengths)
+	savez(f, keys=keys, values=values, lengths=lengths, **exargs)
 
 
 def loadz_keymat(*args, **kwargs):
@@ -196,6 +204,8 @@ def loadz_keymat(*args, **kwargs):
 
 	If the loaded file does not contain a valid mapping in the style
 	prepared by savez_keymat, a ValueError will be raised.
+
+	If the file contains a "comment" key, it will be silently ignored.
 	'''
 	# Pull specialty kwargs
 	scalar = kwargs.pop('scalar', True)
@@ -206,6 +216,12 @@ def loadz_keymat(*args, **kwargs):
 		with np.load(*args, **kwargs) as data:
 			try:
 				files = set(data.iterkeys())
+
+				# Ignore a comment in the file
+				try: files.remove('comment')
+				except KeyError: pass
+
+				# Make sure all other fields are recognized
 				if files != { 'keys', 'values', 'lengths' }: raise ValueError
 			except (AttributeError, ValueError):
 				raise ValueError('Unrecognized data structure in input')
