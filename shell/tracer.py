@@ -130,12 +130,25 @@ def tracerEngine(config):
 
 	# Classify triangles according to overlaps with boxes in tree
 	def inbox(b, i): return triangles[i].overlaps(b)
-	otree.addleaves(xrange(len(triangles)), inbox, True)
+	# Only build the tree for a local share of triangles
+	otree.addleaves(xrange(mpirank, len(triangles), mpisize), inbox, True)
 
 	MPI.COMM_WORLD.Barrier()
 
-	if not mpirank:
-		print 'Computing average speeds over propagation paths'
+	if not mpirank: print 'Combining distributed Octree'
+
+	# Replace the tree with a merging of leaves from all nodes
+	leaves = otree.getleaves()
+	otree = boxer.Octree(levels, rootbox)
+	for leaves in MPI.COMM_WORLD.allgather(leaves):
+		otree.mergeleaves(leaves)
+
+	# Prune the tree and print some statistics
+	otree.prune()
+
+	MPI.COMM_WORLD.Barrier()
+
+	if not mpirank: print 'Computing average speeds over propagation paths'
 
 	# Compute the local share of average sound speeds
 	segs, spds = getspdpaths(timefiles, elements, vclip, mpirank, mpisize)
