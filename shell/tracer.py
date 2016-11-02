@@ -4,6 +4,11 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import os, sys, numpy as np
+from numpy.linalg import norm
+
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import lsmr
+
 
 from itertools import izip
 
@@ -21,34 +26,31 @@ def usage(progname=None, fatal=True):
 	sys.exit(int(fatal))
 
 
-def getspdpaths(atfiles, elements, vclip, rank=0, size=1):
+def getatimes(atfiles, elements, vclip=None):
 	'''
 	Read and unify the arrival-time maps in the iterable atfiles, which
 	provides file names of 2-key maps. Filter the map, atimes, to include
-	only keys sorted(k for k in atimes.keys() if k[0] != k[1])[rank::size].
-	For each (t, r) key in the filtered map, return the mappings
+	only keys such that each index is a key in the mapping elements from
+	indices to element locations, and the average speed (the propagation
+	path length, computed from element locations, divided by the arrival
+	time) falls between vclip[0] and vclip[1].
 
-		segs = { (t, r): boxer.Segment3D(elements[t], elements[r]) }
-
-	and
-
-		spds = { (t, r): segs[t,r].length / atimes[t,r]
-			if vclip[0] <= segs[t,r] / atimes[t,r] <= vclip[1] }.
+	Backscatter waveforms are included in the map but will not be filtered
+	by vclip because the average sound speed is undefined for backscatter.
 	'''
 	# Load all arrival-time maps and eliminate times not of interest
-	atimes = ldmats(atfiles, nkeys=2)
+	atimes = { }
+	for (t, r), v in ldmats(atfiles, nkeys=2).iteritems():
+		try: elt, elr = elements[t], elements[r]
+		except KeyError: continue
 
-	# Remove backscatter and keep a local share
-	keys = sorted(k for k in atimes if k[0] != k[1])[rank::size]
+		if t != r and vclip:
+			aspd = norm(elt - elr) / v
+			if aspd < vclip[0] or aspd > vclip[1]: continue
 
-	# Build the local collection of segments to trace
-	segs = { k: boxer.Segment3D(*(elements[kv] for kv in k)) for k in keys }
+		atimes[t,r] = v
 
-	# Find average speeds, ignoring values outside of clipping range
-	spds = { k: v for k, s in segs.iteritems()
-			for v in (s.length / atimes[k],) if vclip[0] <= v <= vclip[1] }
-
-	return segs, spds
+	return atimes
 
 
 def tracerEngine(config):
@@ -76,6 +78,10 @@ def tracerEngine(config):
 	try: elements = ldmats(matchfiles(config.getlist(tsec, 'elements')), nkeys=1)
 	except Exception as e: _throw('Configuration must specify elements', e)
 
+	# Find and load all propagation axes
+	try: meshctr = np.loadtxt(config.get(tsec, 'meshctr'), ndmin=2)[0,:3]
+	except Exception as e: _throw('Configuration must specify meshctr', e)
+
 	# Load the node and triangle configuration
 	try: mesh = np.load(config.get(tsec, 'mesh'))
 	except Exception as e: _throw('Configuration must specify mesh', e)
@@ -85,34 +91,37 @@ def tracerEngine(config):
 
 	# Read the background sound speed or use water at 68F by default
 	try: vbg = config.get('measurement', 'c', mapper=float, default=1.4823)
-	except Exception as e: _throw('Optional c is invalid', e, 'measurement')
+	except Exception as e: _throw('Invalid optional c', e, 'measurement')
 
 	try:
 		# Pull a range of valid sound speeds for clipping
-		vclip = tuple(config.getlist(tsec, 'vclip',
-				mapper=float, default=(0., float('inf'))))
-		if len(vclip) != 2:
-			raise ValueError('Range must specify two elements')
+		vclip = config.getlist(tsec, 'vclip', mapper=float, default=None)
+		if vclip:
+			if len(vclip) != 2:
+				raise ValueError('Range must specify two elements')
+			if vclip[0] > vclip[1]:
+				raise ValueError('Minimum value must not exceed maximum')
+			vclip = tuple(vclip)
+
 	except Exception as e:
-		_throw('Optional vclip is invalid', e)
+		_throw('Invalid optional vclip', e)
 
-	try:
-		# Use a histogram to determine background sound speed when possible
-		vhist = config.getlist(tsec, 'vhist', mapper=float, default=None)
-		if vhist:
-			if len(vhist) != 3:
-				raise ValueError('Specify vhist as [min, max, nbins]')
-			# Make sure the bin count is an integer
-			vhist = tuple(vhist[:-1] + [int(vhist[-1]),])
+	try: lsmr_opts = config.get(tsec, 'lsmr', mapper=dict, default={ })
+	except Exception as e: _throw('Invalid optional lsmr', e)
 
-	except Exception as e: _throw('Optional vhist is invalid', e)
+	try: bimodal = config.get(tsec, 'bimodal', mapper=bool, default=True)
+	except Exception as e: _throw('Invalid optional bimodal', e)
 
-	try: outfile = config.get(tsec, 'outfile')
-	except Exception as e: _throw('Configuration must specify outfile', e)
+	try: pathfile = config.get(tsec, 'pathfile')
+	except Exception as e: _throw('Configuration must specify pathfile', e)
 
-	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
+	try: speedfile = config.get(tsec, 'speedfile')
+	except Exception as e: _throw('Configuration must specify speedfile', e)
 
-	MPI.COMM_WORLD.Barrier()
+	WORLD = MPI.COMM_WORLD
+	mpirank, mpisize = WORLD.rank, WORLD.size
+
+	WORLD.Barrier()
 
 	# Convert the triangle node maps to triangle objects
 	nodes, triangles = mesh['nodes'], mesh['triangles']
@@ -133,119 +142,150 @@ def tracerEngine(config):
 	# Only build the tree for a local share of triangles
 	otree.addleaves(xrange(mpirank, len(triangles), mpisize), inbox, True)
 
-	MPI.COMM_WORLD.Barrier()
+	WORLD.Barrier()
 
 	if not mpirank: print 'Combining distributed Octree'
 
-	# Replace the tree with a merging of leaves from all nodes
-	leaves = otree.getleaves()
-	otree = boxer.Octree(levels, rootbox)
-	for leaves in MPI.COMM_WORLD.allgather(leaves):
+	# Merge leaves from all othe rranks
+	for leaves in WORLD.allgather(otree.getleaves()):
 		otree.mergeleaves(leaves)
 
 	# Prune the tree and print some statistics
 	otree.prune()
 
-	MPI.COMM_WORLD.Barrier()
+	WORLD.Barrier()
 
-	if not mpirank: print 'Computing average speeds over propagation paths'
+	if not mpirank: print 'Reading and gathering arrival times'
 
-	# Compute the local share of average sound speeds
-	segs, spds = getspdpaths(timefiles, elements, vclip, mpirank, mpisize)
+	# Read local arrival times, eliminate out-of-bounds values
+	atimes = getatimes(timefiles, elements, vclip)
+	# Gather all arrival times on all ranks
+	atimes = dict(kp for atl in WORLD.allgather(atimes) for kp in atl.iteritems())
+	# Pull a local share of the arrival times, sorted
+	atimes = { k: atimes[k] for k in sorted(atimes)[mpirank::mpisize] }
 
-	MPI.COMM_WORLD.Barrier()
+	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)
 
-	if not mpirank:
-		print 'Approximate local share of paths is %d' % (len(spds),)
+	# Build the segment list for the local arrival times
+	segs = { }
+	for t, r in atimes:
+		if t != r:
+			segs[t,r] = boxer.Segment3D(elements[t], elements[r])
+			continue
+		# For backscatter, make segment length encompass volume
+		epos = elements[t]
+		segs[t,t] = boxer.Segment3D(epos, meshctr)
 
-	# Track "misses", when the exterior fraction is (almost) unity
-	misses = set()
-	# For hits, note interior and exterior fractions
-	hits = { }
+	WORLD.Barrier()
 
 	# Accumulate the total results for every segment
 	results = { }
 
-	for k, aspd in spds.iteritems():
-		# The segment associated with an average speed
-		s = segs[k]
+	# Find the portion of each path in the interior and exterior of the volume
+	for k, seg in segs.iteritems():
 		# Skip very small segments
-		if cutil.almosteq(s.length, 0.0, 1e-6): continue
+		if cutil.almosteq(seg.length, 0.0, 1e-6): continue
 
-		# A predicate to match box intersections with this segment
-		def bsect(b): return b.intersection(s)
-		# A predicate to match triangle intersections; cache results
+		# A predicate to match segment-box intersections
+		def bsect(b): return b.intersection(seg)
+
+		# For speed, cache segment-triangle intersections in predicate
 		trcache = { }
-		def lsect(i):
-			try: return trcache[i]
+		def tsect(i):
+			try:
+				return trcache[i]
 			except KeyError:
-				v = triangles[i].intersection(s)
+				v = triangles[i].intersection(seg)
 				trcache[i] = v
 				return v
 
 		# Find intersections between segment and surface
-		isects = otree.search(bsect, lsect)
+		isects = otree.search(bsect, tsect)
+
+		# For backscatter, exterior path is to first intersection and back
+		if k[0] == k[1]:
+			# Backscatter is nonsense if there is no intersection
+			if not len(isects): continue
+			# Record exterior path length
+			exl = 2.0 * min(v[0] for v in isects.itervalues())
+			results[k] = (exl, 0.0, atimes[k])
+			continue
 
 		# Sort the lengths and add endpoints to define all subsegments
-		ilens = sorted([0.] + [v[0] for v in isects.itervalues()] + [s.length])
+		ilens = sorted([0.] + [v[0] for v in isects.itervalues()] + [seg.length])
 
-		# Track average and (undefined) interior speeds and intersection lengths
-		results[k] = [aspd, float('nan')] + ilens
+		# Odd intersections count means segment starts or ends in interior
+		if len(ilens) % 2:
+			print ('WARNING: (t,r) segment %s intersects '
+					'volume an odd number of times' % (k,))
 
 		# Regions starting at odd indices are interior, at even are exterior
-		inlen = sum(v[1] - v[0] for v in izip(ilens[1::2], ilens[2::2]))
-		exlen = sum(v[1] - v[0] for v in izip(ilens[0::2], ilens[1::2]))
+		inl = sum(v[1] - v[0] for v in izip(ilens[1::2], ilens[2::2]))
+		exl = sum(v[1] - v[0] for v in izip(ilens[0::2], ilens[1::2]))
+		ttl = inl + exl
 
-		if not cutil.almosteq(inlen + exlen, s.length, 1e-6):
-			print ('WARNING: inferred length %0.5g for '
-				'segment %s disagrees with actual '
-				'length %0.5g' % (inlen + exlen, k, s.length))
+		if not cutil.almosteq(ttl, seg.length, 1e-6):
+			print ('WARNING: (t,r) segment %s inferred length %0.5g, '
+					'actual length %0.5g' % (ttl, k, seg.length))
 
-		# Compute the interior and exterior fractions
-		infrac = inlen / s.length
-		exfrac = exlen / s.length
+		results[k] = (exl, inl, atimes[k])
 
-		if cutil.almosteq(exfrac, 1.0, 1e-6): misses.add(k)
-		else: hits[k] = (infrac, exfrac)
-
-	MPI.COMM_WORLD.Barrier()
+	WORLD.Barrier()
 
 	if not mpirank: print 'Finished tracing segments'
 
-	if vhist:
-		# Count the total number of misses
-		nmiss = MPI.COMM_WORLD.allreduce(len(misses))
-		if nmiss:
-			# Find background speed for paths that miss the target
-			bspds = [spds[k] for k in misses
-					if vhist[0] <= spds[k] <= vhist[1]]
-			cts, bins = np.histogram(bspds, bins=vhist[-1], range=vhist[:2])
-			# Accumulate counts on root (returns None on other ranks)
-			cts = MPI.COMM_WORLD.reduce(cts)
-			if not mpirank:
-				# Find the mode and compute the midpoint of its bin
-				mdi = np.argmax(cts)
-				# Override background speed if count is positive
-				if cts[mdi] > 0:
-					vbg = 0.5 * (bins[mdi] + bins[mdi + 1])
-					print ('Inferred background speed '
-						'%0.3f (%d paths)' % (vbg, cts[mdi]))
-			# Make sure all ranks have the updated sound speed
-			vbg = MPI.COMM_WORLD.bcast(vbg)
+	# Accumulate all results on the root process
+	results = WORLD.gather(results)
 
-	for k, (infrac, exfrac) in hits.iteritems():
-		# Update the interior speed for hits
-		results[k][1] = (spds[k] - (exfrac * vbg)) / infrac
-
-	# Accumulate the on the root
-	results = MPI.COMM_WORLD.gather(results)
-
-	# Only the head node has remaining work
+	# Only the root has any work left
 	if mpirank: return
 
-	# Flatten the multiple dictionaries and save
-	results = dict(kp for l in results for kp in l.iteritems())
-	savez_keymat(outfile, results)
+	# Combine the gathered result dictionaries and save the output
+	results = { k: v for rs in results for k, v in rs.iteritems() }
+	savez_keymat(pathfile, results)
+
+	# Grab the keys to define a sort order
+	keys = sorted(results)
+
+	# Build the linear system to invert for speeds
+	if bimodal:
+		A = np.array([results[k][:2] for k in keys])
+	else:
+		# In a multi-medium model, build a sparse matrix
+		# Track the keys with interior speeds
+		ikeys = []
+		data = []
+		rowcol = []
+		for i, k in enumerate(keys):
+			exl, inl = results[k][:2]
+			# Exterior speed in the first column
+			rowcol.append((i, 0))
+			data.append(exl)
+
+			if abs(inl > 1e-6):
+				# Unique interior speed in its own column
+				ikeys.append(k)
+				rowcol.append((i, len(ikeys)))
+				data.append(inl)
+
+		A = csr_matrix((data, zip(*rowcol)))
+
+	b = np.array([results[k][2] for k in keys])
+
+	x, istop, itn = lsmr(A, b, **lsmr_opts)[:3]
+	if istop != 1: print 'LSMR terminated with istop', istop
+
+	# Invert the inverted speeds
+	x = tuple(1. / xv if abs(xv) > 1e-6 else 0.0 for xv in x)
+
+	if bimodal:
+		print 'Recovered exterior speed: %0.5g' % (x[0],)
+		print 'Recovered interior speed: %0.5g' % (x[1],)
+		np.savetxt(speedfile, x)
+	else:
+		savez_keymat(speedfile, { k: (x[0], v) for k, v in izip(ikeys,x[1:]) })
+
+	print 'LSMR iterations: %d' % (itn,)
 
 
 if __name__ == '__main__':
