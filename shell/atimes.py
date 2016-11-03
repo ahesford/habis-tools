@@ -23,18 +23,6 @@ def usage(progname):
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 
 
-def getkeys(obj):
-	'''
-	Return a key iterator if obj has an iterkeys() method, or else a key
-	list if obj has a keys() method, or else raise a TypeError.
-	'''
-	try: return obj.iterkeys()
-	except AttributeError:
-		try: return obj.keys()
-		except AttributeError:
-			raise TypeError('Object is not a map')
-
-
 def finddelays(nproc=1, *args, **kwargs):
 	'''
 	Distribute, among nproc processes, delay analysis for waveforms using
@@ -58,7 +46,7 @@ def finddelays(nproc=1, *args, **kwargs):
 
 	cachefile = kwargs.pop('cachefile', None)
 
-	# Try to read an existing pickled delay map
+	# Try to read an existing delay map
 	try: kwargs['delaycache'] = loadkeymat(cachefile)
 	except (KeyError, ValueError, IOError): pass
 
@@ -141,39 +129,37 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  habis.sigtools.Waveform.bandpass() that will filter each waveform
 	  prior to further processing.
 
-	* delaycache: A mapping from transmit-receive element pairs (t, r) to a
+	* delaycache: A map from transmit-receive element pairs (t, r) to a
 	  precomputed delay d. If a value exists for a given pair (t, r), the
 	  precomputed value will be used in favor of explicit computation.
 
-	* window: A dictionary containing exactly two of the keys 'start',
-	  'length' or 'end' that specify integer values corresponding to the
-	  start, length or end of a temporal window applied to each waveform
-	  before delay analysis. These keys are passed as the 'window' argument
-	  to habis.sigtools.Waveform.window().
+	* window: A map that defines the windowing of signals. Keys in the
+	  window map may be:
 
-	  Two additional keys may be included in the dictionary:
+	  - map: A map from transmit-receive pairs (j,i) to a (start, length)
+	    tuple that defines the window to apply to waveform (i,j) in the
+	    WaveformSet. The start and length should be specified in samples,
+	    with start relative to 0 f2c.
+
+	  - default: A map that contains exactly two of the keys 'start',
+	    'length' or 'end' describing window parameters (in samples) to
+	    apply to any waveform not identified explicitly in the above map.
+	    The map may also contain an optional 'relative' key with an
+	    associated value of either 'signal' or 'datawin'. If 'relative' is
+	    not specified, the window start and end are relative to 0 f2c, so
+	    the applied window is actually
+
+	      start -> start - datafile.f2c
+	      end   -> end - datafile.f2c
+
+	    If 'relative' is specified, the 'start' and 'end' parameters of the
+	    window are not adjusted and the value of the 'relative' key is
+	    passed as the 'relative' keyword argument to Waveform.window.
 
 	  - tails: A value passed to the 'tails' argument of the method
 	    Waveform.window(), and is either 1) an integer half-width of a Hann
 	    window applied to each side, or 2) a list consisting of the
 	    concatenation of the start-side and end-side window profiles.
-
-	  - relative: A string, passed as the 'relative' argument to
-	    Waveform.window(), that is either 'signal' or 'datawin'.
-	    Without specifying 'relative', the window start and end are always
-	    specified relative to 0 f2c, and the the applied window becomes:
-
-	      start -> start - datafile.f2c
-	      end   -> end - datafile.f2c
-
-	    If 'relative' is specified, the acquisition ('signal') window for
-	    each signal starts at datafile.f2c and has length datafile.nsamp.
-	    Thus, in either 'relative' mode, the effect is to call
-
-	    	datafile[i,j].window(win, **winargs),
-
-	    Where win is the 'window' dictionary with additional keys removed
-	    and winargs is a dictionary of only the additional keys.
 
 	* minsnr: A sequence (mindb, noisewin) used to define the minimum
 	  acceptable SNR in dB (mindb) by comparing the peak signal amplitude
@@ -182,26 +168,28 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  optional window. Delays will not be calculated for signals fail to
 	  exceed the minimum threshold.
 
-	* peaks: A dictionary of kwargs to be passed to Waveform.isolatepeak
-	  for every waveform. An additional 'nearmap' key may be included to
-	  specify a mapping between element indices and expected round-trip
-	  delays (relative to zero f2c). The waveform (i,j) for a delay entry
-	  (j,i) will be windowed about the peak closest to a delay given by
+	* peaks: A kwargs map to be passed to Waveform.isolatepeak for every
+	  waveform. The map must not contain the 'index' keyword. Two
+	  additional keys may be provided:
 
-	  	nearmap[j,i] - datafile.f2c
+	  - nearmap: A map from transmit-receive indices (j,i) to expected
+	    round-trip delays (in samples, relative to 0 f2c). A waveform (i,j)
+	    will use the value (nearmap[j,i] - datafile.f2c), if it exists, as
+	    the 'index' argument to Waveform.isolatepeak.
 
-	  or, if (j,i) is not a valid key,
+	  - neardefault: A scalar default value to use as an expected
+	    round-trip delay (in samples, relative to 0 f2c). Thus, if the
+	    value nearmap[j,i] does not exist for some waveform (i,j) in the
+	    WaveformSet, the value (nearmap[j,i] - datafile.f2c) will be used
+	    as the 'index' argument to Waveform.isolatepeak.
 
-	    0.5 * (nearmap[i,i] + nearmap[j,j]) - datafile.f2c
-
-	  to a width twice the peak width, with no tails. If the nearmap is not
-	  defined for either element (or at all), the nearmap value will be
-	  "None" to isolate the dominant peak.
+	  If no nearmap or neardefault value can be identified, the index will
+	  be 'None' to isolate the dominant peak.
 
 	  *** NOTE: peak windowing is done after overall windowing and after
 	  possible exclusion by minsnr. ***
 
-	* groupmap: A mapping from global element indices to (local index,
+	* groupmap: A map from global element indices to (local index,
 	  group index) tuples that will be assigned to the "groupmap" property
 	  of the loaded WaveformSet. As part of the property assignment, the
 	  groupmap is checked for consistency with receive-channel records in
@@ -209,7 +197,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  required for) specification of transmit channels that are not present
 	  in the WaveformSet as receive-channel records.
 
-	* elmap: A mapping or a list of mappings from desired receive element
+	* elmap: A map, or a list of maps, from desired receive element
 	  indices to one or more transmit indices for which arrival times
 	  should be computed. If this parameter is a list of maps, the actual
 	  map will be the union of all maps. Any map can also be specified by
@@ -260,10 +248,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 				else:
 					raise ValueError("Invalid magic element map specified '%s'" % elm)
 
-			try:
-				keys = getkeys(elm)
-			except TypeError:
-				raise TypeError('Invalid element map specifier at index %d' % en)
+			try: keys = elm.iterkeys()
+			except TypeError: raise TypeError('Invalid element map (index %d)' % en)
 
 			for k in keys:
 				# v may be a collection or a scalar
@@ -275,10 +261,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		elmap = dict(dmap)
 		del dmap
 
-	try:
-		keys = getkeys(elmap)
-	except TypeError:
-		raise TypeError('Invalid element map specification')
+	try: keys = elmap.iterkeys()
+	except TypeError: raise TypeError('Invalid element map')
 
 	# Flatten and sort the element map into a sorted list for striding
 	ellst = [ ]
@@ -308,31 +292,37 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Unpack minimum SNR requirements
 	minsnr, noisewin = kwargs.pop('minsnr', (None, None))
 
-	try:
-		# Pull a copy of the windowing configuration
-		window = dict(kwargs.pop('window'))
-	except KeyError:
-		window = None
-	else:
-		winargs = { }
-		try: winargs = { 'tails': window.pop('tails') }
-		except KeyError: pass
-		try: winargs['relative'] = window.pop('relative')
-		except KeyError: pass
+	# Pull a copy of the windowing configuration
+	window = dict(kwargs.pop('window', ()))
 
-		if winargs.get('relative', None) is None:
-			# For absolute windows, compensate start and end for f2c
-			try: window['start'] -= data.f2c
+	# Make sure a per-channel map and empty default window exist
+	window.setdefault('map', { })
+	window.setdefault('default', { })
+
+	# Determine the relative mode in the default window
+	if window['default']:
+		relative = window['default'].pop('relative', None)
+		if not relative:
+			# Compensate start and end for f2c in absolute windows
+			try: v = max(window['default']['start'] - data.f2c, 0)
 			except KeyError: pass
-			try: window['end'] -= data.f2c
+			else: window['default']['start'] = v
+
+			try: v = max(window['default']['end'] - data.f2c, 0)
 			except KeyError: pass
+			else: window['default']['end'] = v
+		else:
+			# Move 'relative' argument to top-level map
+			window['relative'] = relative
 
 	bandpass = kwargs.pop('bandpass', None)
 
 	# Pull the optional peak search criteria
-	peaks = kwargs.pop('peaks', None)
-	if peaks is not None:
+	peaks = dict(kwargs.pop('peaks', ()))
+
+	if peaks:
 		nearmap = peaks.pop('nearmap', { })
+		neardefault = peaks.pop('neardefault', None)
 
 	# Determine whether to allow negative correlations
 	negcorr = kwargs.pop('negcorr', False)
@@ -359,12 +349,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			continue
 		except KeyError: pass
 
-		try:
-			# Use a cached receive-channel block if possible
-			if hdr.idx != rid: raise ValueError('Force record load')
-		except (ValueError, TypeError, AttributeError):
+		if not hdr or hdr.idx != rid:
 			# Pull out the desired transmit rows for this receive channel
-			try: 
+			try:
 				hdr, wforms = data.getrecord(rid, tid=elmap[rid],
 						dtype=np.float32, maptids=True)
 			except KeyError:
@@ -375,23 +362,41 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		# Grab the signal as a Waveform
 		sig = Waveform(data.nsamp, wforms[tmap[tid]], hdr.win.start)
 
-		if bandpass is not None:
+		if bandpass:
 			# Remove DC bias to reduce Gibbs phenomenon
 			sig.debias()
 			# Bandpass and crop to original data window
 			sig = sig.bandpass(**bandpass).window(sig.datawin)
 
-		if window is not None:
-			# Apply a desired restricted window
-			sig = sig.window(window, **winargs)
-
 		if minsnr is not None and noisewin is not None:
 			if sig.snr(noisewin) < minsnr: continue
 
-		if peaks is not None:
+		if window:
+			wargs = { }
+			try: wargs['tails'] = window['tails']
+			except KeyError: pass
+
+			try:
+				# Check for mapped value
+				swin = window['map'][tid,rid]
+			except KeyError:
+				# Look for a default value
+				swin = window.get('default', None)
+				try: wargs['relative'] = window['relative']
+				except KeyError: pass
+			else:
+				# Compensate data f2c in mapped value
+				swin = (swin[0] - data.f2c, swin[1])
+
+			# Apply a desired window
+			if swin: sig = sig.window(swin, **wargs)
+
+		if peaks:
 			# Isolate the peak nearest the expected location (if one exists)
 			try: exd = nearmap[tid,rid] - data.f2c
-			except KeyError: exd = None
+			except KeyError:
+				if neardefault is None: exd = None
+				else: exd = neardefault - data.f2c
 			try: sig = sig.isolatepeak(exd, **peaks)
 			except ValueError: continue
 
@@ -571,14 +576,35 @@ def atimesEngine(config):
 		# Adjust delay time scales
 		guesses = { k: (v - t0) / dt for k, v in guesses.iteritems() }
 
+	# Adjust the delay time scales for the neardefault, if provided
+	try: v = kwargs['peaks']['neardefault']
+	except KeyError: pass
+	else: kwargs['peaks']['neardefault'] = (v - t0) / dt
+
+	try:
+		# Load the window map, if provided
+		winmap = kwargs['window'].pop('map')
+		winmap = loadkeymat(winmap, nkeys=2, scalar=False)
+	except IOError as e:
+		winmap = None
+		print >> sys.stderr, 'WARNING - Ignoring window map:', e
+	except (KeyError, TypeError, AttributeError):
+		winmap = None
+
 	times = OrderedDict()
 
 	# Process each target in turn
 	for i, (target, datafiles) in enumerate(targetfiles.iteritems()):
-		if guesses is not None and 'peaks' in kwargs:
-			# Set the nearmap for this target to the appropriate column
+		if guesses:
+			# Pull the column of the nearmap for this target
 			nearmap = { k: v[i] for k, v in guesses.iteritems() }
 			kwargs['peaks']['nearmap'] = nearmap
+
+		if winmap:
+			# Pull the columns of the window map for this target
+			lwmap = { k: v[2*i:2*(i+1)] for k, v in winmap.iteritems() }
+			kwargs['window']['map'] = lwmap
+
 
 		if cachedelay:
 			delayfiles = buildpaths(datafiles, extension='delays.npz')
