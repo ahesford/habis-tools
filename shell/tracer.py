@@ -68,7 +68,7 @@ def tracerEngine(config):
 	tsec = 'tracer'
 
 	def _throw(msg, e, sec=tsec):
-		raise HabisConfigError.fromException(err + ' in [%s]' % (sec,), e)
+		raise HabisConfigError.fromException(msg + ' in [%s]' % (sec,), e)
 
 	# Find all arrival-time maps visible to this node
 	try: timefiles = matchfiles(config.getlist(tsec, 'timefile'))
