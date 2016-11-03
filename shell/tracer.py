@@ -12,7 +12,6 @@ from scipy.sparse.linalg import lsmr
 import hashlib
 
 from itertools import izip
-from collections import defaultdict
 
 from mpi4py import MPI
 
@@ -20,6 +19,23 @@ from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadmatlist as ldmats, loadkeymat as ldkmat, savez_keymat
 
 from pycwp import boxer, cutil
+
+
+def makedtypes(nidx=2, nvals=3):
+	'''
+	Create and return a Numpy dtype and corresponding MPI structure data
+	type consists of nidx 64-bit long integers followed by nvals 64-bit
+	floats. The Numpy type is the first return value.
+
+	The dtype fields are anonymous (i.e., they are named 'f0', 'f1', etc.).
+	'''
+	# Create data types to store and share segment intersection results
+	dt = np.dtype(','.join(['<i8']*nidx + ['<f8']*nvals))
+	offsets = [dt.fields[n][1] for n in dt.names]
+	mtypes = [MPI.LONG]*nidx + [MPI.DOUBLE]*nvals
+	mpt = MPI.Datatype.Create_struct([1]*len(mtypes), offsets, mtypes)
+	mpt.Commit()
+	return dt, mpt
 
 
 def sha512(fname, msize=10):
@@ -39,6 +55,62 @@ def sha512(fname, msize=10):
 			cs.update(block)
 
 	return cs.hexdigest()
+
+
+def gatherleaves(otree, comm=None):
+	'''
+	Gather on MPI communicator comm (or MPI.COMM_WORLD if comm is None) the
+	leaves from Octree objects on all ranks and merge into the Octree
+	otree. The leaves of otree will be sent by this rank.
+
+	Nothing is returned.
+	'''
+	if comm is None: comm = MPI.COMM_WORLD
+	for leaves in comm.allgather(otree.getleaves()):
+		otree.mergeleaves(leaves)
+
+
+def gathersegments(segs, mptype, comm=None, root=0):
+	'''
+	Gather, on the rank such that comm.Get_rank() == root for the
+	communicator comm (MPI.COMM_WORLD if comm is None), all records in the
+	rank-1 structured Numpy array segs with a Numpy dtype compatible with
+	the MPI data type mptype.
+	'''
+	if comm is None: comm = MPI.COMM_WORLD
+	rank = comm.Get_rank()
+
+	# Gather the count from each rank
+	nsegs = len(segs)
+	counts = comm.gather(nsegs)
+
+	# Allocate space on the root for all records; other ranks don't care
+	if rank == root:
+		combined = np.empty((sum(counts),), dtype=segs.dtype)
+		# Compute the offsets for data received from each rank
+		displs = [0]
+		for ct in counts[:-1]: displs.append(displs[-1] + ct)
+	else:
+		combined, displs = None, None
+
+	comm.Gatherv([segs, nsegs, mptype], [combined, counts, displs, mptype])
+	return combined
+
+
+def makerankmap(filemap, comm=None):
+	'''
+	Given filemap, a rank-local map from SHA-512 sums to names of files
+	with those sums, gather the maps on all ranks in comm (MPI.COMM_WORLD
+	if comm is None) and produce a composite map from SHA-512 sums to a
+	list of ranks for which the sum is a key in its filemap.
+	'''
+	rankmap = { }
+	if comm is None: comm = MPI.COMM_WORLD
+	for rank, csums in enumerate(comm.allgather(filemap.keys())):
+		for cs in csums:
+			try: rankmap[cs].append(rank)
+			except KeyError: rankmap[cs] = [rank]
+	return rankmap
 
 
 def usage(progname=None, fatal=True):
@@ -143,8 +215,8 @@ def tracerEngine(config):
 	try: bimodal = config.get(tsec, 'bimodal', mapper=bool, default=True)
 	except Exception as e: _throw('Invalid optional bimodal', e)
 
-	try: pathfile = config.get(tsec, 'pathfile')
-	except Exception as e: _throw('Configuration must specify pathfile', e)
+	try: pathfile = config.get(tsec, 'pathfile', default=None)
+	except Exception as e: _throw('Invalid optional pathfile', e)
 
 	try: speedfile = config.get(tsec, 'speedfile')
 	except Exception as e: _throw('Configuration must specify speedfile', e)
@@ -177,34 +249,26 @@ def tracerEngine(config):
 
 	if not mpirank: print 'Combining distributed Octree'
 
-	# Merge leaves from all othe rranks
-	for leaves in WORLD.allgather(otree.getleaves()):
-		otree.mergeleaves(leaves)
-
-	# Prune the tree and print some statistics
+	# Merge trees and prune
+	gatherleaves(otree)
 	otree.prune()
 
 	WORLD.Barrier()
 
 	if not mpirank: print 'Reading and gathering arrival times'
 
-	# Map SHA-512 sums to file names
+	# Map SHA-512 sums to file names and to lists of nodes with access each file
 	timefiles = { sha512(t): t for t in timefiles }
-
-	# Map SHA-512 sums to a list of nodes with access to the file
-	filemaps = defaultdict(list)
-	for i, csums in enumerate(WORLD.allgather(timefiles.keys())):
-		for cs in csums: filemaps[cs].append(i)
+	rankmap = makerankmap(timefiles)
 
 	# Collect the arrival times from local shares of all local maps
 	atimes = { }
 	for cs, tfile in timefiles.iteritems():
 		# Find the number of ranks sharing this file and index into it
 		try:
-			stride = len(filemaps[cs])
-			if not stride: raise ValueError
-			start = filemaps[cs].index(mpirank)
-		except ValueError:
+			stride = len(rankmap[cs])
+			start = rankmap[cs].index(mpirank)
+		except (KeyError, ValueError):
 			raise ValueError('Unable to determine local share of file' % (tfile,))
 		atimes.update(getatimes(tfile, elements, vclip, start, stride))
 
@@ -223,7 +287,9 @@ def tracerEngine(config):
 	WORLD.Barrier()
 
 	# Accumulate the total results for every segment
-	results = { }
+	dt, mpt = makedtypes(2, 3)
+	results = np.empty((len(segs),), dtype=dt)
+	nres = 0
 
 	# Find the portion of each path in the interior and exterior of the volume
 	for k, seg in segs.iteritems():
@@ -252,7 +318,8 @@ def tracerEngine(config):
 			if not len(isects): continue
 			# Record exterior path length
 			exl = 2.0 * min(v[0] for v in isects.itervalues())
-			results[k] = (exl, 0.0, atimes[k])
+			results[nres] = k + (exl, 0.0, atimes[k])
+			nres += 1
 			continue
 
 		# Sort the lengths and add endpoints to define all subsegments
@@ -272,52 +339,57 @@ def tracerEngine(config):
 			print ('WARNING: (t,r) segment %s inferred length %0.5g, '
 					'actual length %0.5g' % (ttl, k, seg.length))
 
-		results[k] = (exl, inl, atimes[k])
+		results[nres] = k + (exl, inl, atimes[k])
+		nres += 1
 
 	WORLD.Barrier()
 
 	if not mpirank: print 'Finished tracing segments'
 
-	# Accumulate all results on the root process
-	results = WORLD.gather(results)
+	# Accumulate all results on the root
+	results = gathersegments(results[:nres], mpt)
+	# No need for the MPI type anymore
+	mpt.Free()
 
 	# Only the root has any work left
 	if mpirank: return
 
-	# Combine the gathered result dictionaries and save the output
-	results = { k: v for rs in results for k, v in rs.iteritems() }
-	savez_keymat(pathfile, results)
+	print 'Building linear system to determine sound speeds'
 
-	# Grab the keys to define a sort order
-	keys = sorted(results)
+	# Keep field names available for convenient access
+	fields = list(dt.names)
+	keyfld = fields[:2]
+	matfld = fields[2:-1]
+	rhsfld = fields[-1]
 
 	# Build the linear system to invert for speeds
 	if bimodal:
-		A = np.array([results[k][:2] for k in keys])
+		# Matrix is composed of records after keys and before RHS
+		if not all(dt[n] == 'float64' for n in matfld):
+			raise TypeError('Unexpected data type in result records')
+		A = results[matfld].view(('float64', 2))
 	else:
 		# In a multi-medium model, build a sparse matrix
 		# Track the keys with interior speeds
 		ikeys = []
 		data = []
 		rowcol = []
-		for i, k in enumerate(keys):
-			exl, inl = results[k][:2]
+		for i, (t, r, exl, inl) in enumerate(results[keyfld + matfld]):
 			# Exterior speed in the first column
 			rowcol.append((i, 0))
 			data.append(exl)
 
 			if abs(inl > 1e-6):
 				# Unique interior speed in its own column
-				ikeys.append(k)
+				ikeys.append((t,r))
 				rowcol.append((i, len(ikeys)))
 				data.append(inl)
 
 		A = csr_matrix((data, zip(*rowcol)))
 
-	b = np.array([results[k][2] for k in keys])
-
-	x, istop, itn = lsmr(A, b, **lsmr_opts)[:3]
+	x, istop, itn = lsmr(A, results[rhsfld], **lsmr_opts)[:3]
 	if istop != 1: print 'LSMR terminated with istop', istop
+	print 'LSMR iterations: %d' % (itn,)
 
 	# Invert the inverted speeds
 	x = tuple(1. / xv if abs(xv) > 1e-6 else 0.0 for xv in x)
@@ -327,9 +399,14 @@ def tracerEngine(config):
 		print 'Recovered interior speed: %0.5g' % (x[1],)
 		np.savetxt(speedfile, x)
 	else:
-		savez_keymat(speedfile, { k: (x[0], v) for k, v in izip(ikeys, x[1:]) })
+		speeds = { k: (x[0], v) for k, v in izip(ikeys, x[1:]) }
+		savez_keymat(speedfile, speeds, compressed=True)
 
-	print 'LSMR iterations: %d' % (itn,)
+	# Combine the gathered result dictionaries and save the output
+	if pathfile:
+		print 'Saving tracing results'
+		results = { (t, r): (x, i, a) for t, r, x, i, a in results }
+		savez_keymat(pathfile, results, compressed=True)
 
 
 if __name__ == '__main__':
