@@ -390,15 +390,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 		if peaks is not None:
 			# Isolate the peak nearest the expected location (if one exists)
-			try:
-				exd = nearmap[tid,rid] - data.f2c
-			except KeyError:
-				try: 
-					ntt = nearmap[tid,tid]
-					nrr = nearmap[rid,rid]
-					exd = 0.5 * (ntt + nrr) - data.f2c
-				except KeyError:
-					exd = None
+			try: exd = nearmap[tid,rid] - data.f2c
+			except KeyError: exd = None
 			try: sig = sig.isolatepeak(exd, **peaks)
 			except ValueError: continue
 

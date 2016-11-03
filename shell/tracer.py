@@ -9,8 +9,10 @@ from numpy.linalg import norm
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsmr
 
+import hashlib
 
 from itertools import izip
+from collections import defaultdict
 
 from mpi4py import MPI
 
@@ -20,27 +22,53 @@ from habis.formats import loadmatlist as ldmats, loadkeymat as ldkmat, savez_key
 from pycwp import boxer, cutil
 
 
+def sha512(fname, msize=10):
+	'''
+	For the named file (which should not be open), compute the SHA-512 sum,
+	reading in chunks of msize megabytes. The return value is the output of
+	hexdigest() for the SHA-512 Hash object.
+	'''
+	bsize = int(msize * 2**20)
+	if bsize < 1: raise ValueError('Specified chunk size too small')
+
+	cs = hashlib.sha512()
+	with open(fname, 'rb') as f:
+		while True:
+			block = f.read(bsize)
+			if not block: break
+			cs.update(block)
+
+	return cs.hexdigest()
+
+
 def usage(progname=None, fatal=True):
 	if not progname: progname = os.path.basename(sys.argv[0])
 	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
 	sys.exit(int(fatal))
 
 
-def getatimes(atfiles, elements, vclip=None):
+def getatimes(atfile, elements, vclip=None, start=0, stride=1):
 	'''
-	Read and unify the arrival-time maps in the iterable atfiles, which
-	provides file names of 2-key maps. Filter the map, atimes, to include
-	only keys such that each index is a key in the mapping elements from
-	indices to element locations, and the average speed (the propagation
+	Read the 2-key arrival-time map with name atfile and filter the map to
+	include only keys such that each index is a key in the mapping elements
+	from indices to element locations, and the average speed (the propagation
 	path length, computed from element locations, divided by the arrival
 	time) falls between vclip[0] and vclip[1].
 
 	Backscatter waveforms are included in the map but will not be filtered
 	by vclip because the average sound speed is undefined for backscatter.
+
+	Only every stride-th *valid* record, starting with the start-th record,
+	is retained.
 	'''
-	# Load all arrival-time maps and eliminate times not of interest
+	if not 0 <= start < stride:
+		raise ValueError('Index start must be at least zero and less than stride')
+
+	# Load the map, eliminate invalid elemenets, and keep the right portion
 	atimes = { }
-	for (t, r), v in ldmats(atfiles, nkeys=2).iteritems():
+	idx = 0
+
+	for (t, r), v in ldkmat(atfile, nkeys=2).iteritems():
 		try: elt, elr = elements[t], elements[r]
 		except KeyError: continue
 
@@ -48,7 +76,10 @@ def getatimes(atfiles, elements, vclip=None):
 			aspd = norm(elt - elr) / v
 			if aspd < vclip[0] or aspd > vclip[1]: continue
 
-		atimes[t,r] = v
+		# Keep every stride-th valid record
+		if idx % stride == start: atimes[t,r] = v
+		# Increment the valid record count
+		idx += 1
 
 	return atimes
 
@@ -157,12 +188,25 @@ def tracerEngine(config):
 
 	if not mpirank: print 'Reading and gathering arrival times'
 
-	# Read local arrival times, eliminate out-of-bounds values
-	atimes = getatimes(timefiles, elements, vclip)
-	# Gather all arrival times on all ranks
-	atimes = dict(kp for atl in WORLD.allgather(atimes) for kp in atl.iteritems())
-	# Pull a local share of the arrival times, sorted
-	atimes = { k: atimes[k] for k in sorted(atimes)[mpirank::mpisize] }
+	# Map SHA-512 sums to file names
+	timefiles = { sha512(t): t for t in timefiles }
+
+	# Map SHA-512 sums to a list of nodes with access to the file
+	filemaps = defaultdict(list)
+	for i, csums in enumerate(WORLD.allgather(timefiles.keys())):
+		for cs in csums: filemaps[cs].append(i)
+
+	# Collect the arrival times from local shares of all local maps
+	atimes = { }
+	for cs, tfile in timefiles.iteritems():
+		# Find the number of ranks sharing this file and index into it
+		try:
+			stride = len(filemaps[cs])
+			if not stride: raise ValueError
+			start = filemaps[cs].index(mpirank)
+		except ValueError:
+			raise ValueError('Unable to determine local share of file' % (tfile,))
+		atimes.update(getatimes(tfile, elements, vclip, start, stride))
 
 	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)
 
@@ -283,7 +327,7 @@ def tracerEngine(config):
 		print 'Recovered interior speed: %0.5g' % (x[1],)
 		np.savetxt(speedfile, x)
 	else:
-		savez_keymat(speedfile, { k: (x[0], v) for k, v in izip(ikeys,x[1:]) })
+		savez_keymat(speedfile, { k: (x[0], v) for k, v in izip(ikeys, x[1:]) })
 
 	print 'LSMR iterations: %d' % (itn,)
 
