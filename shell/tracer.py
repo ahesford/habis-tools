@@ -221,6 +221,9 @@ def tracerEngine(config):
 	try: speedfile = config.get(tsec, 'speedfile')
 	except Exception as e: _throw('Configuration must specify speedfile', e)
 
+	try: epsilon = config.get(tsec, 'epsilon', default=1e-3)
+	except Exception as e: _throw('Invalid optional epsilon', e)
+
 	WORLD = MPI.COMM_WORLD
 	mpirank, mpisize = WORLD.rank, WORLD.size
 
@@ -294,7 +297,7 @@ def tracerEngine(config):
 	# Find the portion of each path in the interior and exterior of the volume
 	for k, seg in segs.iteritems():
 		# Skip very small segments
-		if cutil.almosteq(seg.length, 0.0, 1e-6): continue
+		if cutil.almosteq(seg.length, 0.0, epsilon): continue
 
 		# A predicate to match segment-box intersections
 		def bsect(b): return b.intersection(seg)
@@ -312,34 +315,49 @@ def tracerEngine(config):
 		# Find intersections between segment and surface
 		isects = otree.search(bsect, tsect)
 
-		# For backscatter, exterior path is to first intersection and back
 		if k[0] == k[1]:
-			# Backscatter is nonsense if there is no intersection
+			# Backscatter: nonsense if there is no surface intersection
 			if not len(isects): continue
-			# Record exterior path length
+			# Exterior path is to first hit and back, no interior
 			exl = 2.0 * min(v[0] for v in isects.itervalues())
-			results[nres] = k + (exl, 0.0, atimes[k])
-			nres += 1
-			continue
+			inl = 0.0
+		else:
+			# Through transmissions: add endpoints to define all regions
+			ilens = sorted([0., seg.length] +
+					[v[0] for v in isects.itervalues()])
 
-		# Sort the lengths and add endpoints to define all subsegments
-		ilens = sorted([0.] + [v[0] for v in isects.itervalues()] + [seg.length])
+			# Odd count: segment starts or ends in interior
+			if len(ilens) % 2:
+				print ('WARNING: (t,r) segment %s intersects '
+						'volume an odd number of times' % (k,))
 
-		# Odd intersections count means segment starts or ends in interior
-		if len(ilens) % 2:
-			print ('WARNING: (t,r) segment %s intersects '
-					'volume an odd number of times' % (k,))
+			# Interior regions start at odd indices, exterior on evens
+			inl = sum(v[1] - v[0] for v in izip(ilens[1::2], ilens[2::2]))
+			exl = sum(v[1] - v[0] for v in izip(ilens[0::2], ilens[1::2]))
 
-		# Regions starting at odd indices are interior, at even are exterior
-		inl = sum(v[1] - v[0] for v in izip(ilens[1::2], ilens[2::2]))
-		exl = sum(v[1] - v[0] for v in izip(ilens[0::2], ilens[1::2]))
-		ttl = inl + exl
+			# Check total length against segment length
+			if not cutil.almosteq(inl + exl, seg.length, epsilon):
+				print ('WARNING: (t,r) segment %s inferred '
+					'and actual lengths differ: '
+					'%0.5g != %0.5g' % (ttl, k, seg.length))
 
-		if not cutil.almosteq(ttl, seg.length, 1e-6):
-			print ('WARNING: (t,r) segment %s inferred length %0.5g, '
-					'actual length %0.5g' % (ttl, k, seg.length))
+		# Capture the arrival time for this segment
+		atime = atimes[k]
 
-		results[nres] = k + (exl, inl, atimes[k])
+		# Check speeds for sanity, if limits have been specified
+		if vclip:
+			if abs(inl) <= epsilon * abs(exl):
+				# Propagation is all "exterior"
+				vx = exl / atime
+				if not vclip[0] <= vx <= vclip[1]: continue
+			else:
+				# Assume exterior speed is nominal value
+				tex = exl / vbg
+				if cutil.almosteq(atime, tex, epsilon): continue
+				vi = inl / (atime - tex)
+				if not vclip[0] <= vi <= vclip[1]: continue
+
+		results[nres] = k + (exl, inl, atime)
 		nres += 1
 
 	WORLD.Barrier()
@@ -379,11 +397,13 @@ def tracerEngine(config):
 			rowcol.append((i, 0))
 			data.append(exl)
 
-			if abs(inl > 1e-6):
-				# Unique interior speed in its own column
-				ikeys.append((t,r))
-				rowcol.append((i, len(ikeys)))
-				data.append(inl)
+			# Skip unique interior speed for tiny interior portions
+			if abs(inl) <= epsilon: continue
+
+			# Unique interior speed in its own column
+			ikeys.append((t,r))
+			rowcol.append((i, len(ikeys)))
+			data.append(inl)
 
 		A = csr_matrix((data, zip(*rowcol)))
 
@@ -392,7 +412,7 @@ def tracerEngine(config):
 	print 'LSMR iterations: %d' % (itn,)
 
 	# Invert the inverted speeds
-	x = tuple(1. / xv if abs(xv) > 1e-6 else 0.0 for xv in x)
+	x = tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
 
 	if bimodal:
 		print 'Recovered exterior speed: %0.5g' % (x[0],)
