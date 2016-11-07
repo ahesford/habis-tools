@@ -6,7 +6,7 @@
 import os, sys, numpy as np
 from numpy.linalg import norm
 
-from scipy.sparse import csr_matrix
+from scipy.sparse import csc_matrix
 from scipy.sparse.linalg import lsmr
 
 import hashlib
@@ -215,6 +215,9 @@ def tracerEngine(config):
 	try: bimodal = config.get(tsec, 'bimodal', mapper=bool, default=True)
 	except Exception as e: _throw('Invalid optional bimodal', e)
 
+	try: fixbg = config.get(tsec, 'fixbg', mapper=bool, default=False)
+	except Exception as e: _throw('Invalid optional fixbg', e)
+
 	try: pathfile = config.get(tsec, 'pathfile', default=None)
 	except Exception as e: _throw('Invalid optional pathfile', e)
 
@@ -341,6 +344,9 @@ def tracerEngine(config):
 					'and actual lengths differ: '
 					'%0.5g != %0.5g' % (ttl, k, seg.length))
 
+		# In fixed-exterior mode, ignore all-exterior segments
+		if fixbg and abs(inl) <= epsilon * abs(exl): continue
+
 		# Capture the arrival time for this segment
 		atime = atimes[k]
 
@@ -405,14 +411,22 @@ def tracerEngine(config):
 			rowcol.append((i, len(ikeys)))
 			data.append(inl)
 
-		A = csr_matrix((data, zip(*rowcol)))
+		A = csc_matrix((data, zip(*rowcol)))
 
-	x, istop, itn = lsmr(A, results[rhsfld], **lsmr_opts)[:3]
+	if fixbg:
+		# If the exterior speed is fixed, subtract contribution to RHS
+		rhs = results[rhsfld] - A[:,0] / vbg
+		# Solve for remaining unknowns
+		x, istop, itn = lsmr(A[:,1:], rhs, **lsmr_opts)[:3]
+		# Invert components and prepend exterior speed
+		x = (vbg,) + tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
+	else:
+		x, istop, itn = lsmr(A, results[rhsfld], **lsmr_opts)[:3]
+		# Invert the components of the solution if possible
+		x = tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
+
 	if istop != 1: print 'LSMR terminated with istop', istop
 	print 'LSMR iterations: %d' % (itn,)
-
-	# Invert the inverted speeds
-	x = tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
 
 	if bimodal:
 		print 'Recovered exterior speed: %0.5g' % (x[0],)
