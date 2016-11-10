@@ -6,8 +6,7 @@
 import os, sys, numpy as np
 from numpy.linalg import norm
 
-from scipy.sparse import csc_matrix
-from scipy.sparse.linalg import lsmr
+from scipy.sparse.linalg import lsmr, LinearOperator
 
 import hashlib
 
@@ -21,16 +20,23 @@ from habis.formats import loadmatlist as ldmats, loadkeymat as ldkmat, savez_key
 from pycwp import boxer, cutil
 
 
-def makedtypes(nidx=2, nvals=3):
+def makedtypes(nidx=2, nvals=3, names=None):
 	'''
 	Create and return a Numpy dtype and corresponding MPI structure data
 	type consists of nidx 64-bit long integers followed by nvals 64-bit
-	floats. The Numpy type is the first return value.
+	floats. The Numpy dtype is the first return value.
 
-	The dtype fields are anonymous (i.e., they are named 'f0', 'f1', etc.).
+	If names is provided, it must be a string of length (nidx + nvals), or
+	a sequence of (nidx + nvals) strings, that will be used to name the
+	fields of the Numpy dtype; if a single string is provided, the fields
+	will be given names corresponding to the characters within.
+
+	If names is not provided, the dtype fields will be anonymous (i.e.,
+	they will be named 'f0', 'f1', etc.).
 	'''
 	# Create data types to store and share segment intersection results
 	dt = np.dtype(','.join(['<i8']*nidx + ['<f8']*nvals))
+	if names: dt.names = names
 	offsets = [dt.fields[n][1] for n in dt.names]
 	mtypes = [MPI.LONG]*nidx + [MPI.DOUBLE]*nvals
 	mpt = MPI.Datatype.Create_struct([1]*len(mtypes), offsets, mtypes)
@@ -218,11 +224,11 @@ def tracerEngine(config):
 	try: fixbg = config.get(tsec, 'fixbg', mapper=bool, default=False)
 	except Exception as e: _throw('Invalid optional fixbg', e)
 
-	try: pathfile = config.get(tsec, 'pathfile', default=None)
-	except Exception as e: _throw('Invalid optional pathfile', e)
+	try: pathsave = config.get(tsec, 'pathsave', mapper=bool, default=False)
+	except Exception as e: _throw('Invalid optional pathsave', e)
 
-	try: speedfile = config.get(tsec, 'speedfile')
-	except Exception as e: _throw('Configuration must specify speedfile', e)
+	try: output = config.get(tsec, 'output')
+	except Exception as e: _throw('Configuration must specify output', e)
 
 	try: epsilon = config.get(tsec, 'epsilon', default=1e-3)
 	except Exception as e: _throw('Invalid optional epsilon', e)
@@ -293,7 +299,7 @@ def tracerEngine(config):
 	WORLD.Barrier()
 
 	# Accumulate the total results for every segment
-	dt, mpt = makedtypes(2, 3)
+	dt, mpt = makedtypes(2, 3, ('tx', 'rx', 'exlen', 'inlen', 'atime'))
 	results = np.empty((len(segs),), dtype=dt)
 	nres = 0
 
@@ -380,67 +386,71 @@ def tracerEngine(config):
 
 	print 'Building linear system to determine sound speeds'
 
-	# Keep field names available for convenient access
-	fields = list(dt.names)
-	keyfld = fields[:2]
-	matfld = fields[2:-1]
-	rhsfld = fields[-1]
+	# Pull some views on the result lists
+	exlen = results['exlen']
+	inlen = results['inlen']
+	atime = results['atime']
+	txrx = results[['tx', 'rx']]
 
-	# Build the linear system to invert for speeds
-	if bimodal:
-		# Matrix is composed of records after keys and before RHS
-		if not all(dt[n] == 'float64' for n in matfld):
-			raise TypeError('Unexpected data type in result records')
-		A = results[matfld].view(('float64', 2))
-	else:
-		# In a multi-medium model, build a sparse matrix
-		# Track the keys with interior speeds
-		ikeys = []
-		data = []
-		rowcol = []
-		for i, (t, r, exl, inl) in enumerate(results[keyfld + matfld]):
-			# Exterior speed in the first column
-			rowcol.append((i, 0))
-			data.append(exl)
+	def matvec(v):
+		# Fixed-background operator has no external column
+		if fixbg: return inlen * v
+		# Variable-background operator has one external column
+		return exlen * v[0] + inlen * v[1:] 
 
-			# Skip unique interior speed for tiny interior portions
-			if abs(inl) <= epsilon: continue
+	def rmatvec(y):
+		# For bimodal solution, interior part of MVP is dot product
+		v = np.dot(inlen, y[:,np.newaxis]) if bimodal else (inlen * y)
+		# Fixed-background transpose has no external row
+		if fixbg: return v
+		# Variable-background operator has one external row
+		return np.concatenate([np.dot(exlen, y[:,np.newaxis]), v], axis=0)
 
-			# Unique interior speed in its own column
-			ikeys.append((t,r))
-			rowcol.append((i, len(ikeys)))
-			data.append(inl)
+	# Offset the arrival times by external contribution for fixed background
+	if fixbg: rhs = atime - exlen / vbg
+	else: rhs = atime
 
-		A = csc_matrix((data, zip(*rowcol)))
+	# The number of rows is always constant
+	nrow = len(results)
+	# The number of columns depends on bimodal and fixbg
+	ncols = (nrow if not bimodal else 1) + int(not fixbg)
+	# Build the linear operator
+	A = LinearOperator((nrow, ncols), matvec, rmatvec)
 
-	if fixbg:
-		# If the exterior speed is fixed, subtract contribution to RHS
-		rhs = results[rhsfld] - A[:,0] / vbg
-		# Solve for remaining unknowns
-		x, istop, itn = lsmr(A[:,1:], rhs, **lsmr_opts)[:3]
-		# Invert components and prepend exterior speed
-		x = (vbg,) + tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
-	else:
-		x, istop, itn = lsmr(A, results[rhsfld], **lsmr_opts)[:3]
-		# Invert the components of the solution if possible
-		x = tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
+	# Solve the system for speeds
+	x, istop, itn = lsmr(A, rhs, **lsmr_opts)[:3]
+	# Invert the components of the solution where possible
+	x = tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
+	# Add fixed background speed if necessary
+	if fixbg: x = (vbg,) + x
 
 	if istop != 1: print 'LSMR terminated with istop', istop
 	print 'LSMR iterations: %d' % (itn,)
 
-	if bimodal:
-		print 'Recovered exterior speed: %0.5g' % (x[0],)
-		print 'Recovered interior speed: %0.5g' % (x[1],)
-		np.savetxt(speedfile, x)
-	else:
-		speeds = { k: (x[0], v) for k, v in izip(ikeys, x[1:]) }
-		savez_keymat(speedfile, speeds, compressed=True)
+	print 'Exterior speed: %0.5g' % (x[0],)
 
-	# Combine the gathered result dictionaries and save the output
-	if pathfile:
-		print 'Saving tracing results'
-		results = { (t, r): (x, i, a) for t, r, x, i, a in results }
-		savez_keymat(pathfile, results, compressed=True)
+	if bimodal:
+		print 'Interior speed: %0.5g' % (x[1],)
+		if not pathsave:
+			# Write a simple text file if paths aren't saved
+			with open(output, 'wb') as f:
+				fmt = '# %sterior sound speed\n%0.18g\n'
+				f.writelines(fmt % txt for txt in izip(('Ex', 'In'), x))
+			return
+	else:
+		stats = np.mean(x[1:]), np.median(x[1:]), np.std(x[1:])
+		print 'Interior speed: mean %0.5g, median %0.5g, std %0.5g' % stats
+
+	# Always save interior and exterior speeds and tx-rx pairs
+	szargs = { 'exspd': x[:1], 'inspd': x[1:], 'txrx': results[['tx', 'rx']] }
+
+	if pathsave:
+		szargs['pathlen'] = results[['exlen', 'inlen']]
+		szargs['atime'] = atime
+
+	# Save the output
+	print 'Saving results'
+	np.savez(output, **szargs)
 
 
 if __name__ == '__main__':
