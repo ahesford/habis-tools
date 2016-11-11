@@ -384,69 +384,81 @@ def tracerEngine(config):
 	# Only the root has any work left
 	if mpirank: return
 
-	print 'Building linear system to determine sound speeds'
+	print 'Attempting to determine speeds'
 
-	# Pull some views on the result lists
-	exlen = results['exlen']
-	inlen = results['inlen']
-	atime = results['atime']
-	txrx = results[['tx', 'rx']]
+	# Split tracing results into "hits" and "misses"
+	hits = np.abs(results['inlen']) > epsilon * np.abs(results['exlen'])
+	misses = results[np.logical_not(hits)]
+	hits = results[hits]
 
-	def matvec(v):
-		# Fixed-background operator has no external column
-		if fixbg: return inlen * v
-		# Variable-background operator has one external column
-		return exlen * v[0] + inlen * v[1:] 
+	if not fixbg:
+		nmiss = len(misses)
+		if not nmiss:
+			print ('WARNING: Cannot optimize exterior speed; '
+					'no propagation paths are all-exterior')
+		else:
+			print 'Will determine exterior speed from %d paths' % (nmiss,)
+			# Make a one-column exterior matrix
+			A = misses['exlen'].reshape((-1,1))
+			x, istop, itn = lsmr(A, misses['atime'], **lsmr_opts)[:3]
+			print 'Exterior LSMR iterations %d, istop %d' % (itn, istop)
+			if x[0] <= epsilon:
+				print ('WARNING: ignoring nonphysical exterior '
+						'speed with reciprocal %0.5g' % (x[0],))
+			else: vbg = 1. / x[0]
 
-	def rmatvec(y):
-		# For bimodal solution, interior part of MVP is dot product
-		v = np.dot(inlen, y[:,np.newaxis]) if bimodal else (inlen * y)
-		# Fixed-background transpose has no external row
-		if fixbg: return v
-		# Variable-background operator has one external row
-		return np.concatenate([np.dot(exlen, y[:,np.newaxis]), v], axis=0)
+		print 'Exterior speed: %0.5g' % (vbg,)
 
-	# Offset the arrival times by external contribution for fixed background
-	if fixbg: rhs = atime - exlen / vbg
-	else: rhs = atime
+	# Offset arrival times by contribution from exterior speed
+	rhs = hits['atime'] - hits['exlen'] / vbg
 
-	# The number of rows is always constant
-	nrow = len(results)
-	# The number of columns depends on bimodal and fixbg
-	ncols = (nrow if not bimodal else 1) + int(not fixbg)
-	# Build the linear operator
-	A = LinearOperator((nrow, ncols), matvec, rmatvec)
+	if not bimodal:
+		# Diagonal-matrix MVP is Hadamard product of vector and diagonal
+		def mvp(v): return hits['inlen'] * v
+		# Build the linear operator (transpose product is same as forward)
+		A = LinearOperator([len(hits)]*2, mvp, mvp)
+	else:
+		# In bimodal solution, matrix is just a single column
+		A = hits['inlen'].reshape((-1,1))
 
 	# Solve the system for speeds
 	x, istop, itn = lsmr(A, rhs, **lsmr_opts)[:3]
 	# Invert the components of the solution where possible
 	x = tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
-	# Add fixed background speed if necessary
-	if fixbg: x = (vbg,) + x
 
-	if istop != 1: print 'LSMR terminated with istop', istop
-	print 'LSMR iterations: %d' % (itn,)
+	print 'Interior LSMR iterations %d, istop %d' % (itn, istop)
 
-	print 'Exterior speed: %0.5g' % (x[0],)
+	# If Npz output will be used, always save the exterior speed
+	szargs = { 'exspd': (vbg,) }
 
 	if bimodal:
-		print 'Interior speed: %0.5g' % (x[1],)
+		print 'Interior speed: %0.5g' % (x[0],)
 		if not pathsave:
 			# Write a simple text file if paths aren't saved
 			with open(output, 'wb') as f:
-				fmt = '# %sterior sound speed\n%0.18g\n'
-				f.writelines(fmt % txt for txt in izip(('Ex', 'In'), x))
+				f.write('# Exterior sound speed\n')
+				f.write('%0.18g\n' % (vbg,))
+				f.write('# Interior sound speed\n')
+				f.write('%0.18g\n' % (x[0],))
 			return
+		# Store the interior speed is a single value (as a 1-element array)
+		szargs['inspd'] = x
 	else:
-		stats = np.mean(x[1:]), np.median(x[1:]), np.std(x[1:])
+		# Print some useful stats on the recovered values
+		stats = np.mean(x), np.median(x), np.std(x)
 		print 'Interior speed: mean %0.5g, median %0.5g, std %0.5g' % stats
 
-	# Always save interior and exterior speeds and tx-rx pairs
-	szargs = { 'exspd': x[:1], 'inspd': x[1:], 'txrx': results[['tx', 'rx']] }
+		# Store the tx, rx, and speed values in multipath mode
+		ist = [('tx', '<i8'), ('rx', '<i8'), ('inspd', '<f8')]
+		ispds = np.empty(hits.shape, dtype=ist)
+		ispds[['tx', 'rx']] = hits[['tx', 'rx']]
+		ispds['inspd'] = x
+		szargs['inspd'] = ispds
 
 	if pathsave:
-		szargs['pathlen'] = results[['exlen', 'inlen']]
-		szargs['atime'] = atime
+		# Store the hits and misses as paths only, if they exist
+		if len(hits): szargs['hits'] = hits
+		if len(misses): szargs['misses'] = misses
 
 	# Save the output
 	print 'Saving results'
