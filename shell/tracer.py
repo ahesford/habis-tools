@@ -6,8 +6,6 @@
 import os, sys, numpy as np
 from numpy.linalg import norm
 
-from scipy.sparse.linalg import lsmr, LinearOperator
-
 import hashlib
 
 from itertools import izip
@@ -215,9 +213,6 @@ def tracerEngine(config):
 	except Exception as e:
 		_throw('Invalid optional vclip', e)
 
-	try: lsmr_opts = config.get(tsec, 'lsmr', mapper=dict, default={ })
-	except Exception as e: _throw('Invalid optional lsmr', e)
-
 	try: bimodal = config.get(tsec, 'bimodal', mapper=bool, default=True)
 	except Exception as e: _throw('Invalid optional bimodal', e)
 
@@ -391,42 +386,24 @@ def tracerEngine(config):
 	misses = results[np.logical_not(hits)]
 	hits = results[hits]
 
-	if not fixbg:
-		nmiss = len(misses)
-		if not nmiss:
-			print ('WARNING: Cannot optimize exterior speed; '
-					'no propagation paths are all-exterior')
-		else:
-			print 'Will determine exterior speed from %d paths' % (nmiss,)
-			# Make a one-column exterior matrix
-			A = misses['exlen'].reshape((-1,1))
-			x, istop, itn = lsmr(A, misses['atime'], **lsmr_opts)[:3]
-			print 'Exterior LSMR iterations %d, istop %d' % (itn, istop)
-			if x[0] <= epsilon:
-				print ('WARNING: ignoring nonphysical exterior '
-						'speed with reciprocal %0.5g' % (x[0],))
-			else: vbg = 1. / x[0]
-
-		print 'Exterior speed: %0.5g' % (vbg,)
+	if not fixbg and len(misses):
+		# Update the exterior speed, if desired and possible
+		t = misses['atime']
+		x = misses['exlen']
+		vbg = np.dot(t, x) / np.dot(t, t)
+		
+	print 'Exterior speed: %0.5g (%d paths)' % (vbg, len(misses))
 
 	# Offset arrival times by contribution from exterior speed
 	rhs = hits['atime'] - hits['exlen'] / vbg
 
-	if not bimodal:
-		# Diagonal-matrix MVP is Hadamard product of vector and diagonal
-		def mvp(v): return hits['inlen'] * v
-		# Build the linear operator (transpose product is same as forward)
-		A = LinearOperator([len(hits)]*2, mvp, mvp)
+	if bimodal:
+		# Bimodal matrix is a single column
+		x = (np.dot(rhs, hits['inlen']) / np.dot(rhs, rhs), )
 	else:
-		# In bimodal solution, matrix is just a single column
-		A = hits['inlen'].reshape((-1,1))
-
-	# Solve the system for speeds
-	x, istop, itn = lsmr(A, rhs, **lsmr_opts)[:3]
-	# Invert the components of the solution where possible
-	x = tuple(1. / xv if abs(xv) > epsilon else 0.0 for xv in x)
-
-	print 'Interior LSMR iterations %d, istop %d' % (itn, istop)
+		# Multimodal matrix is diagonal
+		x = tuple((hv / rv) if abs(rv) > epsilon else 0.
+				for hv, rv in izip(hits['inlen'], rhs))
 
 	# If Npz output will be used, always save the exterior speed
 	szargs = { 'exspd': (vbg,) }
@@ -451,7 +428,8 @@ def tracerEngine(config):
 		# Store the tx, rx, and speed values in multipath mode
 		ist = [('tx', '<i8'), ('rx', '<i8'), ('inspd', '<f8')]
 		ispds = np.empty(hits.shape, dtype=ist)
-		ispds[['tx', 'rx']] = hits[['tx', 'rx']]
+		ispds['tx'] = hits['tx']
+		ispds['rx'] = hits['rx']
 		ispds['inspd'] = x
 		szargs['inspd'] = ispds
 
