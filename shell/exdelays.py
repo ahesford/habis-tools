@@ -39,6 +39,13 @@ def exdelayEngine(config):
 		err = 'Configuration must specify c and radius in [%s]' % msection
 		raise HabisConfigError.fromException(err, e)
 
+	try:
+		# Read an optional global time offset
+		offset = config.get(esection, 'offset', mapper=float, default=0.)
+	except Exception as e:
+		err = 'Invalid optional offset in [%s]' % esection
+		raise HabisConfigError.fromException(err, e)
+
 	# Read the element and reflector positions
 	eltspos = dict(kp for efile in eltfiles
 			for kp in loadkeymat(efile).iteritems())
@@ -59,7 +66,7 @@ def exdelayEngine(config):
 		try: lr = reflpos[:,nedim+1]
 		except IndexError: lr = r
 		# Convert distances to round-trip arrival times
-		times[elt,elt] = 2 * (dx - lr) / lc
+		times[elt,elt] = 2 * (dx - lr) / lc + offset
 
 	# Save the estimated arrival times
 	savez_keymat(timefile, times)

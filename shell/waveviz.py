@@ -128,7 +128,7 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 				apoint.set_data([atelt], [wlist[0][atelt]])
 				apoint.set_visible(True)
 
-			ax.set_title('Waveform for element %d' % elt, fontsize=14)
+			ax.set_title('Waveform %d' % elt, fontsize=14)
 
 			# Capture the frame
 			writer.grab_frame()
@@ -224,11 +224,11 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 	extent = [-0.5, img.shape[0] - 0.5, dwin[0] - 0.5, dwin[0] + dwin[1] - 0.5]
 
 	# Plot the waveform image
-	ax[0].imshow(img.T, vmin=clim[0], vmax=clim[1], cmap=cm.bone,
+	ax[0].imshow(img.T, vmin=clim[0], vmax=clim[1], cmap=cm.RdBu,
 			interpolation='nearest', origin='lower', extent=extent)
 	ax[0].grid(True)
 	ax[0].set_aspect('auto')
-	ax[0].set_ylabel('Sample index', fontsize=16)
+	ax[0].set_ylabel('Time, samples', fontsize=16)
 	if atimes is not None:
 		title = 'Waveforms aligned to mean arrival time'
 	else:
@@ -240,7 +240,7 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 		ax[1].plot(atimes, linewidth=0.5)
 		ax[1].grid(True)
 		ax[1].set_xlabel('Waveform index', fontsize=16)
-		ax[1].set_ylabel('Arrival time, samples', fontsize=16)
+		ax[1].set_ylabel('Time, samples', fontsize=16)
 		ax[1].set_title('Waveform arrival times', fontsize=16)
 		plt.setp(ax[0].get_xticklabels(), visible=False)
 

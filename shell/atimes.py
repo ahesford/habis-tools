@@ -342,6 +342,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Cache a receive-channel record for faster access
 	hdr, wforms, tmap = None, None, None
 
+	numneg = 0
+
 	for rid, tid in ellst[start::stride]:
 		try:
 			# Use a cahced value if possible
@@ -405,10 +407,12 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		# Compute and record the delay
 		dl = sig.delay(ref, osamp, negcorr)
 		if negcorr:
-			if dl[1] < 0:
-				print 'Negative cross-correlation selected for Tx %d, Rx %d' % (tid, rid)
+			if dl[1] < 0: numneg += 1
 			dl = dl[0]
 		result[(tid, rid)] = dl + data.f2c
+
+	if negcorr and numneg:
+		print '%d waveforms matched with negative cross-correlations' % (numneg,)
 
 	try: queue.put(result)
 	except AttributeError: pass
