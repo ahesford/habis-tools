@@ -184,15 +184,15 @@ def tracerEngine(config):
 	try: timefiles = matchfiles(config.getlist(tsec, 'timefile'))
 	except Exception as e: _throw('Configuration must specify timefile', e)
 
-	try: timecol = config.get(tsec, 'timecol', mapper=int, default=0)
-	except Exception as e: _throw('Invalid optional timecol', e)
+	try: targidx = config.get(tsec, 'targidx', mapper=int, default=0)
+	except Exception as e: _throw('Invalid optional targidx', e)
 
 	# Find and load all element coordinates
 	try: elements = ldmats(matchfiles(config.getlist(tsec, 'elements')), nkeys=1)
 	except Exception as e: _throw('Configuration must specify elements', e)
 
 	# Find and load all propagation axes
-	try: meshctr = np.loadtxt(config.get(tsec, 'meshctr'), ndmin=2)[0,:3]
+	try: meshctr = np.loadtxt(config.get(tsec, 'meshctr'), ndmin=2)[targidx,:3]
 	except Exception as e: _throw('Configuration must specify meshctr', e)
 
 	# Load the node and triangle configuration
@@ -283,7 +283,7 @@ def tracerEngine(config):
 			start = rankmap[cs].index(mpirank)
 		except (KeyError, ValueError):
 			raise ValueError('Unable to determine local share of file' % (tfile,))
-		atimes.update(getatimes(tfile, elements, timecol, vclip, start, stride))
+		atimes.update(getatimes(tfile, elements, targidx, vclip, start, stride))
 
 	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)
 
@@ -303,6 +303,8 @@ def tracerEngine(config):
 	dt, mpt = makedtypes(2, 3, ('tx', 'rx', 'exlen', 'inlen', 'atime'))
 	results = np.empty((len(segs),), dtype=dt)
 	nres = 0
+	# Track the number of odd-intersection paths that are skipped
+	nodds = 0
 
 	# Find the portion of each path in the interior and exterior of the volume
 	for k, seg in segs.iteritems():
@@ -338,8 +340,8 @@ def tracerEngine(config):
 
 			# Odd count: segment starts or ends in interior
 			if len(ilens) % 2:
-				print ('WARNING: (t,r) segment %s intersects '
-						'volume an odd number of times' % (k,))
+				nodds += 1
+				continue
 
 			# Interior regions start at odd indices, exterior on evens
 			inl = sum(v[1] - v[0] for v in izip(ilens[1::2], ilens[2::2]))
@@ -373,9 +375,11 @@ def tracerEngine(config):
 		results[nres] = k + (exl, inl, atime)
 		nres += 1
 
-	WORLD.Barrier()
+	if nodds:
+		print ('Rank %d: Skipped %d paths with an odd '
+				'number of volume intersections' % (mpirank, nodds))
 
-	if not mpirank: print 'Finished tracing segments'
+	WORLD.Barrier()
 
 	# Accumulate all results on the root
 	results = gathersegments(results[:nres], mpt)
@@ -385,7 +389,7 @@ def tracerEngine(config):
 	# Only the root has any work left
 	if mpirank: return
 
-	print 'Attempting to determine speeds'
+	print 'Finished tracing; attempting to determine speeds'
 
 	# Split tracing results into "hits" and "misses"
 	hits = np.abs(results['inlen']) > epsilon * np.abs(results['exlen'])
