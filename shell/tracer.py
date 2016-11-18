@@ -123,13 +123,14 @@ def usage(progname=None, fatal=True):
 	sys.exit(int(fatal))
 
 
-def getatimes(atfile, elements, vclip=None, start=0, stride=1):
+def getatimes(atfile, elements, column=0, vclip=None, start=0, stride=1):
 	'''
 	Read the 2-key arrival-time map with name atfile and filter the map to
 	include only keys such that each index is a key in the mapping elements
 	from indices to element locations, and the average speed (the propagation
 	path length, computed from element locations, divided by the arrival
-	time) falls between vclip[0] and vclip[1].
+	time) falls between vclip[0] and vclip[1]. The column argument
+	specifies which index in multi-value arrival-time maps should be selected.
 
 	Backscatter waveforms are included in the map but will not be filtered
 	by vclip because the average sound speed is undefined for backscatter.
@@ -144,16 +145,18 @@ def getatimes(atfile, elements, vclip=None, start=0, stride=1):
 	atimes = { }
 	idx = 0
 
-	for (t, r), v in ldkmat(atfile, nkeys=2).iteritems():
+	for (t, r), v in ldkmat(atfile, nkeys=2, scalar=False).iteritems():
 		try: elt, elr = elements[t], elements[r]
 		except KeyError: continue
 
+		time = v[column]
+
 		if t != r and vclip:
-			aspd = norm(elt - elr) / v
+			aspd = norm(elt - elr) / time
 			if aspd < vclip[0] or aspd > vclip[1]: continue
 
 		# Keep every stride-th valid record
-		if idx % stride == start: atimes[t,r] = v
+		if idx % stride == start: atimes[t,r] = time
 		# Increment the valid record count
 		idx += 1
 
@@ -180,6 +183,9 @@ def tracerEngine(config):
 	# Find all arrival-time maps visible to this node
 	try: timefiles = matchfiles(config.getlist(tsec, 'timefile'))
 	except Exception as e: _throw('Configuration must specify timefile', e)
+
+	try: timecol = config.get(tsec, 'timecol', mapper=int, default=0)
+	except Exception as e: _throw('Invalid optional timecol', e)
 
 	# Find and load all element coordinates
 	try: elements = ldmats(matchfiles(config.getlist(tsec, 'elements')), nkeys=1)
@@ -277,7 +283,7 @@ def tracerEngine(config):
 			start = rankmap[cs].index(mpirank)
 		except (KeyError, ValueError):
 			raise ValueError('Unable to determine local share of file' % (tfile,))
-		atimes.update(getatimes(tfile, elements, vclip, start, stride))
+		atimes.update(getatimes(tfile, elements, timecol, vclip, start, stride))
 
 	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)
 
