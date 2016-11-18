@@ -594,6 +594,9 @@ def atimesEngine(config):
 		print >> sys.stderr, 'WARNING - Ignoring window map:', e
 	except (KeyError, TypeError, AttributeError):
 		winmap = None
+	else:
+		# Replace the map argument with the loaded array
+		kwargs['window']['map'] = winmap
 
 	times = OrderedDict()
 
@@ -603,12 +606,6 @@ def atimesEngine(config):
 			# Pull the column of the nearmap for this target
 			nearmap = { k: v[i] for k, v in guesses.iteritems() }
 			kwargs['peaks']['nearmap'] = nearmap
-
-		if winmap:
-			# Pull the columns of the window map for this target
-			lwmap = { k: v[2*i:2*(i+1)] for k, v in winmap.iteritems() }
-			kwargs['window']['map'] = lwmap
-
 
 		if cachedelay:
 			delayfiles = buildpaths(datafiles, extension='delays.npz')
