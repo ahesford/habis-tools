@@ -375,9 +375,10 @@ def tracerEngine(config):
 		results[nres] = k + (exl, inl, atime)
 		nres += 1
 
-	if nodds:
-		print ('Rank %d: Skipped %d paths with an odd '
-				'number of volume intersections' % (mpirank, nodds))
+	# Accumulate the list of skipped segments on the root
+	nodds = WORLD.reduce(nodds)
+	if mpirank and nodds:
+		print 'Skipped %d paths with an odd intersections count' % (nodds,)
 
 	WORLD.Barrier()
 
@@ -419,7 +420,7 @@ def tracerEngine(config):
 	szargs = { 'exspd': (vbg,) }
 
 	if bimodal:
-		print 'Interior speed: %0.5g' % (x[0],)
+		print 'Interior speed: %0.5g (%d paths)' % (x[0], len(hits))
 		if not pathsave:
 			# Write a simple text file if paths aren't saved
 			with open(output, 'wb') as f:
@@ -432,8 +433,9 @@ def tracerEngine(config):
 		szargs['inspd'] = x
 	else:
 		# Print some useful stats on the recovered values
-		stats = np.mean(x), np.median(x), np.std(x)
-		print 'Interior speed: mean %0.5g, median %0.5g, std %0.5g' % stats
+		stats = np.mean(x), np.median(x), np.std(x), len(x)
+		print ('Interior speed: mean %0.5g, '
+				'median %0.5g, std %0.5g (%d paths)' % stats)
 
 		# Store the tx, rx, and speed values in multipath mode
 		ist = [('tx', '<i8'), ('rx', '<i8'), ('inspd', '<f8')]
