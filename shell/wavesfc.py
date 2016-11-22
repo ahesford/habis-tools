@@ -54,8 +54,16 @@ def wavesfcEngine(config):
 	try:
 		# Grab the sound speed
 		c = config.get(msection, 'c', mapper=float)
+		rad = config.get(msection, 'radius', mapper=float)
 	except Exception as e:
-		err = 'Configuration must specify c in [%s]' % msection
+		err = 'Configuration must specify c and radius in [%s]' % msection
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Use the reflector radius for missing arrival-time values
+		usemiss = config.get(wsection, 'usemiss', mapper=bool, default=False)
+	except Eception as e:
+		err = 'Invalid specification of optional usemiss in [%s]' % wsection
 		raise HabisConfigError.fromException(err, e)
 
 	# Read the element positions and backscatter arrival times
@@ -67,14 +75,13 @@ def wavesfcEngine(config):
 	reflectors = np.loadtxt(rflfile, ndmin=2)
 	nrefl, nrdim = reflectors.shape
 
+	# Make sure the reflector specification includes speed and radius
 	if nrdim == 3:
-		# Make sure the reflector specification includes speed
-		reflectors = np.concatenate([reflectors, [[c]] * nrefl], axis=1)
-	elif not 2 < nrdim < 6:
+		reflectors = np.concatenate([reflectors, [[c, rad]] * nrefl], axis=1)
+	elif nrdim == 4:
+		reflectors = np.concatenate([reflectors, [[rad]] * nrefl], axis=1)
+	elif nrdim != 5:
 		raise ValueError('Reflector file must contain 3, 4 or 5 columns')
-
-	# Identify elements for which coordinates and arrival times are known
-	celts = sorted(set(times).intersection(elements))
 
 	# Split the file name and extension
 	fbase, fext = os.path.splitext(outfile)
@@ -86,18 +93,25 @@ def wavesfcEngine(config):
 
 	for ridx, refl in enumerate(reflectors):
 		pos = refl[:3]
-		lc = refl[3]
+		lc, rad = refl[3:]
 
 		# Convert all times to distances
 		pdists = { }
-		for el in celts:
+		for el, elpos in elements.iteritems():
 			# Ray from reflector center to element
-			dl = elements[el] - pos
+			dl = elpos - pos
 			# Find distance to element and normalize ray
 			ll = norm(dl)
 			dl /= ll
-			# Convert arrival time to distance from center along ray
-			ds = ll - times[el][ridx] * lc / 2.0
+
+			try:
+				# Convert arrival time to distance from center
+				ds = ll - times[el][ridx] * lc / 2.0
+			except (KeyError, IndexError, TypeError):
+				# Use default radius or skip missing value
+				if usemiss: ds = rad
+				else: continue
+
 			# Valid points will be inside segment or opposite reflector
 			if ds <= ll:
 				# Record distance and ray
