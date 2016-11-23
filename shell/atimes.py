@@ -125,6 +125,13 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	* negcorr: A Boolean (default: False) passed to Waveform.delay as the
 	  'negcorr' argument to consider negative cross-correlation.
 
+	* signsquare: Square the waveform and reference amplitudes (multiplying
+	  each signal by its absolute value to preserve signs) to better
+	  emphasize peaks in the cross-correlation. The squaring is done right
+	  after any bandpass filtering, so other parameters that are influence
+	  by amplitude (e.g., minsnr, thresholds in peaks) should be altered to
+	  account for the squared amplitudes.
+
 	* bandpass: A dictionary of keyword arguments passed to
 	  habis.sigtools.Waveform.bandpass() that will filter each waveform
 	  prior to further processing.
@@ -211,9 +218,6 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	  The default map is 'backscatter'.
 
-	* compenv: If True, delay analysis will proceed on signal and reference
-	  envelopes. If false, delay analysis uses the original signals.
-
 	* queue: If not none, the return list is passed as an argument to
 	  queue.put().
 	'''
@@ -285,12 +289,12 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		# Write the trimmed, sorted list back to the map
 		elmap[k] = s
 
-	# Use envelopes for delay analysis if desired
-	compenv = kwargs.pop('compenv', False)
-	if compenv: ref = ref.envelope()
-
 	# Unpack minimum SNR requirements
 	minsnr, noisewin = kwargs.pop('minsnr', (None, None))
+
+	# Unpack the signsquare argument
+	signsquare = kwargs.pop('signsquare', False)
+	if signsquare: ref = ref.signsquare()
 
 	# Pull a copy of the windowing configuration
 	window = dict(kwargs.pop('window', ()))
@@ -370,6 +374,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			# Bandpass and crop to original data window
 			sig = sig.bandpass(**bandpass).window(sig.datawin)
 
+		# Square the signal if desired
+		if signsquare: sig = sig.signsquare()
+
 		if minsnr is not None and noisewin is not None:
 			if sig.snr(noisewin) < minsnr: continue
 
@@ -401,8 +408,6 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 				else: exd = neardefault - data.f2c
 			try: sig = sig.isolatepeak(exd, **peaks)
 			except ValueError: continue
-
-		if compenv: sig = sig.envelope()
 
 		# Compute and record the delay
 		dl = sig.delay(ref, osamp, negcorr)
@@ -564,8 +569,8 @@ def atimesEngine(config):
 	maskoutliers = config.get(asec, 'maskoutliers', mapper=bool, default=False)
 	optimize = config.get(asec, 'optimize', mapper=bool, default=False)
 	cachedelay = config.get(asec, 'cachedelay', mapper=bool, default=True)
-	kwargs['compenv'] = config.get(asec, 'compenv', mapper=bool, default=False)
 	kwargs['negcorr'] = config.get(asec, 'negcorr', mapper=bool, default=False)
+	kwargs['signsquare'] = config.get(asec, 'signsquare', mapper=bool, default=False)
 
 	try:
 		# Remove the nearmap file key

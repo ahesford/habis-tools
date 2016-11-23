@@ -1082,6 +1082,16 @@ class Waveform(object):
 			   for k, v in pk.iteritems() } for pk in peaks ]
 
 
+	def signsquare(self):
+		'''
+		Return a copy of the waveform with each sample squared and
+		multiplied by its sign (or, equivalently, each sample
+		multiplied by its absolute value).
+		'''
+		return Waveform(self._nsamp,
+				self._data * np.abs(self._data), self._datastart)
+
+
 	def isolatepeak(self, index=None, **kwargs):
 		'''
 		Use self.envpeaks() to identify the peak nearest the provided
