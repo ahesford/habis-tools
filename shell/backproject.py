@@ -225,8 +225,8 @@ def backprojectionEngine(config):
 		# Walk the segment to identify intersecting pixels
 		# and probabilistically label each "interior" (0) or "exterior" (1)
 		s = segs[k]
-		pxv = [tuple(pt) + (int(rand() < thresh[pt[:3]]),)
-				for pt in box.raymarcher(s)]
+		pxv = [k + v + (int(rand() < thresh[k]),)
+				for k, v in box.raymarcher(s).iteritems()]
 
 		# Compute the "interior" and "exterior" fractions of the line
 		pai, pbi = 0., 0.

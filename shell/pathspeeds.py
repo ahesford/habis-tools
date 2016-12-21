@@ -25,7 +25,7 @@ def makebox(config):
 		lo = [float(s) for s in config.get('grid', 'lo').split()]
 		hi = [float(s) for s in config.get('grid', 'hi').split()]
 
-		box = boxer.Box3D(lo, hi) 
+		box = boxer.Box3D(lo, hi)
 
 		# Assign the number of cells
 		box.ncell = [int(s) for s in config.get('grid', 'ncells').split()]
@@ -53,10 +53,10 @@ def cellspeeds(cells, contrast):
 def averager(box, seg, hits, speeds):
 	'''
 	Compute the average relative sound speed over the boxer.Segment3D seg.
-	For each hit record of the form (i, j, k, tmin, tmax) in the list hits,
-	the relative sound speed in the interval of seg from length tmin to
-	tmax is given by the dictionary entry speeds[hit[:3]]. Outside of the
-	hit cells, the relative sound speed is unity.
+	For each hit record of the form (i, j, k) -> (tmin, tmax) in the
+	mapping hits, the relative sound speed in the interval of seg from
+	length tmin to tmax is given by the dictionary entry speeds[hit[:3]].
+	Outside of the hit cells, the relative sound speed is unity.
 	'''
 	seglen, integral = 0.0, 0.0
 
@@ -139,10 +139,11 @@ def tracerEngine(config):
 			hits = [box.raymarcher(seg) for seg in segs]
 
 			# Read the sound speeds for every unique cell encountered
-			speeds = cellspeeds(set(c[:3] for h in hits for c in h), contrast)
+			speeds = cellspeeds(set(c for h in hits for c in h), contrast)
 
 			# Average sound speed for all propagation paths
-			avgs = [averager(box, seg, hl, speeds) for seg, hl in zip(segs, hits)]
+			avgs = [averager(box, seg, hl, speeds)
+					for seg, hl in zip(segs, hits)]
 			# Gather averages on the head node
 			avgather = MPI.COMM_WORLD.gather(avgs)
 			if mpirank == 0:
