@@ -6,6 +6,8 @@
 import os, sys, numpy as np
 from numpy.linalg import norm
 
+import time
+
 import hashlib
 
 from itertools import izip
@@ -16,6 +18,18 @@ from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadmatlist as ldmats, loadkeymat as ldkmat, savez_keymat
 
 from pycwp import boxer, cutil
+
+def maketimestr(start, end):
+	'''
+	Print the time (start - end) in seconds (with millisecond precision) if
+	the time is greater than 1 second, or in milliseconds (with microsecond
+	precision) if the time is less than 1 second. Add a suffix (s or ms).
+	'''
+	dtime = end - start
+	if abs(dtime) < 1:
+		return '%0.3f ms' % (1000. * dtime,)
+	else:
+		return '%0.3f s' % (dtime,)
 
 
 def makedtypes(nidx=2, nvals=3, names=None):
@@ -239,6 +253,8 @@ def tracerEngine(config):
 
 	WORLD.Barrier()
 
+	stime = time.time()
+
 	# Convert the triangle node maps to triangle objects
 	nodes, triangles = mesh['nodes'], mesh['triangles']
 	triangles = [ boxer.Triangle3D([nodes[c] for c in v]) for v in triangles ]
@@ -258,13 +274,23 @@ def tracerEngine(config):
 	# Only build the tree for a local share of triangles
 	otree.addleaves(xrange(mpirank, len(triangles), mpisize), inbox, True)
 
+	etime = time.time()
+	if not mpirank:
+		print 'Local tree build time:', maketimestr(stime, etime)
+
 	WORLD.Barrier()
 
 	if not mpirank: print 'Combining distributed Octree'
 
+	stime = time.time()
+
 	# Merge trees and prune
 	gatherleaves(otree)
 	otree.prune()
+
+	etime = time.time()
+	if not mpirank:
+		print 'Tree aggregation time:', maketimestr(stime, etime)
 
 	WORLD.Barrier()
 
@@ -298,6 +324,8 @@ def tracerEngine(config):
 		segs[t,t] = boxer.Segment3D(epos, meshctr)
 
 	WORLD.Barrier()
+
+	stime = time.time()
 
 	# Accumulate the total results for every segment
 	dt, mpt = makedtypes(2, 3, ('tx', 'rx', 'exlen', 'inlen', 'atime'))
@@ -375,10 +403,14 @@ def tracerEngine(config):
 		results[nres] = k + (exl, inl, atime)
 		nres += 1
 
+	etime = time.time()
+
 	# Accumulate the list of skipped segments on the root
 	nodds = WORLD.reduce(nodds)
-	if mpirank and nodds:
-		print 'Skipped %d paths with an odd intersections count' % (nodds,)
+	if not mpirank:
+		if nodds:
+			print 'Skipped %d paths with an odd intersections count' % (nodds,)
+		print 'Local segment tracing time:', maketimestr(stime, etime)
 
 	WORLD.Barrier()
 
@@ -391,6 +423,8 @@ def tracerEngine(config):
 	if mpirank: return
 
 	print 'Finished tracing; attempting to determine speeds'
+
+	stime = time.time()
 
 	# Split tracing results into "hits" and "misses"
 	hits = np.abs(results['inlen']) > epsilon * np.abs(results['exlen'])
@@ -444,6 +478,11 @@ def tracerEngine(config):
 		ispds['rx'] = hits['rx']
 		ispds['inspd'] = x
 		szargs['inspd'] = ispds
+
+	etime = time.time()
+	if not mpirank:
+		print 'Speed determination time:', maketimestr(stime, etime)
+
 
 	if pathsave:
 		# Store the hits and misses as paths only, if they exist
