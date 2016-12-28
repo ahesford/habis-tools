@@ -576,8 +576,8 @@ def atimesEngine(config):
 
 	try:
 		# Remove the nearmap file key
-		guesses = kwargs['peaks'].pop('nearmap')
-		guesses = loadkeymat(guesses, nkeys=2, scalar=False)
+		guesses = shsplit(kwargs['peaks'].pop('nearmap'))
+		guesses = loadmatlist(guesses, nkeys=2, scalar=False)
 	except IOError as e:
 		guesses = None
 		print >> sys.stderr, 'WARNING - Ignoring nearmap:', e
