@@ -12,10 +12,12 @@ from itertools import izip
 
 from collections import OrderedDict, defaultdict
 
+from shlex import split as shsplit
+
 from pycwp import process, stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
-from habis.formats import WaveformSet, loadkeymat, savez_keymat
+from habis.formats import WaveformSet, loadkeymat, loadmatlist, savez_keymat
 from habis.sigtools import Waveform
 
 
@@ -592,8 +594,8 @@ def atimesEngine(config):
 
 	try:
 		# Load the window map, if provided
-		winmap = kwargs['window'].pop('map')
-		winmap = loadkeymat(winmap, nkeys=2, scalar=False)
+		winmap = shsplit(kwargs['window'].pop('map'))
+		winmap = loadmatlist(winmap, nkeys=2, scalar=False)
 	except IOError as e:
 		winmap = None
 		print >> sys.stderr, 'WARNING - Ignoring window map:', e
