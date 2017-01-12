@@ -63,10 +63,10 @@ def averager(box, seg, hits, speeds):
 	for (i, j, k, tmin, tmax) in hits:
 		# Grab the cell speed
 		spd = speeds[(i, j, k)]
-		# Grab the intersection start and end lengths
+		# Grab intersection start and end lengths (as fraction of whole segment)
 		tmin = max(0, tmin)
-		tmax = min(seg.length, tmax)
-		dx = (tmax - tmin) / seg.length
+		tmax = min(1.0, tmax)
+		dx = tmax - tmin
 		integral += dx * spd
 		seglen += dx
 

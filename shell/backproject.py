@@ -232,12 +232,11 @@ def backprojectionEngine(config):
 		pai, pbi = 0., 0.
 		for pt in pxv:
 			st, ed, md = pt[3:]
+			# Length is already a fraction of total length
 			length = abs(ed - st)
+			# Add fractional length to the right bin
 			pai += length * md
 			pbi += length * (1 - md)
-
-		pai /= float(s.length)
-		pbi /= float(s.length)
 
 		# Determine (if possible) the necessary interior sound speed
 		vi = vbg if np.allclose(pbi, 0.) else ((aspd - vbg * pai) / float(pbi))

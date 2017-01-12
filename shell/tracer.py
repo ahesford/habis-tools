@@ -363,7 +363,7 @@ def tracerEngine(config):
 			inl = 0.0
 		else:
 			# Through transmissions: add endpoints to define all regions
-			ilens = sorted([0., seg.length] +
+			ilens = sorted([0., 1.0] +
 					[v[0] for v in isects.itervalues()])
 
 			# Odd count: segment starts or ends in interior
@@ -375,14 +375,17 @@ def tracerEngine(config):
 			inl = sum(v[1] - v[0] for v in izip(ilens[1::2], ilens[2::2]))
 			exl = sum(v[1] - v[0] for v in izip(ilens[0::2], ilens[1::2]))
 
-			# Check total length against segment length
-			if not cutil.almosteq(inl + exl, seg.length, epsilon):
-				print ('WARNING: (t,r) segment %s inferred '
-					'and actual lengths differ: '
-					'%0.5g != %0.5g' % (ttl, k, seg.length))
+			# Check total length against segment length (ratio)
+			if not cutil.almosteq(inl + exl, 1.0, epsilon):
+				print ('WARNING: (t,r) segment %s inferred to '
+					'actual ratio %0.5g to 1' % (k, inl + exl))
 
 		# In fixed-exterior mode, ignore all-exterior segments
 		if fixbg and abs(inl) <= epsilon * abs(exl): continue
+
+		# Convert length from fractions of total to actual lengths
+		exl *= seg.length
+		inl *= seg.length
 
 		# Capture the arrival time for this segment
 		atime = atimes[k]
