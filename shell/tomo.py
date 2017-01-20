@@ -48,13 +48,10 @@ def getatimes(atfile, column=0, start=0, stride=1):
 	idx = 0
 
 	for (t, r), v in ldkmat(atfile, nkeys=2, scalar=False).iteritems():
+		# Ignore backscatter
 		if t == r: continue
-
-		# Pull the desired arrival-time column
-		time = v[column]
-
 		# Keep every stride-th valid record
-		if idx % stride == start: atimes[t,r] = time
+		if idx % stride == start: atimes[t,r] = v[column]
 		# Increment the valid record count
 		idx += 1
 
@@ -167,8 +164,8 @@ def traceloop(box, elements, atimes, dl=1e-3,
 	popt = None
 
 	# Make sure all arrival-time entries have matching entries in elements
-	atimes = { (t,r): v for (t, r), v in atimes.iteritems()
-			if t in elements and r in elements }
+	atimes = { k: v for k, v in atimes.iteritems()
+			if k[0] in elements and k[1] in elements }
 
 	# By default, work with all of the arrival times
 	trset = sorted(atimes.iterkeys())
@@ -396,7 +393,7 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
 	if s.shape != box.ncell or s.shape != mask.shape:
 		raise ValueError('Shape of s and optional mask must be %s' % (box.ncell,))
 
-	nmeas = float(comm.size) * nm
+	nmeas = float(comm.size - 1) * nm
 
 	nnz = np.sum(mask)
 
@@ -484,8 +481,7 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
 		# Update the image
 		s[mask] += x
 		# Apply a desired filter
-		if mfilter:
-			s[:,:,:] = median_filter(s, size=mfilter)
+		if mfilter: s[:,:,:] = median_filter(s, size=mfilter)
 
 		print 'Round', i, 'func', f, 'info', info
 
