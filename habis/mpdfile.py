@@ -33,7 +33,7 @@ def fhashmap(fnames, msize=10):
 
 	The return value is a map of the form (shasum -> file name).
 	'''
-	return { sha512sum(f): f for f in fnames }
+	return { sha512(f): f for f in fnames }
 
 
 def frankmap(fhmap, comm):

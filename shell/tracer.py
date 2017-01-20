@@ -262,7 +262,7 @@ def tracerEngine(config):
 
 	# Collect the arrival times from local shares of all local maps
 	atimes = { }
-	for tfile, (start, stride) in flocshare(timefiles, MPI.COMM_WORLD):
+	for tfile, (start, stride) in flocshare(timefiles, MPI.COMM_WORLD).iteritems():
 		atimes.update(getatimes(tfile, elements, targidx, vclip, start, stride))
 
 	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)

@@ -479,7 +479,7 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
 
 		# Perform the iterative update a limited number of times
 		x, f, info = fmin_l_bfgs_b(ffg, x,
-				bounds=vxbounds, callback=cb, **bfgs_opts,)
+				bounds=vxbounds, callback=cb, **bfgs_opts)
 
 		# Update the image
 		s[mask] += x
@@ -542,9 +542,11 @@ if __name__ == "__main__":
 
 	try:
 		# Load the image grid
-		bxconf = config.get('tomogrid', 'grid')
-		bx = Box3D(bxconf['lo'], bxconf['hi'])
-		bx.ncell = bxconf['ncell']
+		lo = config.get(tsec, 'lo')
+		hi = config.get(tsec, 'hi')
+		ncell = config.get(tsec, 'ncell')
+		bx = Box3D(lo, hi)
+		bx.ncell = ncell
 	except Exception as e:
 		_throw('Configuration must specify valid grid', e, 'tomogrid')
 
@@ -565,9 +567,6 @@ if __name__ == "__main__":
 
 	if not rank:
 		print 'Solution defined on grid', bx.lo, bx.hi, bx.ncell
-
-		# The worker communicator is not needed
-		wcomm.Free()
 
 		try:
 			# Find the slowness map
@@ -614,8 +613,8 @@ if __name__ == "__main__":
 		except Exception as e: _throw('Invalid optional limits', e)
 
 		# Compute random updates to the image
-		ns = makeimage(s, mask, bx, nmeas, nrounds, mfilter,
-				bfgs_opts, partial_output, MPI.COMM_WORLD)
+		ns = makeimage(s, mask, bx, nmeas, nrounds, bounds,
+				mfilter, bfgs_opts, partial_output, MPI.COMM_WORLD)
 
 		np.save(ouptut, ns.astype(np.float32))
 
