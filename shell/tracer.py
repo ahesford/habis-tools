@@ -8,14 +8,13 @@ from numpy.linalg import norm
 
 import time
 
-import hashlib
-
 from itertools import izip
 
 from mpi4py import MPI
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadmatlist as ldmats, loadkeymat as ldkmat, savez_keymat
+from habis.mpdfile import flocshare
 
 from pycwp import boxer, cutil
 
@@ -56,25 +55,6 @@ def makedtypes(nidx=2, nvals=3, names=None):
 	return dt, mpt
 
 
-def sha512(fname, msize=10):
-	'''
-	For the named file (which should not be open), compute the SHA-512 sum,
-	reading in chunks of msize megabytes. The return value is the output of
-	hexdigest() for the SHA-512 Hash object.
-	'''
-	bsize = int(msize * 2**20)
-	if bsize < 1: raise ValueError('Specified chunk size too small')
-
-	cs = hashlib.sha512()
-	with open(fname, 'rb') as f:
-		while True:
-			block = f.read(bsize)
-			if not block: break
-			cs.update(block)
-
-	return cs.hexdigest()
-
-
 def gatherleaves(otree, comm=None):
 	'''
 	Gather on MPI communicator comm (or MPI.COMM_WORLD if comm is None) the
@@ -113,22 +93,6 @@ def gathersegments(segs, mptype, comm=None, root=0):
 
 	comm.Gatherv([segs, nsegs, mptype], [combined, counts, displs, mptype])
 	return combined
-
-
-def makerankmap(filemap, comm=None):
-	'''
-	Given filemap, a rank-local map from SHA-512 sums to names of files
-	with those sums, gather the maps on all ranks in comm (MPI.COMM_WORLD
-	if comm is None) and produce a composite map from SHA-512 sums to a
-	list of ranks for which the sum is a key in its filemap.
-	'''
-	rankmap = { }
-	if comm is None: comm = MPI.COMM_WORLD
-	for rank, csums in enumerate(comm.allgather(filemap.keys())):
-		for cs in csums:
-			try: rankmap[cs].append(rank)
-			except KeyError: rankmap[cs] = [rank]
-	return rankmap
 
 
 def usage(progname=None, fatal=True):
@@ -296,19 +260,9 @@ def tracerEngine(config):
 
 	if not mpirank: print 'Reading and gathering arrival times'
 
-	# Map SHA-512 sums to file names and to lists of nodes with access each file
-	timefiles = { sha512(t): t for t in timefiles }
-	rankmap = makerankmap(timefiles)
-
 	# Collect the arrival times from local shares of all local maps
 	atimes = { }
-	for cs, tfile in timefiles.iteritems():
-		# Find the number of ranks sharing this file and index into it
-		try:
-			stride = len(rankmap[cs])
-			start = rankmap[cs].index(mpirank)
-		except (KeyError, ValueError):
-			raise ValueError('Unable to determine local share of file' % (tfile,))
+	for tfile, (start, stride) in flocshare(timefiles, MPI.COMM_WORLD):
 		atimes.update(getatimes(tfile, elements, targidx, vclip, start, stride))
 
 	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)
