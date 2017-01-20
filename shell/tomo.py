@@ -616,7 +616,7 @@ if __name__ == "__main__":
 		ns = makeimage(s, mask, bx, nmeas, nrounds, bounds,
 				mfilter, bfgs_opts, partial_output, MPI.COMM_WORLD)
 
-		np.save(ouptut, ns.astype(np.float32))
+		np.save(output, ns.astype(np.float32))
 
 		# Quit the traceloops
 		MPI.COMM_WORLD.bcast('ENDTRACE')
