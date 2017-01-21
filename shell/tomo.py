@@ -15,6 +15,8 @@ from numpy.linalg import norm
 from scipy.optimize import fmin_l_bfgs_b
 from scipy.ndimage import median_filter
 
+from math import fsum
+
 from random import sample
 
 from time import time
@@ -70,7 +72,6 @@ def traceloop(box, elements, atimes, dl=1e-3,
 	bfgs_opts dictionary can be used to provide keyword arguments to
 	configure L-BFGS (actually scipy.optimize.fmin_l_bfgs_b).
 
-	
 	The trace results, which map each transmit-receive pair to a map from
 	cell indices (in the Box3D) to lengths of the (t, r) path through that
 	cell, are used to compute a process-local share of the cost function
@@ -138,21 +139,20 @@ def traceloop(box, elements, atimes, dl=1e-3,
 	global cost and gradient can be obtained by summing local values from
 	each node.
 
-	After broadcasting an "EVALUATE" control message, the root must collect
-	the global scalar cost function by calling comm.reduce(c, op=MPI.SUM),
-	where c is any floating-point constant to be added to the global cost
-	function; pass c = 0.0 to force the return value of reduce to the pure
-	cost. Note that this reduce call uses the high-level Python object
-	interface.
+	After broadcasting an "EVALUATE" control message, the root must first
+	accumulate the scalar cost functions by calling the high-level Python
+	object method comm.reduce twice in succession. The first call will
+	accumulate the values of the cost functions. The second call will
+	accumulate the number of participating rows in the path-length operator.
 
-	After accumulating the scalar cost, the root must accumulate the global
-	gradient by calling comm.Reduce(input, output, op=MPI.SUM) using the
-	low-level buffer interface. The accumulated gradient will be stored in
-	output, which should be an empty Numpy array with shape box.ncell and
-	dtype np.float64. The input array should have the same shape and data
-	type, and will be added to the global gradient. To capture the pure
-	gradient alone, zero the output prior to the reduction and call
-	comm.Reduce(MPI.IN_PLACE, output, op=MPI.SUM).
+	After accumulating the scalar cost and row count, the root must
+	accumulate the global gradient by calling the low-level buffer method
+	comm.Reduce(input, output, op=MPI.SUM). The accumulated gradient will
+	be stored in output, which should be an empty Numpy array with shape
+	box.ncell and dtype np.float64. The input array should have the same
+	shape and data type, and will be added to the global gradient. To
+	capture the pure gradient alone, zero the output prior to the reduction
+	and call comm.Reduce(MPI.IN_PLACE, output, op=MPI.SUM).
 
 	Upon receipt of an "ENDTRACE" control message, the worker loop will
 	terminate.
@@ -169,6 +169,9 @@ def traceloop(box, elements, atimes, dl=1e-3,
 
 	# By default, work with all of the arrival times
 	trset = sorted(atimes.iterkeys())
+
+	# Keep storage for the gradient and corrections to the running sum
+	gf = np.zeros(box.ncell, dtype=np.float64, order='C')
 
 	# Work loop
 	while True:
@@ -207,28 +210,30 @@ def traceloop(box, elements, atimes, dl=1e-3,
 			comm.Abort(1)
 
 		# Accumulate the local cost function and gradient
-		f = 0.0
-		gf = np.zeros(box.ncell, dtype=np.float64, order='C')
+		f = []
+		gf[:,:,:] = 0.0
+		nrows, nskip = 0L, 0L
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
 			plens = pathtrace(box, popt, elements[t], elements[r], mxlen)
-			
+			if not plens:
+				nskip += 1
+				continue
+			nrows += 1
 			# Calculate error in model arrival time
-			atex = sum(s[c] * l for c, l in plens.iteritems())
-			err = atex - atimes[t, r]
-			# Add model error to cost function
-			f += err**2
-			# Add gradient contribution
+			err = fsum(s[c] * l for c, l in plens.iteritems()) - atimes[t,r]
+			f.append(err**2)
+			# Add gradient contribution with Kahan summation
 			for c, l in plens.iteritems(): gf[c] += l * err
 
-		# Make sure to scale square norm for cost
-		f *= 0.5
+		if nskip: print 'MPI rank %d of %d: skipped %d untraceable paths' % (rank, size, nskip)
 
-		# Use the nice Python wrapper for the scalar
-		comm.reduce(f, op=MPI.SUM)
+		# Transmit the scalar cost function and row count
+		comm.reduce(0.5 * fsum(f), op=MPI.SUM)
+		comm.reduce(nrows, op=MPI.SUM)
 		# Use the lower-level routine for the arrays
-		comm.Reduce(gf, None)
+		comm.Reduce(gf, None, op=MPI.SUM)
 
 
 def pathinterp(paths, maxlen=1.0):
@@ -267,7 +272,7 @@ def makeoptimizer(si, dl, h):
 
 	* costonly, an optional Boolean which is False by default. When the
 	  argument is True, the optimization function returns only
-	  
+
 	  	si.pathint(xr, h)
 
 	  When the argument is False, the optimization returns the tuple
@@ -310,28 +315,26 @@ def pathtrace(box, optimizer, src, rcv, hmax=1.0, bfgs_opts={}):
 	path = [box.cart2cell(*src), box.cart2cell(*rcv)]
 	# Interpolate path in grid coordinates
 	points = pathinterp(path, hmax)
-	
+
 	try:
 		# Optimize positions of control points, if possible
 		xopt, fopt, info = fmin_l_bfgs_b(optimizer, points, **bfgs_opts)
 	except ValueError as e:
-		# Steepest descent was successful, revert to its interpolation
-		print 'NOTE: failed to optimize straight-ray path:', (src, rcv)
+		# Optimization failed, just return an empty path
 		return { }
 	else:
 		if info['warnflag'] and fopt > optimizer(points, costonly=True):
-			# Failed to converge, and starting point was better
-			print 'NOTE: optimized path worse than straight:', (src, rcv)
+			# Optimization did not find a better solution, return empty path
 			return { }
 		else: xopt = xopt.reshape((-1, 3), order='C')
-		
+
 	# Convert path to Cartesian coordinates and march segments
 	xopt = np.array([box.cell2cart(*p) for p in xopt])
 	try: marches = box.raymarcher(xopt)
 	except ValueError as e:
 		print 'NOTE: ray march failed:', (src, rcv), str(e)
 		return { }
-	
+
 	# Make sure single-segment march still a list
 	if xopt.shape[0] < 3: marches = [marches]
 	# Accumulate the length of each path in each cell
@@ -342,9 +345,21 @@ def pathtrace(box, optimizer, src, rcv, hmax=1.0, bfgs_opts={}):
 		for cell, (tmin, tmax) in march.iteritems():
 			# Convert fractional length to real length
 			# 0 <= tmin <= tmax <= 1 guaranteed by march algorithm
-			plens[cell] = plens.get(cell, 0) + (tmax - tmin) * dl
-			
-	return plens
+			contrib = (tmax - tmin) * dl
+
+			# Use Kahan summation to reduce accumulated errors
+			try:
+				s, c = plens[cell]
+			except KeyError:
+				plens[cell] = (contrib, 0.0)
+			else:
+				y = contrib - c
+				t = s + y
+				c = (t - s) - y
+				s = t
+				plens[cell] = (s, c)
+	# Discard error terms in length lists
+	return { k: v[0] for k, v in plens.iteritems() }
 
 
 def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
@@ -393,9 +408,7 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
 	if s.shape != box.ncell or s.shape != mask.shape:
 		raise ValueError('Shape of s and optional mask must be %s' % (box.ncell,))
 
-	nmeas = float(comm.size - 1) * nm
-
-	nnz = np.sum(mask)
+	nnz = np.sum(mask.astype(np.int64))
 
 	# Work arrays
 	sp = np.empty(s.shape, dtype=np.float64)
@@ -428,18 +441,15 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
 		# Reset path traces and perform cost-function and gradient evaluation
 		comm.bcast("EVALUATE")
 
-		# Accumulate the distributed cost
+		# Accumulate cost and row counts
 		f = comm.reduce(0.0, op=MPI.SUM)
+		nmeas = comm.reduce(0L, op=MPI.SUM)
+		f /= nmeas
+
 		# Accumulate gradient and extract changeable portion
 		gf[:,:,:] = 0
 		comm.Reduce(MPI.IN_PLACE, gf)
-		lgf = gf[mask]
-
-		# Scale the residual terms to produce a mean-squared residual
-		f /= nmeas
-		lgf /= nmeas
-
-		# Should some regularization be applied here?
+		lgf = gf[mask] / nmeas
 
 		# The time to evaluate the function and gradient
 		etime = time() - txtime
@@ -483,7 +493,7 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
 		# Apply a desired filter
 		if mfilter: s[:,:,:] = median_filter(s, size=mfilter)
 
-		print 'Round', i, 'func', f, 'info', info
+		print 'Round', i, 'complete, residual', f
 
 	return s
 
@@ -496,7 +506,7 @@ def callbackgen(templ, s, mask, rnd):
 
 	The callback will track total iterations within the round and will
 	store images in npy format with the name
-	
+
 		templ.format(round=rnd, iter=i),
 
 	where i is an internally incremented counter.
@@ -549,7 +559,7 @@ if __name__ == "__main__":
 	rank, size = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 
 	tsec = 'tomomaster' if not rank else 'tomoslave'
-	
+
 	# Read optional BFGS option dictionary
 	# Master uses this for image updates, slaves for path tracing
 	try:
@@ -650,12 +660,12 @@ if __name__ == "__main__":
 			atimes = dict(kp for tf, (st, ln) in tfiles.iteritems()
 					for kp in getatimes(tf, 0, st, ln).iteritems())
 		except Exception as e: _throw('Configuration must specify valid timefile', e)
-		
+
 		# The worker communicator is no longer needed
 		wcomm.Free()
 
 		# Initiate the worker loop
-		traceloop(bx, elements, atimes, dl, hmax, mxlen, 
+		traceloop(bx, elements, atimes, dl, hmax, mxlen,
 				slowdef, bfgs_opts, interp, MPI.COMM_WORLD)
 
 	# Keep alive until everybody quits
