@@ -60,8 +60,8 @@ def getatimes(atfile, column=0, start=0, stride=1):
 	return atimes
 
 
-def traceloop(box, elements, atimes, dl=1e-3,
-		hmax=0.25, mxlen=2.5, slowdef=None, bfgs_opts={},
+def traceloop(box, elements, atimes, dl=1e-3, hmax=0.25,
+		segmax=256, pathtol=1e-3, slowdef=None, bfgs_opts={},
 		interp=LinearInterpolator3D, comm=MPI.COMM_WORLD):
 	'''
 	Establish an MPI worker loop that performs path tracing for a list of
@@ -216,7 +216,8 @@ def traceloop(box, elements, atimes, dl=1e-3,
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
-			plens = pathtrace(box, popt, elements[t], elements[r], mxlen)
+			plens = pathtrace(box, popt, elements[t],
+					elements[r], segmax, pathtol, bfgs_opts)
 			if not plens:
 				nskip += 1
 				continue
@@ -236,31 +237,34 @@ def traceloop(box, elements, atimes, dl=1e-3,
 		comm.Reduce(gf, None, op=MPI.SUM)
 
 
-def pathinterp(paths, maxlen=1.0):
+def pathinterp(paths):
 	'''
-	Given a list of points in paths, ensure that the distance between two
-	successive points is no longer than maxlen. If the distance is larger
-	for two points, augment the list with the minimum number of points
-	equally spaced along the segment between the two points that will
-	satsify the constraint.
+	Given a piecewise linear curve defined by segments between successive
+	points in path, return an interpolated path that inserts a control
+	point at the midpoint of each segment.
 
 	Returns a new list ordered in the same fashion as paths.
 	'''
+	# Make sure the path is an array of points
 	paths = np.asarray(paths)
+	if paths.ndim != 2:
+		raise ValueError('Path array must be 2-D')
 
-	npaths = [paths[0]]
+	# Allocate storage for the interpolated path
+	nseg = len(paths) - 1
+	nnpt = 2 * nseg + 1
+	npaths = np.empty((nnpt, paths.shape[1]), dtype=paths.dtype)
 
-	for s, e in izip(paths, paths[1:]):
-		ds = e - s
-		l = norm(ds)
-		ns = int(l / maxlen)
-		if ns * maxlen < l: ns += 1
-		if ns < 2:
-			npaths.append(e)
-			continue
-		npaths.extend(((ns - i) * s + i * e) / ns for i in xrange(1, ns + 1))
+	# Copy starting point
+	npaths[0] = paths[0]
 
-	return np.array(npaths)
+	# Add new midpoints and existing endpoints
+	for i in xrange(1, len(paths)):
+		i2 = 2 * i
+		npaths[i2 - 1] = 0.5 * (paths[i - 1] + paths[i])
+		npaths[i2] = paths[i]
+
+	return npaths
 
 
 def makeoptimizer(si, dl, h):
@@ -293,15 +297,21 @@ def makeoptimizer(si, dl, h):
 	return ffg
 
 
-def pathtrace(box, optimizer, src, rcv, hmax=1.0, bfgs_opts={}):
+def pathtrace(box, optimizer, src, rcv, nmax, tol=1e-3, bfgs_opts={}):
 	'''
 	Given a source-receiver pair with Cartesian coordinates src and rcv,
 	respectively, and a Box3D box that defines an image grid, minimize the
 	optimizer (the output of makeoptimizer) over a path from src to rcv
-	using L-BFGS. The initial guess will interpolate the straight-line path
-	from src to rcv with a maximum distance of hmax (in grid coordinates)
-	between control nodes. The endpoints of the path are not allowed to
-	vary, so at least one interior point will be added.
+	using L-BFGS. The minimization is done adaptively, iteratively
+	subdividing the segment between src and receive into 2**i segments at
+	iteration i and finding an optimal solution for the subdivided path.
+	Iteration stops when the optimizer fails to improve its value by more
+	than tol (in a relative sense), or when the number of path segments
+	meets or exceeds nmax.
+
+	The trace will abort (by returning an empty path) if the optimized
+	function for a path in one iteration is larger than the optimized value
+	in the preceding iteration.
 
 	The determined path will be marched through the box to produce a
 	map from cell indices in the box to the length of the intersection of
@@ -312,34 +322,45 @@ def pathtrace(box, optimizer, src, rcv, hmax=1.0, bfgs_opts={}):
 	convergent, optimized path-length map, an empty map will be returned.
 	'''
 	# Start from a straight-ray assumption in low contrast
-	path = [box.cart2cell(*src), box.cart2cell(*rcv)]
-	# Interpolate path in grid coordinates
-	points = pathinterp(path, hmax)
+	points = np.array([box.cart2cell(*src), box.cart2cell(*rcv)])
+	pbest = points
 
-	try:
-		# Optimize positions of control points, if possible
-		xopt, fopt, info = fmin_l_bfgs_b(optimizer, points, **bfgs_opts)
-	except ValueError as e:
-		# Optimization failed, just return an empty path
-		return { }
-	else:
-		if info['warnflag'] and fopt > optimizer(points, costonly=True):
-			# Optimization did not find a better solution, return empty path
-			return { }
-		else: xopt = xopt.reshape((-1, 3), order='C')
+	# Start counting interations
+	nit = 0
+	# Find the cost for the first step
+	lf = optimizer(points, costonly=True)
+	bf = lf
+
+	while len(points) < nmax:
+		# Double the number of segments
+		points = pathinterp(points)
+
+		# Optimize control points; on failure, abandon path
+		try: xopt, nf, inf = fmin_l_bfgs_b(optimizer, points, **bfgs_opts)
+		except ValueError as e: return { }
+
+		points = xopt.reshape((-1, 3), order='C')
+
+		if nf < bf:
+			bf = nf
+			pbest = points
+
+		# Check convergence
+		if abs(nf - lf) < tol * abs(nf): break
+		lf = nf
 
 	# Convert path to Cartesian coordinates and march segments
-	xopt = np.array([box.cell2cart(*p) for p in xopt])
-	try: marches = box.raymarcher(xopt)
+	points = np.array([box.cell2cart(*p) for p in pbest])
+	try: marches = box.raymarcher(points)
 	except ValueError as e:
 		print 'NOTE: ray march failed:', (src, rcv), str(e)
 		return { }
 
 	# Make sure single-segment march still a list
-	if xopt.shape[0] < 3: marches = [marches]
+	if points.shape[0] < 3: marches = [marches]
 	# Accumulate the length of each path in each cell
 	plens = { }
-	for (st, ed), march in izip(izip(xopt, xopt[1:]), marches):
+	for (st, ed), march in izip(izip(points, points[1:]), marches):
 		# Compute whol length of this path segment
 		dl = norm(ed - st)
 		for cell, (tmin, tmax) in march.iteritems():
@@ -347,19 +368,12 @@ def pathtrace(box, optimizer, src, rcv, hmax=1.0, bfgs_opts={}):
 			# 0 <= tmin <= tmax <= 1 guaranteed by march algorithm
 			contrib = (tmax - tmin) * dl
 
-			# Use Kahan summation to reduce accumulated errors
-			try:
-				s, c = plens[cell]
-			except KeyError:
-				plens[cell] = (contrib, 0.0)
-			else:
-				y = contrib - c
-				t = s + y
-				c = (t - s) - y
-				s = t
-				plens[cell] = (s, c)
-	# Discard error terms in length lists
-	return { k: v[0] for k, v in plens.iteritems() }
+			# Add the contribution to the list for this cell
+			try: plens[cell].append(contrib)
+			except KeyError: plens[cell] = [contrib]
+
+	# Safely accumulate the contributions to each cell
+	return { k: fsum(v) for k, v in plens.iteritems() }
 
 
 def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
@@ -639,9 +653,14 @@ if __name__ == "__main__":
 		try: hmax = config.get(tsec, 'hmax', mapper=float, default=0.25)
 		except Exception as e: _throw('Invalid optional hmax', e)
 
-		# Load maximum path-segment length
-		try: mxlen = config.get(tsec, 'mxlen', mapper=float, default=2.5)
-		except Exception as e: _throw('Invalid optional mxlen', e)
+		# Load maximum number of path-tracing segments
+		try: segmax = config.get(tsec, 'segmax', mapper=int, default=256)
+		except Exception as e: _throw('Invalid optional segmax', e)
+
+		# Load path-tracing tolerance
+		try: pathtol = config.get(tsec, 'pathtol', mapper=float, default=1e-3)
+		except Exception as e: _throw('Invalid optional pathtol', e)
+
 
 		# Load default background slowness
 		try: slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
@@ -665,7 +684,7 @@ if __name__ == "__main__":
 		wcomm.Free()
 
 		# Initiate the worker loop
-		traceloop(bx, elements, atimes, dl, hmax, mxlen,
+		traceloop(bx, elements, atimes, dl, hmax, segmax, pathtol,
 				slowdef, bfgs_opts, interp, MPI.COMM_WORLD)
 
 	# Keep alive until everybody quits
