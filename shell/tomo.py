@@ -60,8 +60,8 @@ def getatimes(atfile, column=0, start=0, stride=1):
 	return atimes
 
 
-def traceloop(box, elements, atimes, dl=1e-3, hmax=0.25,
-		segmax=256, pathtol=1e-3, slowdef=None, bfgs_opts={},
+def traceloop(box, elements, atimes, hmax=0.25, segmax=256,
+		pathtol=1e-3, slowdef=None, bfgs_opts={},
 		interp=LinearInterpolator3D, comm=MPI.COMM_WORLD):
 	'''
 	Establish an MPI worker loop that performs path tracing for a list of
@@ -190,7 +190,7 @@ def traceloop(box, elements, atimes, dl=1e-3, hmax=0.25,
 			si = interp(s)
 			if slowdef is not None: si.default = slowdef
 			# Build the path optimizer
-			popt = makeoptimizer(si, dl, hmax)
+			popt = makeoptimizer(si, hmax)
 			continue
 		elif msg.startswith('SCRAMBLE,'):
 			try: ntr = int(msg.split(',')[1])
@@ -267,7 +267,7 @@ def pathinterp(paths):
 	return npaths
 
 
-def makeoptimizer(si, dl, h):
+def makeoptimizer(si, h):
 	'''
 	Based on si, build an optimization function that takes two arguments:
 
@@ -281,7 +281,7 @@ def makeoptimizer(si, dl, h):
 
 	  When the argument is False, the optimization returns the tuple
 
-	  	si.pathint(xr, h), si.pathgrad(xr, dl, h).ravel('C'),
+	  	si.pathint(xr, h), si.pathgrad(xr, h).ravel('C'),
 
 	  where xr = x.reshape((-1, 3), order='C').
 
@@ -291,7 +291,7 @@ def makeoptimizer(si, dl, h):
 		x = x.reshape((-1, 3), order='C')
 		f = si.pathint(x, h)
 		if costonly: return f
-		g = si.pathgrad(x, dl, h)
+		g = si.pathgrad(x, h)
 		return f, g.ravel('C')
 
 	return ffg
@@ -647,9 +647,7 @@ if __name__ == "__main__":
 			elements = ldmats(efiles, nkeys=1)
 		except Exception as e: _throw('Configuration must specify elements', e)
 
-		# Load integration parameters
-		try: dl = config.get(tsec, 'dl', mapper=float, default=1e-3)
-		except Exception as e: _throw('Invalid optional dl', e)
+		# Load integration parameter
 		try: hmax = config.get(tsec, 'hmax', mapper=float, default=0.25)
 		except Exception as e: _throw('Invalid optional hmax', e)
 
@@ -684,7 +682,7 @@ if __name__ == "__main__":
 		wcomm.Free()
 
 		# Initiate the worker loop
-		traceloop(bx, elements, atimes, dl, hmax, segmax, pathtol,
+		traceloop(bx, elements, atimes, hmax, segmax, pathtol,
 				slowdef, bfgs_opts, interp, MPI.COMM_WORLD)
 
 	# Keep alive until everybody quits
