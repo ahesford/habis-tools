@@ -60,7 +60,7 @@ def getatimes(atfile, column=0, start=0, stride=1):
 	return atimes
 
 
-def traceloop(box, elements, atimes, hmax=0.25, segmax=256,
+def traceloop(box, elements, atimes, pintol=1e-5, segmax=256,
 		pathtol=1e-3, slowdef=None, bfgs_opts={},
 		interp=LinearInterpolator3D, comm=MPI.COMM_WORLD):
 	'''
@@ -190,7 +190,7 @@ def traceloop(box, elements, atimes, hmax=0.25, segmax=256,
 			si = interp(s)
 			if slowdef is not None: si.default = slowdef
 			# Build the path optimizer
-			popt = makeoptimizer(si, hmax)
+			popt = makeoptimizer(si, pintol)
 			continue
 		elif msg.startswith('SCRAMBLE,'):
 			try: ntr = int(msg.split(',')[1])
@@ -267,7 +267,7 @@ def pathinterp(paths):
 	return npaths
 
 
-def makeoptimizer(si, h):
+def makeoptimizer(si, tol):
 	'''
 	Based on si, build an optimization function that takes two arguments:
 
@@ -277,22 +277,20 @@ def makeoptimizer(si, h):
 	* costonly, an optional Boolean which is False by default. When the
 	  argument is True, the optimization function returns only
 
-	  	si.pathint(xr, h)
+	  	si.pathint(xr, tol)
 
 	  When the argument is False, the optimization returns the tuple
 
-	  	si.pathint(xr, h), si.pathgrad(xr, h).ravel('C'),
+	  	si.pathint(xr, tol), si.pathgrad(xr, tol).ravel('C'),
 
 	  where xr = x.reshape((-1, 3), order='C').
 
 	The function is meant for use in fmin_l_bfgs_b when costonly is False.
 	'''
 	def ffg(x, costonly=False):
-		x = x.reshape((-1, 3), order='C')
-		f = si.pathint(x, h)
-		if costonly: return f
-		g = si.pathgrad(x, h)
-		return f, g.ravel('C')
+		# The Interpolator3D now ravels and unravels inputs and outputs
+		if costonly: return si.pathint(x, tol)
+		return si.pathint(x, tol, True)
 
 	return ffg
 
@@ -306,8 +304,8 @@ def pathtrace(box, optimizer, src, rcv, nmax, tol=1e-3, bfgs_opts={}):
 	subdividing the segment between src and receive into 2**i segments at
 	iteration i and finding an optimal solution for the subdivided path.
 	Iteration stops when the optimizer fails to improve its value by more
-	than tol (in a relative sense), or when the number of path segments
-	meets or exceeds nmax.
+	than tol (absolute), or when the number of path segments meets or
+	exceeds nmax.
 
 	The trace will abort (by returning an empty path) if the optimized
 	function for a path in one iteration is larger than the optimized value
@@ -346,7 +344,7 @@ def pathtrace(box, optimizer, src, rcv, nmax, tol=1e-3, bfgs_opts={}):
 			pbest = points
 
 		# Check convergence
-		if abs(nf - lf) < tol * abs(nf): break
+		if abs(nf - lf) < tol: break
 		lf = nf
 
 	# Convert path to Cartesian coordinates and march segments
@@ -647,9 +645,9 @@ if __name__ == "__main__":
 			elements = ldmats(efiles, nkeys=1)
 		except Exception as e: _throw('Configuration must specify elements', e)
 
-		# Load integration parameter
-		try: hmax = config.get(tsec, 'hmax', mapper=float, default=0.25)
-		except Exception as e: _throw('Invalid optional hmax', e)
+		# Load integration tolerance
+		try: pintol = config.get(tsec, 'pintol', mapper=float, default=1e-5)
+		except Exception as e: _throw('Invalid optional pintol', e)
 
 		# Load maximum number of path-tracing segments
 		try: segmax = config.get(tsec, 'segmax', mapper=int, default=256)
@@ -682,7 +680,7 @@ if __name__ == "__main__":
 		wcomm.Free()
 
 		# Initiate the worker loop
-		traceloop(bx, elements, atimes, hmax, segmax, pathtol,
+		traceloop(bx, elements, atimes, pintol, segmax, pathtol,
 				slowdef, bfgs_opts, interp, MPI.COMM_WORLD)
 
 	# Keep alive until everybody quits
