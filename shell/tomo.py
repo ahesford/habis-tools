@@ -26,6 +26,7 @@ from itertools import izip
 from mpi4py import MPI
 
 from pycwp.cytools.boxer import HermiteInterpolator3D, LinearInterpolator3D, Box3D
+from pycwp.cytools.regularize import totvar
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadkeymat as ldkmat, loadmatlist as ldmats
@@ -374,8 +375,8 @@ def pathtrace(box, optimizer, src, rcv, nmax, tol=1e-3, bfgs_opts={}):
 	return { k: fsum(v) for k, v in plens.iteritems() }
 
 
-def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
-		bfgs_opts={}, partial_output=None, comm=MPI.COMM_WORLD):
+def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
+		mfilter=None, bfgs_opts={}, partial_output=None, comm=MPI.COMM_WORLD):
 	'''
 	Iteratively compute a slowness image by updating the given profile s
 	defined over the grid defined in the Box3D box. If mask is not None, it
@@ -462,6 +463,12 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, mfilter=3,
 		gf[:,:,:] = 0
 		comm.Reduce(MPI.IN_PLACE, gf)
 		lgf = gf[mask] / nmeas
+
+		if tvreg:
+			# Use total-variation regularization as desired
+			tvn, tvng = totvar(sp, False, 1e-8)
+			f += tvreg * tvn
+			lgf += tvreg * tvng[mask]
 
 		# The time to evaluate the function and gradient
 		etime = time() - txtime
@@ -614,6 +621,8 @@ if __name__ == "__main__":
 			if nrounds < 1: raise ValueError('rounds must be positive')
 		except Exception as e: _throw('Invalid optional rounds', e)
 
+		# Read optional total-variation regularization parameter
+		tvreg = config.get(tsec, 'tvreg', default=None)
 		# Read optional the filter parameters
 		mfilter = config.get(tsec, 'mfilter', default=None)
 		# Read optional partial_output format string
@@ -631,7 +640,7 @@ if __name__ == "__main__":
 		except Exception as e: _throw('Invalid optional limits', e)
 
 		# Compute random updates to the image
-		ns = makeimage(s, mask, bx, nmeas, nrounds, bounds,
+		ns = makeimage(s, mask, bx, nmeas, nrounds, bounds, tvreg,
 				mfilter, bfgs_opts, partial_output, MPI.COMM_WORLD)
 
 		np.save(output, ns.astype(np.float32))
