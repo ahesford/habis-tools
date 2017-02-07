@@ -386,18 +386,25 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 
 	On each rank, nm measurements will be randomly selected from the pool
 	of available measurements to perform each of a total of nrounds
-	reconstruction rounds. After each round of randomized reconstruction,
-	if mfilter has a Boolean value of True, a median filter of size mfilter
-	will be applied to the image before beginning the next round. The
-	argument mfilter can be a scalar or a three-element sequence of
-	positive integers.
+	reconstruction rounds. The image in each round is formed using L-BFGS-B
+	to minimize the global accumulation of cost functions as computed by
+	workers running traceloop(). If bounds is not None, it should be a
+	tuple of the form (sl, sh), for which a per-pixel list of slowness
+	bounds will be computed so that all values in the final image fall in
+	the range [sl, sh]. The bfgs_opts dictionary will be passed as keyword
+	arguments to scipy.optimize.fmin_l_bfgs_b.
 
-	The image is formed using L-BFGS-B to minimize the global accumulation
-	of cost functions as computed by workers running traceloop(). If bounds
-	is not None, it should be a tuple of the form (sl, sh), for which a
-	per-pixel list of slowness bounds will be computed so that all values
-	in the final image fall in the range [sl, sh]. The bfgs_opts dictionary
-	will be passed as keyword arguments to scipy.optimize.fmin_l_bfgs_b.
+	If tvreg is True, the cost function will be regularized with the
+	total-variation norm from pycwp.cytools.regularize.totvar. In this
+	case, tvreg should either be a scalar regularization parameter used to
+	weight the norm or a kwargs dictionary which must contain a 'weight'
+	keyword providing the weight. Additional keyword arguments are passed
+	to the totvar function untouched.
+
+	After each round of randomized reconstruction, if mfilter is True, a
+	median filter of size mfilter will be applied to the image before
+	beginning the next round. The argument mfilter can be a scalar or a
+	three-element sequence of positive integers.
 
 	If partial_output is not None, it should be a string specifying a name
 	template that will be rendered to store images produced after each
@@ -427,6 +434,20 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 	sp = np.empty(s.shape, dtype=np.float64)
 	gf = np.empty(s.shape, dtype=np.float64)
 	x = np.empty((nnz,), dtype=np.float64)
+
+	if tvreg is None:
+		tvweight = None
+	else:
+		try:
+			# Treat tvreg as a dict
+			tvreg = dict(tvreg)
+		except TypeError:
+			# Treat tvreg as a scalar
+			tvweight = float(tvreg)
+			tvreg = { }
+		else:
+			# Make sure a weight exists and is float-compatible
+			tvweight = float(tvreg.pop('weight'))
 
 	def ffg(x):
 		'''
@@ -464,11 +485,11 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 		comm.Reduce(MPI.IN_PLACE, gf)
 		lgf = gf[mask] / nmeas
 
-		if tvreg:
+		if tvweight:
 			# Use total-variation regularization as desired
-			tvn, tvng = totvar(sp, False, 1e-8)
-			f += tvreg * tvn
-			lgf += tvreg * tvng[mask]
+			tvn, tvng = totvar(sp, **tvreg)
+			f += tvweight * tvn
+			lgf += tvweight * tvng[mask]
 
 		# The time to evaluate the function and gradient
 		etime = time() - txtime
@@ -621,10 +642,17 @@ if __name__ == "__main__":
 			if nrounds < 1: raise ValueError('rounds must be positive')
 		except Exception as e: _throw('Invalid optional rounds', e)
 
-		# Read optional total-variation regularization parameter
-		tvreg = config.get(tsec, 'tvreg', default=None)
-		# Read optional the filter parameters
-		mfilter = config.get(tsec, 'mfilter', default=None)
+		try:
+			# Read optional total-variation regularization parameter
+			tvreg = config.get(tsec, 'tvreg', mapper=dict,
+						checkmap=False, default=None)
+		except Exception as e: _throw('Invalid optional tvreg', e)
+
+		try:
+			# Read optional the filter parameters
+			mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
+		except Exception as e: _throw('Invalid optional mfilter', e)
+
 		# Read optional partial_output format string
 		partial_output = config.get(tsec, 'partial_output', default=None)
 
