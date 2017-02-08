@@ -398,8 +398,12 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 	total-variation norm from pycwp.cytools.regularize.totvar. In this
 	case, tvreg should either be a scalar regularization parameter used to
 	weight the norm or a kwargs dictionary which must contain a 'weight'
-	keyword providing the weight. Additional keyword arguments are passed
-	to the totvar function untouched.
+	keyword providing the weight. Three optional keywords, 'scale', 'min'
+	and 'every', will be used to scale the weight by the float factor
+	'scale' after every 'every' iterations (default: 1) until the weight is
+	no larger than 'min' (default: 0). The values of 'every' and 'min' are
+	ignored if 'scale' is not provided. Any additional keyword arguments
+	are passed to totvar.
 
 	After each round of randomized reconstruction, if mfilter is True, a
 	median filter of size mfilter will be applied to the image before
@@ -435,19 +439,26 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 	gf = np.empty(s.shape, dtype=np.float64)
 	x = np.empty((nnz,), dtype=np.float64)
 
-	if tvreg is None:
-		tvweight = None
-	else:
+	# Interpret TV regularization
+	tvscale, tvargs = { }, { }
+	if tvreg:
 		try:
-			# Treat tvreg as a dict
-			tvreg = dict(tvreg)
+			# Treat the tvreg argument as a simple float
+			tvscale['weight'] = float(tvreg)
 		except TypeError:
-			# Treat tvreg as a scalar
-			tvweight = float(tvreg)
-			tvreg = { }
-		else:
-			# Make sure a weight exists and is float-compatible
-			tvweight = float(tvreg.pop('weight'))
+			# Non-numeric tvreg should be a dictionary
+			tvargs = dict(tvreg)
+
+			# Required weight parameter
+			tvscale['weight'] = float(tvargs.pop('weight'))
+
+			# Optional 'scale' argument
+			try: tvscale['scale'] = float(tvargs.pop('scale'))
+			except KeyError: pass
+
+			# Optional 'every' and 'min' arguments
+			tvscale['every'] = int(tvargs.pop('every', 1))
+			tvscale['min'] = float(tvargs.pop('min', 0))
 
 	def ffg(x):
 		'''
@@ -485,11 +496,15 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 		comm.Reduce(MPI.IN_PLACE, gf)
 		lgf = gf[mask] / nmeas
 
-		if tvweight:
+		try:
+			tvwt = tvscale['weight']
+		except KeyError:
+			pass
+		else:
 			# Use total-variation regularization as desired
-			tvn, tvng = totvar(sp, **tvreg)
-			f += tvweight * tvn
-			lgf += tvweight * tvng[mask]
+			tvn, tvng = totvar(sp, **tvargs)
+			f += tvwt * tvn
+			lgf += tvwt * tvng[mask]
 
 		# The time to evaluate the function and gradient
 		etime = time() - txtime
@@ -507,6 +522,9 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 
 	# Iteratively select random transmit-receive pairs to update an image
 	for i in range(nrounds):
+		if tvscale:
+			print 'Round', i, 'TV regularization weight', tvscale['weight']
+
 		if bounds:
 			# Clip slowness on start
 			s[:,:,:] = np.clip(s, bounds[0], bounds[1])
@@ -532,6 +550,11 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 		s[mask] += x
 		# Apply a desired filter
 		if mfilter: s[:,:,:] = median_filter(s, size=mfilter)
+
+		# Adjust the regularization weight as appropriate
+		if ('scale' in tvscale and not (i + 1) % tvscale['every']
+				and tvscale['weight'] > tvscale['min']):
+			tvscale['weight'] *= tvscale['scale']
 
 		print 'Round', i, 'complete, residual', f
 
