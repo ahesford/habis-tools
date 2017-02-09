@@ -375,8 +375,8 @@ def pathtrace(box, optimizer, src, rcv, nmax, tol=1e-3, bfgs_opts={}):
 	return { k: fsum(v) for k, v in plens.iteritems() }
 
 
-def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
-		mfilter=None, bfgs_opts={}, partial_output=None, comm=MPI.COMM_WORLD):
+def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
+		tvreg=None, mfilter=None, partial_output=None, comm=MPI.COMM_WORLD):
 	'''
 	Iteratively compute a slowness image by updating the given profile s
 	defined over the grid defined in the Box3D box. If mask is not None, it
@@ -384,15 +384,23 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 	True for cells that should be updated and False for cells that should
 	remain unchanged.
 
-	On each rank, nm measurements will be randomly selected from the pool
-	of available measurements to perform each of a total of nrounds
-	reconstruction rounds. The image in each round is formed using L-BFGS-B
-	to minimize the global accumulation of cost functions as computed by
-	workers running traceloop(). If bounds is not None, it should be a
-	tuple of the form (sl, sh), for which a per-pixel list of slowness
-	bounds will be computed so that all values in the final image fall in
-	the range [sl, sh]. The bfgs_opts dictionary will be passed as keyword
-	arguments to scipy.optimize.fmin_l_bfgs_b.
+	The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB) method of
+	Tan, et al. (2016) is used to compute the image. The method continues
+	for at most 'epochs' epochs, with a total of 'updates' stochastic
+	descent steps per epoch. A single stochastic descent is made by
+	sampling the global cost functional (mean-squared arrival-time
+	error) using nmeas measurements per MPI rank.
+
+	The descent step is selecting using a stochastic Barzilai-Borwein (BB)
+	scheme. The first two epochs will each use a fixed step size of 1.
+	Later updates rely on approximations to the gradient in previous
+	epochs. The approximate gradient at epoch k is defined recursively over
+	t updates as
+
+		g_{k,t} = beta * grad(f_t)(x_t) + (1 - beta) g_{k,t-1},
+
+	where g_{k,0} == 0, f_t is the t-th sampled cost functional for the
+	epoch and x_t is the solution at update t.
 
 	If tvreg is True, the cost function will be regularized with the
 	total-variation norm from pycwp.cytools.regularize.totvar. In this
@@ -400,8 +408,8 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 	weight the norm or a kwargs dictionary which must contain a 'weight'
 	keyword providing the weight. Three optional keywords, 'scale', 'min'
 	and 'every', will be used to scale the weight by the float factor
-	'scale' after every 'every' iterations (default: 1) until the weight is
-	no larger than 'min' (default: 0). The values of 'every' and 'min' are
+	'scale' after every 'every' epochs (default: 1) until the weight is no
+	larger than 'min' (default: 0). The values of 'every' and 'min' are
 	ignored if 'scale' is not provided. Any additional keyword arguments
 	are passed to totvar.
 
@@ -412,12 +420,11 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 
 	If partial_output is not None, it should be a string specifying a name
 	template that will be rendered to store images produced after each
-	update. An "update" counts as a single iteration of L-BFGS-B within a
-	single round of randomized reconstruction. The final output name will
-	be produced by calling partial_output.format(round=round, iter=iter),
-	where "round" and "iter" are the randomized round and inner L-BFGS-B
-	iteration numbers, respectively. If partial_output is None, no partial
-	images will be stored.
+	update. An "update" counts as a update in a single epoch. The formatted
+	output name will be partial_output.format(epoch=epoch, iter=iter),
+	where "epoch" and "iter" are the epoch index and update iteration
+	number, respectively. If partial_output is None, no partial images will
+	be stored.
 
 	Participating ranks will be pulled from the given MPI communicator,
 	wherein rank 0 must invoke this function and all other ranks must
@@ -437,7 +444,12 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 	# Work arrays
 	sp = np.empty(s.shape, dtype=np.float64)
 	gf = np.empty(s.shape, dtype=np.float64)
-	x = np.empty((nnz,), dtype=np.float64)
+
+	work = np.zeros((nnz,4), dtype=np.float64)
+	x = work[:,0]
+	lx = work[:,1]
+	cg = work[:,2]
+	lg = work[:,3]
 
 	# Interpret TV regularization
 	tvscale, tvargs = { }, { }
@@ -462,12 +474,12 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 
 	def ffg(x):
 		'''
-		This function returns the cost functional and its gradient for
-		optimization by fmin_l_bfgs_b to obtain a contrast update.
+		This function returns the (optionally TV regularized) cost
+		functional and its gradient for optimization by SGD-BB to
+		obtain a contrast update.
 
-		The cost function is C(s + x) + 0.5 * norm(x)**2 and its
-		gradient is grad(C)(s) + x, were C and grad(C) are as described
-		in the traceloop docstring.
+		See the traceloop documentation for the general (unregularized)
+		form of the cost functional.
 		'''
 		# Track the run time
 		stime = time()
@@ -514,76 +526,116 @@ def makeimage(s, mask, box, nm, nrounds, bounds=None, tvreg=None,
 
 		return f, lgf
 
-	# Make sure any bounds are ordered properly
-	if bounds is not None:
-		sl, sh = bounds
-		if sh < sl: bounds = (sh, sl)
-		else: bounds = (sl, sh)
+	# Step smoothing coefficient
+	ck = 1.0
 
-	# Iteratively select random transmit-receive pairs to update an image
-	for i in range(nrounds):
-		if tvscale:
-			print 'Round', i, 'TV regularization weight', tvscale['weight']
+	# For convergence testing
+	maxcost = 0.0
+	converged = False
 
-		if bounds:
-			# Clip slowness on start
-			s[:,:,:] = np.clip(s, bounds[0], bounds[1])
-			# Develop per-sample bounds
-			vxbounds = [(bounds[0] - sv, bounds[1] - sv) for sv in s[mask]]
+	for k in range(epochs):
+		if k < 2:
+			eta = 1.0
 		else:
-			vxbounds = None
+			# Compute change in solution and gradient
+			lx += x
+			lg += cg
 
-		# Clear the initial perturbation guess
-		x[:] = 0
+			nlx = norm(lx)**2
+			xdg = abs(np.dot(lx, lg))
 
-		# Scramble the set of arrival times
-		comm.bcast("SCRAMBLE,%d" % nm)
+			if xdg < sys.float_info.epsilon * nlx:
+				# Terminate if step size blows up
+				print 'TERMINATE: epoch', k, 'step size breakdown'
+				break
+
+			eta = nlx / xdg / updates
+
+			# Smooth the step
+			kp = float(k + 1)
+			ck = (ck**(k - 2) * eta * kp)**(1.0 / (k - 1))
+			eta = ck / kp
+
+		print 'Epoch', k,
+		if tvscale: print 'TV weight', tvscale['weight'],
+		print 'gradient descent step', eta
+
+		# Copy negative of last solution and gradient
+		lx[:] = -x
+		lg[:] = -cg
+
+		# Clear gradient for next iteration
+		cg[:] = 0
 
 		# Build a callback to write per-iteration results, if desired
-		cb = callbackgen(partial_output, s, mask, i)
+		cb = callbackgen(partial_output, s, mask, k, mfilter)
 
-		# Perform the iterative update a limited number of times
-		x, f, info = fmin_l_bfgs_b(ffg, x,
-				bounds=vxbounds, callback=cb, **bfgs_opts)
+		for t in range(updates):
+			# Randomly select the next measurement sample
+			comm.bcast("SCRAMBLE,%d" % nmeas)
 
-		# Update the image
-		s[mask] += x
-		# Apply a desired filter
-		if mfilter: s[:,:,:] = median_filter(s, size=mfilter)
+			# Compute the sampled cost functional and its gradient
+			f, lgf = ffg(x)
+
+			# Print some convergence numbers
+			print 'At epoch', k, 'update', t, 'cost', f
+
+			# Adjust the solution against the gradient
+			x -= eta * lgf
+
+			# Store the partial update if desired
+			if cb: cb(x, t)
+
+			# Check for convergence
+			maxcost = max(f, maxcost)
+			if f < tol * maxcost:
+				converged = True
+				break
+
+			# Update the average gradient
+			cg[:] = beta * lgf + (1 - beta) * cg
+
+		if converged:
+			print 'TERMINATE: Convergence achieved'
+			break
 
 		# Adjust the regularization weight as appropriate
-		if ('scale' in tvscale and not (i + 1) % tvscale['every']
+		if ('scale' in tvscale and not (k + 1) % tvscale['every']
 				and tvscale['weight'] > tvscale['min']):
 			tvscale['weight'] *= tvscale['scale']
 
-		print 'Round', i, 'complete, residual', f
+	# Update the image
+	s[mask] += x
+
+	# Apply a desired filter
+	if mfilter: s[:,:,:] = median_filter(s, size=mfilter)
 
 	return s
 
 
-def callbackgen(templ, s, mask, rnd):
+def callbackgen(templ, s, mask, epoch, mfilter):
 	'''
-	Build a callback to store partial images of perturbations to the
-	assumed slowness s, with the given update mask (True where samples will
-	be perturbed, False elsewhere), for a given randomized round rnd.
+	Build a callback with signature callback(x, nit) to write partial
+	images of perturbations x to an assumed slowness s, with the given
+	update mask (True where samples will be perturbed, False elsewhere),
+	for a given SGD-BB epoch 'epoch'.
 
-	The callback will track total iterations within the round and will
-	store images in npy format with the name
+	If mfilter is True, it should be a value passed as the "size" argument
+	to scipy.ndimage.median_filter to smooth the perturbed slowness prior
+	to output.
 
-		templ.format(round=rnd, iter=i),
-
-	where i is an internally incremented counter.
+	The callback will store images in npy format with the name given by
+	templ.format(epoch=epoch, iter=nit).
 	'''
 	if not templ: return None
 
-	nit = [0]
-	def callback(x):
+	def callback(x, nit):
 		# Write out the iterate
 		sp = s.copy()
 		sp[mask] += x
-		fname = templ.format(round=rnd, iter=nit[0])
+		if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
+		fname = templ.format(epoch=epoch, iter=nit)
 		np.save(fname, sp.astype(np.float32))
-		nit[0] += 1
 
 	return callback
 
@@ -660,10 +712,28 @@ if __name__ == "__main__":
 		except Exception as e: _throw('Invalid optional nmeas', e)
 
 		try:
-			# Read the number of rounds
-			nrounds = config.get(tsec, 'rounds', mapper=int, default=1)
-			if nrounds < 1: raise ValueError('rounds must be positive')
-		except Exception as e: _throw('Invalid optional rounds', e)
+			# Read the number of epochs
+			epochs = config.get(tsec, 'epochs', mapper=int, default=1)
+			if epochs < 1: raise ValueError('epochs must be positive')
+		except Exception as e: _throw('Invalid optional epochs', e)
+
+		try:
+			# Read the number of updates per epoch
+			updates = config.get(tsec, 'updates', mapper=int, default=1)
+			if updates < 1: raise ValueError('updates must be positive')
+		except Exception as e: _throw('Invalid optional updates', e)
+
+		try:
+			# Read the number sampled gradient approximation weight
+			beta = config.get(tsec, 'beta', mapper=float, default=0.5)
+			if not 0 < beta <= 1.0: raise ValueError('beta must be in range (0, 1]')
+		except Exception as e: _throw('Invalid optional beta', e)
+
+		try:
+			# Read the number sampled gradient approximation weight
+			tol = config.get(tsec, 'tol', mapper=float, default=1e-6)
+			if not tol > 0: raise ValueError('tol must be positive')
+		except Exception as e: _throw('Invalid optional tol', e)
 
 		try:
 			# Read optional total-variation regularization parameter
@@ -691,8 +761,8 @@ if __name__ == "__main__":
 		except Exception as e: _throw('Invalid optional limits', e)
 
 		# Compute random updates to the image
-		ns = makeimage(s, mask, bx, nmeas, nrounds, bounds, tvreg,
-				mfilter, bfgs_opts, partial_output, MPI.COMM_WORLD)
+		ns = makeimage(s, mask, bx, nmeas, epochs, updates, beta, tol,
+				tvreg, mfilter, partial_output, MPI.COMM_WORLD)
 
 		np.save(output, ns.astype(np.float32))
 
