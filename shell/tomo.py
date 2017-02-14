@@ -205,7 +205,7 @@ def traceloop(box, elements, atimes, pintol=1e-5, segmax=256,
 			print 'MPI rank %d of %d: invalid MPI tag %d' % (rank, size, tag)
 			comm.Abort(1)
 
-		if popt is None:
+		if si is None:
 			print 'MPI rank %d of %d: define slowness before evaluation' % (rank, size)
 			comm.Abort(1)
 
