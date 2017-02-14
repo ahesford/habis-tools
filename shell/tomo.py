@@ -25,7 +25,8 @@ from itertools import izip
 
 from mpi4py import MPI
 
-from pycwp.cytools.boxer import HermiteInterpolator3D, LinearInterpolator3D, Box3D
+from pycwp.cytools.boxer Box3D
+from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.regularize import totvar
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
@@ -162,7 +163,7 @@ def traceloop(box, elements, atimes, pintol=1e-5, segmax=256,
 
 	# Note that the slowness and its path optimizer
 	s = None
-	popt = None
+	si = None
 
 	# Make sure all arrival-time entries have matching entries in elements
 	atimes = { k: v for k, v in atimes.iteritems()
@@ -190,8 +191,6 @@ def traceloop(box, elements, atimes, pintol=1e-5, segmax=256,
 			# Build the interpolator
 			si = interp(s)
 			if slowdef is not None: si.default = slowdef
-			# Build the path optimizer
-			popt = makeoptimizer(si, pintol)
 			continue
 		elif msg.startswith('SCRAMBLE,'):
 			try: ntr = int(msg.split(',')[1])
@@ -217,8 +216,9 @@ def traceloop(box, elements, atimes, pintol=1e-5, segmax=256,
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
-			plens = pathtrace(box, popt, elements[t],
-					elements[r], segmax, pathtol, bfgs_opts)
+			src, rcv = elements[t], elements[r]
+			plens = pathtrace(box, si, src, rcv, segmax,
+						pintol, pathtol, bfgs_opts)
 			if not plens:
 				nskip += 1
 				continue
@@ -238,79 +238,14 @@ def traceloop(box, elements, atimes, pintol=1e-5, segmax=256,
 		comm.Reduce(gf, None, op=MPI.SUM)
 
 
-def pathinterp(paths):
-	'''
-	Given a piecewise linear curve defined by segments between successive
-	points in path, return an interpolated path that inserts a control
-	point at the midpoint of each segment.
-
-	Returns a new list ordered in the same fashion as paths.
-	'''
-	# Make sure the path is an array of points
-	paths = np.asarray(paths)
-	if paths.ndim != 2:
-		raise ValueError('Path array must be 2-D')
-
-	# Allocate storage for the interpolated path
-	nseg = len(paths) - 1
-	nnpt = 2 * nseg + 1
-	npaths = np.empty((nnpt, paths.shape[1]), dtype=paths.dtype)
-
-	# Copy starting point
-	npaths[0] = paths[0]
-
-	# Add new midpoints and existing endpoints
-	for i in xrange(1, len(paths)):
-		i2 = 2 * i
-		npaths[i2 - 1] = 0.5 * (paths[i - 1] + paths[i])
-		npaths[i2] = paths[i]
-
-	return npaths
-
-
-def makeoptimizer(si, tol):
-	'''
-	Based on si, build an optimization function that takes two arguments:
-
-	* x, an (N, 3) array, flattened in C order, that represents N control
-	  points of a test path through the interpolated slowness field si.
-
-	* costonly, an optional Boolean which is False by default. When the
-	  argument is True, the optimization function returns only
-
-	  	si.pathint(xr, tol)
-
-	  When the argument is False, the optimization returns the tuple
-
-	  	si.pathint(xr, tol), si.pathgrad(xr, tol).ravel('C'),
-
-	  where xr = x.reshape((-1, 3), order='C').
-
-	The function is meant for use in fmin_l_bfgs_b when costonly is False.
-	'''
-	def ffg(x, costonly=False):
-		# The Interpolator3D now ravels and unravels inputs and outputs
-		if costonly: return si.pathint(x, tol)
-		return si.pathint(x, tol, True)
-
-	return ffg
-
-
-def pathtrace(box, optimizer, src, rcv, nmax, tol=1e-3, bfgs_opts={}):
+def pathtrace(box, si, src, rcv, nmax, itol=1e-3, ptol=1e-3, bfgs_opts={}):
 	'''
 	Given a source-receiver pair with Cartesian coordinates src and rcv,
-	respectively, and a Box3D box that defines an image grid, minimize the
-	optimizer (the output of makeoptimizer) over a path from src to rcv
-	using L-BFGS. The minimization is done adaptively, iteratively
-	subdividing the segment between src and receive into 2**i segments at
-	iteration i and finding an optimal solution for the subdivided path.
-	Iteration stops when the optimizer fails to improve its value by more
-	than tol (absolute), or when the number of path segments meets or
-	exceeds nmax.
-
-	The trace will abort (by returning an empty path) if the optimized
-	function for a path in one iteration is larger than the optimized value
-	in the preceding iteration.
+	respectively, and a Box3D box that defines an image grid, find a path
+	according to si.minpath(gsrc, grcv, nmax, itol, ptol, **bfgs_opts),
+	where si is an Interpolator3D instance and gsrc, grcv are the grid
+	coordinates corresponding to src and rcv, respectively, according to
+	box.cart2cell.
 
 	The determined path will be marched through the box to produce a
 	map from cell indices in the box to the length of the intersection of
@@ -320,36 +255,13 @@ def pathtrace(box, optimizer, src, rcv, nmax, tol=1e-3, bfgs_opts={}):
 	In the case of any failure that prevents the determination of a
 	convergent, optimized path-length map, an empty map will be returned.
 	'''
-	# Start from a straight-ray assumption in low contrast
-	points = np.array([box.cart2cell(*src), box.cart2cell(*rcv)])
-	pbest = points
-
-	# Start counting interations
-	nit = 0
-	# Find the cost for the first step
-	lf = optimizer(points, costonly=True)
-	bf = lf
-
-	while len(points) < nmax:
-		# Double the number of segments
-		points = pathinterp(points)
-
-		# Optimize control points; on failure, abandon path
-		try: xopt, nf, inf = fmin_l_bfgs_b(optimizer, points, **bfgs_opts)
-		except ValueError as e: return { }
-
-		points = xopt.reshape((-1, 3), order='C')
-
-		if nf < bf:
-			bf = nf
-			pbest = points
-
-		# Check convergence
-		if abs(nf - lf) < tol: break
-		lf = nf
+	# Compute the minimum path (if possible) or return an empty path
+	gsrc, grcv = box.cart2cell(*src), box.cart2cell(*rcv)
+	try: popt = si.minpath(gsrc, grcv, nmax, itol, ptol, **bfgs_opts)
+	except ValueError: return { }
 
 	# Convert path to Cartesian coordinates and march segments
-	points = np.array([box.cell2cart(*p) for p in pbest])
+	points = np.array([box.cell2cart(*p) for p in popt])
 	try: marches = box.raymarcher(points)
 	except ValueError as e:
 		print 'NOTE: ray march failed:', (src, rcv), str(e)
