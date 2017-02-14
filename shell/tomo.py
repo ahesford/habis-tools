@@ -25,7 +25,7 @@ from itertools import izip
 
 from mpi4py import MPI
 
-from pycwp.cytools.boxer Box3D
+from pycwp.cytools.boxer import Box3D
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.regularize import totvar
 
