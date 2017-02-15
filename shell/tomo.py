@@ -62,239 +62,225 @@ def getatimes(atfile, column=0, start=0, stride=1):
 	return atimes
 
 
-def traceloop(box, elements, atimes, pintol=1e-5, segmax=256,
-		pathtol=1e-3, slowdef=None, bfgs_opts={},
-		interp=LinearInterpolator3D, comm=MPI.COMM_WORLD):
+class TomographyTracer(object):
 	'''
-	Establish an MPI worker loop that performs path tracing for a list of
-	source-receive pairs (whose coordinates will be pulled from the map
-	elements) through the given Box3D box. Path tracing is done by
-	perturbing the straight-ray path from source to receiver using L-BFGS
-	to minimize the travel-time integral through a slowness field. The
-	bfgs_opts dictionary can be used to provide keyword arguments to
-	configure L-BFGS (actually scipy.optimize.fmin_l_bfgs_b).
-
-	The trace results, which map each transmit-receive pair to a map from
-	cell indices (in the Box3D) to lengths of the (t, r) path through that
-	cell, are used to compute a process-local share of the cost function
-
-		C(s) = 0.5 * || Ls - D ||**2,
-
-	where L is a representation of the path-length operator mapping the
-	slowness at each cell in s to its contribution to the travel times
-	based on the traced paths, and the data D consists of corresponding
-	entries atimes[t,r]. The worker also evaluates the gradient of this
-	cost function, which is given by
-
-		grad(C)(s) = L^T [ Ls - D ].
-
-	By default, the local share of the cost function and its gradient
-	encompass the full list of transmit-receive pairs in the arrival-time
-	map atimes. Thus, each process running a traceloop should receive a
-	distinct arrival-time map.
-
-	All communication will happen over the MPI communicator comm, with the
-	root rank (0) representing the master node that is not engaged in this
-	loop. Flow control is achieved by calling, from the master, one of
-
-		comm.bcast("SLOWNESS"),
-		comm.bcast("SCRAMBLE,<N>"),
-		comm.bcast("EVALUATE"), or
-		comm.bcast("ENDTRACE").
-
-	Note that these flow-control messages use the higher-level Python
-	object interface.
-
-	Workers must be provided a slowness map, s, before evaluating the cost
-	function and gradient. This is accomplished by first broadcasting a
-	"SLOWNESS" control message to the workers. After the control message,
-	a Numpy array s, with shape box.ncell and dtype np.float64, must be
-	broadcast to the workers by calling comm.Bcast(s), using the low-level
-	buffer interface, on the root. The slowness map will be retained for
-	all future evaluations, but the map can be replaced at any time with a
-	subsequent transmission of the SLOWNESS control message and a new
-	slowness array.
-
-	For optimization, the slowness is interpolated by calling interp(s) to
-	obtain an instance of pycwp.cytools.boxer.Interpolator3D. If the
-	slowdef argument is not None, the value of slowdef will be assigned to
-	the "default" property of the interpolator returned by interp(s) to
-	provide a default (out-of-bounds) value. Otherwise, any path that
-	reaches an out-of-bounds slowness will be excluded from the cost
-	function.
-
-	To probabilistically restrict the number of transmit-receive pairs
-	employed in the cost function, a "SCRAMBLE,<N>" control message may be
-	broadcast from the root, where "<N>" is a string representation of a
-	positive integer. When this message is received by the workers, each
-	worker will randomly select N transmit-receive pairs from atimes to be
-	used in all future evaluations of the cost function. The SCRAMBLE
-	message may be sent multiple times, with a new random selection being
-	made after each message is received. If N is less than 1 or no less
-	than the length of atimes, all transmit-receive pairs will be used.
-
-	To evaluate the cost function and its gradient, broadcast an "EVALUATE"
-	message to the workers from the root. Upon receipt of the message, each
-	worker will evaluate its share of the global cost function and
-	gradient. Because the local contributions are subdivided along the
-	range (transmit-receive pairs) of the path-length operator L, the
-	global cost and gradient can be obtained by summing local values from
-	each node.
-
-	After broadcasting an "EVALUATE" control message, the root must first
-	accumulate the scalar cost functions by calling the high-level Python
-	object method comm.reduce twice in succession. The first call will
-	accumulate the values of the cost functions. The second call will
-	accumulate the number of participating rows in the path-length operator.
-
-	After accumulating the scalar cost and row count, the root must
-	accumulate the global gradient by calling the low-level buffer method
-	comm.Reduce(input, output, op=MPI.SUM). The accumulated gradient will
-	be stored in output, which should be an empty Numpy array with shape
-	box.ncell and dtype np.float64. The input array should have the same
-	shape and data type, and will be added to the global gradient. To
-	capture the pure gradient alone, zero the output prior to the reduction
-	and call comm.Reduce(MPI.IN_PLACE, output, op=MPI.SUM).
-
-	Upon receipt of an "ENDTRACE" control message, the worker loop will
-	terminate.
+	A class encapsulating a single MPI rank that participates in computing
+	path tracing for arrival-time tomography. Each instance takes
+	responsibility for the set of arrival-time measurements provided to it.
 	'''
-	rank, size = comm.rank, comm.size
+	def __init__(self, box, elements, atimes, ptol=1e-3,
+			itol=1e-5, segmax=256, optargs={ },
+			slowdef=None, linear=True, comm=MPI.COMM_WORLD):
+		'''
+		Create a worker collaborating with other ranks in the given
+		communicator comm. The image is defined over the Box3D instance
+		box, with element locations given by element[i] for some index
+		i, and first arrival times from transmitter t to receiver r
+		given by atimes[t,r].
 
-	# Note that the slowness and its path optimizer
-	s = None
-	si = None
+		Any arrival times corresponding to a (t,r) key for which
+		elements[t] or elements[r] is not defined will be discarded.
 
-	# Make sure all arrival-time entries have matching entries in elements
-	atimes = { k: v for k, v in atimes.iteritems()
-			if k[0] in elements and k[1] in elements }
+		When tracing propagation paths, individual path integrals are
+		computing adaptively with a tolerance of itol, while path
+		optimization proceeds with a tolerance of ptol and a maximum
+		segment count segmax.
 
-	# By default, work with all of the arrival times
-	trset = sorted(atimes.iterkeys())
+		Slowness is interpolated with LinearInterpolator3D if linear is
+		True (HermiteInterpolator3D otherwise). The interpolator will
+		inherit a default (out-of-bounds) slowness slowdef. The optargs
+		kwargs dictionary will be passed to Interpolator3D.minpath to
+		control the optimization process.
+		'''
+		# Make a copy of the image box
+		self.box = Box3D(box.lo, box.hi)
+		self.box.ncell = box.ncell
 
-	# Keep storage for the gradient and corrections to the running sum
-	gf = np.zeros(box.ncell, dtype=np.float64, order='C')
+		# Make a copy of the element and arrival-time maps
+		self.elements = { }
+		self.atimes = { }
 
-	# Work loop
-	while True:
-		# Receive message
-		msg = comm.bcast(None).strip().upper()
+		# Record the MPI communicator
+		self.comm = comm
 
-		# Terminate the loop
-		if msg == 'ENDTRACE':
-			break
-		elif msg == 'SLOWNESS':
-			# Allocate new storage for the received slowness
-			if s is None: s = np.empty(box.ncell, dtype=np.float64)
-			# Receive the new slowness in pre-existing storage
-			comm.Bcast(s)
-			# Build the interpolator
-			si = interp(s)
-			if slowdef is not None: si.default = slowdef
-			continue
-		elif msg.startswith('SCRAMBLE,'):
-			try: ntr = int(msg.split(',')[1])
-			except Exception as e:
-				print 'MPI rank %d of %d: bad SCRAMBLE message:', str(e)
-				comm.Abort(1)
-			if 0 < ntr < len(atimes):
-				trset = sorted(sample(atimes.keys(), ntr))
-			else: trset = sorted(atimes.iterkeys())
-			continue
-		elif msg != 'EVALUATE':
-			print 'MPI rank %d of %d: invalid MPI tag %d' % (rank, size, tag)
-			comm.Abort(1)
+		for (t, r), v in atimes.iteritems():
+			# The transmit and receive indices must be distinct
+			if t == r: continue
 
-		if si is None:
-			print 'MPI rank %d of %d: define slowness before evaluation' % (rank, size)
-			comm.Abort(1)
+			try:
+				# Ensure this arrival time has element locations
+				et = elements[t]
+				er = elements[r]
+			except KeyError:
+				pass
+			else:
+				self.elements[t] = et
+				self.elements[r] = er
+				self.atimes[t,r] = v
+
+		# Record solver parameters
+		self.ptol = float(ptol)
+		self.itol = float(itol)
+		self.nmax = int(segmax)
+		self.optargs = dict(optargs)
+		self.slowdef = slowdef
+		self.interpolator = (LinearInterpolator3D if linear
+					else HermiteInterpolator3D)
+
+	@property
+	def isRoot(self):
+		'''
+		True if this instance has a communicator and is rank 0 of its
+		communicator, False otherwise.
+		'''
+		return self.comm and not self.comm.rank
+
+
+	def pathtrace(self, si, t, r):
+		'''
+		Given an interpolated slowness map si (as Interpolator3D), a
+		transmitter t and a receiver r in world coordinates, trace an
+		optimum path from t to r using
+
+		  si.minpath(gt, gr, self.nmax, self.itol,
+				  self.ptol, self.box.cell, **self.optargs),
+
+		where gt, gr are the grid coordinates of t and r, respectively,
+		according to self.box.cart2cell.
+
+		The determined path will be marched through self.box to produce a
+		map from cell indices in the box to the length of the intersection of
+		that cell and the path (i.e., the map is a path-length matrix for a
+		single path).
+
+		The resulting path-length map will be returned, along with the
+		path-length integral si.pathint(path, self.itol, self.cell) for
+		the optimum path.
+
+		In case any failure prevents the determination of a convergent,
+		optimized path-length map, an empty map and a zero path-length
+		integral will be returned.
+		'''
+		box = self.box
+
+		# Compute the minimum path (if possible) or return an empty path
+		gsrc = box.cart2cell(*self.elements[t])
+		grcv = box.cart2cell(*self.elements[r])
+
+		try:
+			popt, pint = si.minpath(gsrc, grcv, self.nmax, self.itol,
+						self.ptol, box.cell, **self.optargs)
+		except ValueError:
+			return { }, 0.0
+
+		# Convert path to Cartesian coordinates and march segments
+		points = np.array([box.cell2cart(*p) for p in popt])
+		try: marches = box.raymarcher(points)
+		except ValueError as e:
+			print 'NOTE: ray march failed:', (t, r), str(e)
+			return { }, 0.0
+
+		# Make sure single-segment march still a list
+		if points.shape[0] < 3: marches = [marches]
+		# Accumulate the length of each path in each cell
+		plens = { }
+		for (st, ed), march in izip(izip(points, points[1:]), marches):
+			# Compute whol length of this path segment
+			dl = norm(ed - st)
+			for cell, (tmin, tmax) in march.iteritems():
+				# Convert fractional length to real length
+				# 0 <= tmin <= tmax <= 1 guaranteed by march algorithm
+				contrib = (tmax - tmin) * dl
+
+				# Add the contribution to the list for this cell
+				try: plens[cell].append(contrib)
+				except KeyError: plens[cell] = [contrib]
+
+		# Safely accumulate the contributions to each cell
+		# Return the path map and the path-length integral
+		return { k: fsum(v) for k, v in plens.iteritems() }, pint
+
+
+	def evaluate(self, s, nm):
+		'''
+		Evaluate a stochastic sample of the cost functional and its
+		gradient
+
+		  C(s) = 0.5 * || Ls - D ||**2,
+		  grad(C)(s) = L^T [ Ls - D ],
+
+		where L is a stochastic representation of the path-length
+		operator mapping the slowness at each cell in s to its
+		contribution to the travel times based on the traced paths as
+		computed by self.pathtrace. The data D consists of
+		corresponding entries self.atimes[t,r].
+
+		The return value will be (C(s), nr, grad(C)(s)), where nr is
+		the number of measurements participating in the sample (this
+		may be different than nm if nm < 1, nm > len(self.atimes), or
+		if certain paths could not be traced).
+
+		The sample consists of nm transmit-receive pairs selected from
+		self.atimes with equal probability. If nm >= len(self.atimes)
+		or nm < 1, the entire cost functional and gradient will be
+		computed. The local sample of the functions is accumulated with
+		shares from other MPI ranks in the communicator self.comm using
+		reduction operators.
+
+		For path tracing in self.pathtrace, the slowness s will be
+		interpolated as si = self.interpolator(s).
+		'''
+		rank, size = self.comm.rank, self.comm.size
+
+		# Interpolate the slowness
+		si = self.interpolator(s)
+		si.default = self.slowdef
+
+		# Compute the random sample of measurements
+		if nm < 1 or nm > len(self.atimes): nm = len(self.atimes)
+		trset = sample(atimes.keys(), nm)
 
 		# Accumulate the local cost function and gradient
 		f = []
-		gf[:,:,:] = 0.0
+		gf = np.zeros(self.box.ncell, dtype=np.float64, order='C')
 		nrows, nskip = 0L, 0L
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
-			src, rcv = elements[t], elements[r]
-			plens = pathtrace(box, si, src, rcv, segmax,
-						pintol, pathtol, bfgs_opts)
-			if not plens:
+			plens, pint = self.pathtrace(si, t, r)
+			if not plens or pint <= 0:
+				# Skip bad paths
 				nskip += 1
 				continue
 			nrows += 1
 			# Calculate error in model arrival time
-			err = fsum(s[c] * l for c, l in plens.iteritems()) - atimes[t,r]
+			err = pint - atimes[t,r]
 			f.append(err**2)
-			# Add gradient contribution with Kahan summation
+			# Add gradient contribution
 			for c, l in plens.iteritems(): gf[c] += l * err
 
 		if nskip: print 'MPI rank %d of %d: skipped %d untraceable paths' % (rank, size, nskip)
 
-		# Transmit the scalar cost function and row count
-		comm.reduce(0.5 * fsum(f), op=MPI.SUM)
-		comm.reduce(nrows, op=MPI.SUM)
-		# Use the lower-level routine for the arrays
-		comm.Reduce(gf, None, op=MPI.SUM)
+		# Accumulate the cost functional and row count
+		f = self.comm.allreduce(0.5 * fsum(f), op=MPI.SUM)
+		nrows = self.comm.allreduce(nrows, op=MPI.SUM)
+		# Use the lower-level routine for the in-place gradient accumulation
+		self.comm.Allreduce(MPI.IN_PLACE, gf, op=MPI.SUM)
+
+		return f, nrows, gf
 
 
-def pathtrace(box, si, src, rcv, nmax, itol=1e-3, ptol=1e-3, bfgs_opts={}):
+def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
+		tol=1e-6, tvreg=None, mfilter=None, partial_output=None):
 	'''
-	Given a source-receiver pair with Cartesian coordinates src and rcv,
-	respectively, and a Box3D box that defines an image grid, find a path
-	according to si.minpath(gsrc, grcv, nmax, itol, ptol, **bfgs_opts),
-	where si is an Interpolator3D instance and gsrc, grcv are the grid
-	coordinates corresponding to src and rcv, respectively, according to
-	box.cart2cell.
+	Iteratively compute a slowness image by minimizing the cost functional
+	represented in the TomographyTracer instance cshare and using the
+	solution to update the given profile s defined over the grid defined in
+	cshare.box.
 
-	The determined path will be marched through the box to produce a
-	map from cell indices in the box to the length of the intersection of
-	that cell and the path (i.e., the map is a path-length matrix for a
-	single path). The resulting path-length map will be returned.
-
-	In the case of any failure that prevents the determination of a
-	convergent, optimized path-length map, an empty map will be returned.
-	'''
-	# Compute the minimum path (if possible) or return an empty path
-	gsrc, grcv = box.cart2cell(*src), box.cart2cell(*rcv)
-	try: popt = si.minpath(gsrc, grcv, nmax, itol, ptol, **bfgs_opts)
-	except ValueError: return { }
-
-	# Convert path to Cartesian coordinates and march segments
-	points = np.array([box.cell2cart(*p) for p in popt])
-	try: marches = box.raymarcher(points)
-	except ValueError as e:
-		print 'NOTE: ray march failed:', (src, rcv), str(e)
-		return { }
-
-	# Make sure single-segment march still a list
-	if points.shape[0] < 3: marches = [marches]
-	# Accumulate the length of each path in each cell
-	plens = { }
-	for (st, ed), march in izip(izip(points, points[1:]), marches):
-		# Compute whol length of this path segment
-		dl = norm(ed - st)
-		for cell, (tmin, tmax) in march.iteritems():
-			# Convert fractional length to real length
-			# 0 <= tmin <= tmax <= 1 guaranteed by march algorithm
-			contrib = (tmax - tmin) * dl
-
-			# Add the contribution to the list for this cell
-			try: plens[cell].append(contrib)
-			except KeyError: plens[cell] = [contrib]
-
-	# Safely accumulate the contributions to each cell
-	return { k: fsum(v) for k, v in plens.iteritems() }
-
-
-def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
-		tvreg=None, mfilter=None, partial_output=None, comm=MPI.COMM_WORLD):
-	'''
-	Iteratively compute a slowness image by updating the given profile s
-	defined over the grid defined in the Box3D box. If mask is not None, it
-	should be a bool array with the same shape as s (and box.ncell) that is
-	True for cells that should be updated and False for cells that should
-	remain unchanged.
+	If mask is not None, it should be a bool array with the same shape as s
+	(and cshare.box.ncell) that is True for cells that should be updated
+	and False for cells that should remain unchanged.
 
 	The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB) method of
 	Tan, et al. (2016) is used to compute the image. The method continues
@@ -342,14 +328,17 @@ def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 	wherein rank 0 must invoke this function and all other ranks must
 	invoke traceloop().
 	'''
+	# Determine the grid shape
+	gshape = cshare.box.ncell
+
 	# Make sure the image is the right shape
 	s = np.array(s, dtype=np.float64)
 
 	if mask is None: mask = np.ones(s.shape, dtype=bool)
 	else: mask = np.asarray(mask, dtype=bool)
 
-	if s.shape != box.ncell or s.shape != mask.shape:
-		raise ValueError('Shape of s and optional mask must be %s' % (box.ncell,))
+	if s.shape != gshape or s.shape != mask.shape:
+		raise ValueError('Shape of s and optional mask must be %s' % (gshape,))
 
 	nnz = np.sum(mask.astype(np.int64))
 
@@ -400,25 +389,12 @@ def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 		sp[:,:,:] = s
 		sp[mask] += x
 
-		# Send the slowness to the worker pool
-		comm.bcast("SLOWNESS")
-		comm.Bcast(sp)
+		# Compute the stochastic cost and gradient
+		f, nrows, gf = cshare.evaluate(sp, nmeas)
 
-		# The time to transmit sound-speed map
-		txtime = time()
-
-		# Reset path traces and perform cost-function and gradient evaluation
-		comm.bcast("EVALUATE")
-
-		# Accumulate cost and row counts
-		f = comm.reduce(0.0, op=MPI.SUM)
-		nmeas = comm.reduce(0L, op=MPI.SUM)
-		f /= nmeas
-
-		# Accumulate gradient and extract changeable portion
-		gf[:,:,:] = 0
-		comm.Reduce(MPI.IN_PLACE, gf)
-		lgf = gf[mask] / nmeas
+		# Scale cost (and gradient) to mean-squared error
+		f /= nrows
+		lgf = gf[mask] / nrows
 
 		try:
 			tvwt = tvscale['weight']
@@ -431,15 +407,14 @@ def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 			lgf += tvwt * tvng[mask]
 
 		# The time to evaluate the function and gradient
-		etime = time() - txtime
-		txtime -= stime
+		stime = time() - stime
 
-		print 'Cost evaluation times (sec): %0.2f bcast, %0.2f eval' % (txtime, etime)
+		if cshare.isRoot: print 'Cost evaluation time: %0.2f sec' % (stime,)
 
 		return f, lgf
 
 	# Step smoothing coefficient
-	ck = 1.0
+	lck = 0.0
 
 	# For convergence testing
 	maxcost = 0.0
@@ -458,19 +433,21 @@ def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 
 			if xdg < sys.float_info.epsilon * nlx:
 				# Terminate if step size blows up
-				print 'TERMINATE: epoch', k, 'step size breakdown'
+				if cshare.isRoot:
+					print 'TERMINATE: epoch', k, 'step size breakdown'
 				break
 
 			eta = nlx / xdg / updates
 
-			# Smooth the step
-			kp = float(k + 1)
-			ck = (ck**(k - 2) * eta * kp)**(1.0 / (k - 1))
-			eta = ck / kp
+			# Smooth the step (use logs to avoid overflow)
+			lkp = np.log(k + 1.0)
+			lck = ((k - 2) * lck + np.log(eta) + lkp) / (k - 1.0)
+			eta = np.exp(lck - lkp)
 
-		print 'Epoch', k,
-		if tvscale: print 'TV weight', tvscale['weight'],
-		print 'gradient descent step', eta
+		if cshare.isRoot:
+			print 'Epoch', k,
+			if tvscale: print 'TV weight', tvscale['weight'],
+			print 'gradient descent step', eta
 
 		# Copy negative of last solution and gradient
 		lx[:] = -x
@@ -480,17 +457,15 @@ def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 		cg[:] = 0
 
 		# Build a callback to write per-iteration results, if desired
-		cb = callbackgen(partial_output, s, mask, k, mfilter)
+		if cshare.isRoot: cb = callbackgen(partial_output, s, mask, k, mfilter)
+		else: cb = None
 
 		for t in range(updates):
-			# Randomly select the next measurement sample
-			comm.bcast("SCRAMBLE,%d" % nmeas)
-
 			# Compute the sampled cost functional and its gradient
 			f, lgf = ffg(x)
 
 			# Print some convergence numbers
-			print 'At epoch', k, 'update', t, 'cost', f
+			if cshare.isRoot: print 'At epoch', k, 'update', t, 'cost', f
 
 			# Adjust the solution against the gradient
 			x -= eta * lgf
@@ -508,7 +483,7 @@ def makeimage(s, mask, box, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 			cg[:] = beta * lgf + (1 - beta) * cg
 
 		if converged:
-			print 'TERMINATE: Convergence achieved'
+			if cshare.isRoot: print 'TERMINATE: Convergence achieved'
 			break
 
 		# Adjust the regularization weight as appropriate
@@ -567,7 +542,7 @@ if __name__ == "__main__":
 		err = 'Unable to load configuration file %s' % sys.argv[1]
 		raise HabisConfigError.fromException(err, e)
 
-	tsec = 'tomogrid'
+	tsec = 'tomo/grid'
 
 	def _throw(msg, e, sec=None):
 		if not sec: sec = tsec
@@ -585,146 +560,126 @@ if __name__ == "__main__":
 
 	rank, size = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 
-	tsec = 'tomomaster' if not rank else 'tomoslave'
+	if not rank:
+		print 'Solution defined on grid', bx.lo, bx.hi, bx.ncell
 
-	# Read optional BFGS option dictionary
-	# Master uses this for image updates, slaves for path tracing
+	tsec = 'tomo/sgd'
+
+	try:
+		# Find the slowness map
+		s = config.get(tsec, 'slowness')
+		# Load the map or build a constant map
+		try: s = float(s)
+		except (ValueError, TypeError): s = np.load(s).astype(np.float64)
+		else: s = s * np.ones(bx.ncell, dtype=np.float64)
+	except Exception as e: _throw('Configuration must specify slowness', e)
+
+	# Create guess and load solution map
+	try:
+		mask = config.get(tsec, 'slowmask', default=None)
+		if mask: mask = np.load(mask).astype(bool)
+	except Exception as e: _throw('Invalid optional slowmask', e)
+
+	try:
+		# Read the number of measurements per round
+		nmeas = config.get(tsec, 'nmeas', mapper=int, default=0)
+		if nmeas < 0: raise ValueError('nmeas must be nonnegative')
+	except Exception as e: _throw('Invalid optional nmeas', e)
+
+	try:
+		# Read the number of epochs
+		epochs = config.get(tsec, 'epochs', mapper=int, default=1)
+		if epochs < 1: raise ValueError('epochs must be positive')
+	except Exception as e: _throw('Invalid optional epochs', e)
+
+	try:
+		# Read the number of updates per epoch
+		updates = config.get(tsec, 'updates', mapper=int, default=1)
+		if updates < 1: raise ValueError('updates must be positive')
+	except Exception as e: _throw('Invalid optional updates', e)
+
+	try:
+		# Read the number sampled gradient approximation weight
+		beta = config.get(tsec, 'beta', mapper=float, default=0.5)
+		if not 0 < beta <= 1.0: raise ValueError('beta must be in range (0, 1]')
+	except Exception as e: _throw('Invalid optional beta', e)
+
+	try:
+		# Read the number sampled gradient approximation weight
+		tol = config.get(tsec, 'tol', mapper=float, default=1e-6)
+		if not tol > 0: raise ValueError('tol must be positive')
+	except Exception as e: _throw('Invalid optional tol', e)
+
+	try:
+		# Read optional total-variation regularization parameter
+		tvreg = config.get(tsec, 'tvreg', mapper=dict,
+					checkmap=False, default=None)
+	except Exception as e: _throw('Invalid optional tvreg', e)
+
+	try:
+		# Read optional the filter parameters
+		mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
+	except Exception as e: _throw('Invalid optional mfilter', e)
+
+	# Read optional partial_output format string
+	partial_output = config.get(tsec, 'partial_output', default=None)
+
+	# Read required final output
+	try: output = config.get(tsec, 'output')
+	except Exception as e: _throw('Configuration must specify output', e)
+
+	tsec = 'tomo/tracer'
+
+	# Read optional bfgs option dictionary for path tracing
 	try:
 		bfgs_opts = config.get(tsec, 'optimizer',
 				mapper=dict, checkmap=False, default={ })
 	except Exception as e: _throw('Invalid optional optimizer', e)
 
-	# Make a communicator for just the workers
-	wcolor = MPI.UNDEFINED if not rank else 1
-	wcomm = MPI.COMM_WORLD.Split(wcolor, rank)
+	try:
+		# Read element locations
+		efiles = matchfiles(config.getlist(tsec, 'elements'))
+		elements = ldmats(efiles, nkeys=1)
+	except Exception as e: _throw('Configuration must specify elements', e)
+
+	# Load integration tolerance
+	try: pintol = config.get(tsec, 'pintol', mapper=float, default=1e-5)
+	except Exception as e: _throw('Invalid optional pintol', e)
+
+	# Load maximum number of path-tracing segments
+	try: segmax = config.get(tsec, 'segmax', mapper=int, default=256)
+	except Exception as e: _throw('Invalid optional segmax', e)
+
+	# Load path-tracing tolerance
+	try: pathtol = config.get(tsec, 'pathtol', mapper=float, default=1e-3)
+	except Exception as e: _throw('Invalid optional pathtol', e)
+
+
+	# Load default background slowness
+	try: slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
+	except Exception as e: _throw('Invalid optional slowdef', e)
+
+	# Determine interpolation mode
+	linear = config.get(tsec, 'linear', mapper=bool, default=True)
+
+	try:
+		# Look for local files and determine local share
+		tfiles = matchfiles(config.getlist(tsec, 'timefile'))
+		# Determine the local shares of every file
+		tfiles = flocshare(tfiles, MPI.COMM_WORLD)
+		# Pull out local share of locally available arrival times
+		atimes = dict(kp for tf, (st, ln) in tfiles.iteritems()
+				for kp in getatimes(tf, 0, st, ln).iteritems())
+	except Exception as e: _throw('Configuration must specify valid timefile', e)
+
+	# Build the cost calculator
+	cshare = TomographyTracer(bx, elements, atimes, pathtol,
+			pintol, segmax, bfgs_opts, slowdef, linear, MPI.COMM_WORLD)
+
+	# Compute random updates to the image
+	ns = makeimage(cshare, s, mask, nmeas, epochs, updates,
+			beta, tol, tvreg, mfilter, partial_output)
 
 	if not rank:
-		print 'Solution defined on grid', bx.lo, bx.hi, bx.ncell
-
-		try:
-			# Find the slowness map
-			s = config.get(tsec, 'slowness')
-			# Load the map or build a constant map
-			try: s = float(s)
-			except (ValueError, TypeError): s = np.load(s).astype(np.float64)
-			else: s = s * np.ones(bx.ncell, dtype=np.float64)
-		except Exception as e: _throw('Configuration must specify slowness', e)
-
-
-		# Create guess and load solution map
-		try:
-			mask = config.get(tsec, 'slowmask', default=None)
-			if mask: mask = np.load(mask).astype(bool)
-		except Exception as e: _throw('Invalid optional slowmask', e)
-
-		try:
-			# Read the number of measurements per round
-			nmeas = config.get(tsec, 'nmeas', mapper=int, default=0)
-			if nmeas < 0: raise ValueError('nmeas must be nonnegative')
-		except Exception as e: _throw('Invalid optional nmeas', e)
-
-		try:
-			# Read the number of epochs
-			epochs = config.get(tsec, 'epochs', mapper=int, default=1)
-			if epochs < 1: raise ValueError('epochs must be positive')
-		except Exception as e: _throw('Invalid optional epochs', e)
-
-		try:
-			# Read the number of updates per epoch
-			updates = config.get(tsec, 'updates', mapper=int, default=1)
-			if updates < 1: raise ValueError('updates must be positive')
-		except Exception as e: _throw('Invalid optional updates', e)
-
-		try:
-			# Read the number sampled gradient approximation weight
-			beta = config.get(tsec, 'beta', mapper=float, default=0.5)
-			if not 0 < beta <= 1.0: raise ValueError('beta must be in range (0, 1]')
-		except Exception as e: _throw('Invalid optional beta', e)
-
-		try:
-			# Read the number sampled gradient approximation weight
-			tol = config.get(tsec, 'tol', mapper=float, default=1e-6)
-			if not tol > 0: raise ValueError('tol must be positive')
-		except Exception as e: _throw('Invalid optional tol', e)
-
-		try:
-			# Read optional total-variation regularization parameter
-			tvreg = config.get(tsec, 'tvreg', mapper=dict,
-						checkmap=False, default=None)
-		except Exception as e: _throw('Invalid optional tvreg', e)
-
-		try:
-			# Read optional the filter parameters
-			mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
-		except Exception as e: _throw('Invalid optional mfilter', e)
-
-		# Read optional partial_output format string
-		partial_output = config.get(tsec, 'partial_output', default=None)
-
-		# Read required final output
-		try: output = config.get(tsec, 'output')
-		except Exception as e: _throw('Configuration must specify output', e)
-
-		# Read optional bounds
-		try:
-			bounds = config.getlist(tsec, 'limits', mapper=float, default=None)
-			if bounds and len(bounds) != 2:
-				raise ValueError('limits must consist of two floats')
-		except Exception as e: _throw('Invalid optional limits', e)
-
-		# Compute random updates to the image
-		ns = makeimage(s, mask, bx, nmeas, epochs, updates, beta, tol,
-				tvreg, mfilter, partial_output, MPI.COMM_WORLD)
-
 		np.save(output, ns.astype(np.float32))
-
-		# Quit the traceloops
-		MPI.COMM_WORLD.bcast('ENDTRACE')
-	else:
-		try:
-			# Read element locations
-			efiles = matchfiles(config.getlist(tsec, 'elements'))
-			elements = ldmats(efiles, nkeys=1)
-		except Exception as e: _throw('Configuration must specify elements', e)
-
-		# Load integration tolerance
-		try: pintol = config.get(tsec, 'pintol', mapper=float, default=1e-5)
-		except Exception as e: _throw('Invalid optional pintol', e)
-
-		# Load maximum number of path-tracing segments
-		try: segmax = config.get(tsec, 'segmax', mapper=int, default=256)
-		except Exception as e: _throw('Invalid optional segmax', e)
-
-		# Load path-tracing tolerance
-		try: pathtol = config.get(tsec, 'pathtol', mapper=float, default=1e-3)
-		except Exception as e: _throw('Invalid optional pathtol', e)
-
-
-		# Load default background slowness
-		try: slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
-		except Exception as e: _throw('Invalid optional slowdef', e)
-
-		# Determine interpolation mode
-		linear = config.get(tsec, 'linear', mapper=bool, default=True)
-		interp = LinearInterpolator3D if linear else HermiteInterpolator3D
-
-		try:
-			# Look for local files and determine local share
-			tfiles = matchfiles(config.getlist(tsec, 'timefile'))
-			# Determine the local shares of every file
-			tfiles = flocshare(tfiles, wcomm)
-			# Pull out local share of locally available arrival times
-			atimes = dict(kp for tf, (st, ln) in tfiles.iteritems()
-					for kp in getatimes(tf, 0, st, ln).iteritems())
-		except Exception as e: _throw('Configuration must specify valid timefile', e)
-
-		# The worker communicator is no longer needed
-		wcomm.Free()
-
-		# Initiate the worker loop
-		traceloop(bx, elements, atimes, pintol, segmax, pathtol,
-				slowdef, bfgs_opts, interp, MPI.COMM_WORLD)
-
-	# Keep alive until everybody quits
-	MPI.COMM_WORLD.Barrier()
-	if not rank: print 'Finished'
+		print 'Finished'
