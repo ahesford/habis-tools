@@ -201,7 +201,7 @@ class TomographyTracer(object):
 		return { k: fsum(v) for k, v in plens.iteritems() }, pint
 
 
-	def evaluate(self, s, nm):
+	def evaluate(self, s, nm, grad=None):
 		'''
 		Evaluate a stochastic sample of the cost functional and its
 		gradient
@@ -219,6 +219,13 @@ class TomographyTracer(object):
 		the number of measurements participating in the sample (this
 		may be different than nm if nm < 1, nm > len(self.atimes), or
 		if certain paths could not be traced).
+
+		If grad is not None, it should be a floating-point Numpy array
+		of shape self.box.ncell. In this case, gf = grad(C)(s) will be
+		stored in the provided array, and the provided array will be
+		returned as gf. If grad is None, a new array will be allocated
+		for gf. If grad is provided but is not array-like or has the
+		wrong shape, a ValueError will be raised.
 
 		The sample consists of nm transmit-receive pairs selected from
 		self.atimes with equal probability. If nm >= len(self.atimes)
@@ -242,7 +249,23 @@ class TomographyTracer(object):
 
 		# Accumulate the local cost function and gradient
 		f = []
-		gf = np.zeros(self.box.ncell, dtype=np.float64, order='C')
+
+		gshape = self.box.ncell
+		if grad is not None:
+			# Use a provided gradient, if possible
+			try:
+				gsh = grad.shape
+				gdtype = grad.dtype
+			except AttributeError:
+				raise ValueError('Argument "grad" must be None or Numpy-array compatible')
+
+			if gshape != gsh or not np.issubdtype(gdtype, np.inexact):
+				raise ValueError('Non-None "grad" must be a floating-point array of shape %s' % (gshape,))
+
+			grad[:,:,:] = 0.
+			gf = grad
+		else: gf = np.zeros(gshape, dtype=np.float64, order='C')
+
 		nrows, nskip = 0L, 0L
 
 		# Compute contributions for each source-receiver pair
@@ -343,8 +366,8 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 	nnz = np.sum(mask.astype(np.int64))
 
 	# Work arrays
-	sp = np.empty(s.shape, dtype=np.float64)
-	gf = np.empty(s.shape, dtype=np.float64)
+	sp = np.copy(s)
+	gf = np.zeros_like(s)
 
 	work = np.zeros((nnz,4), dtype=np.float64)
 	x = work[:,0]
@@ -373,6 +396,9 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 			tvscale['every'] = int(tvargs.pop('every', 1))
 			tvscale['min'] = float(tvargs.pop('min', 0))
 
+	if 'weight' in tvscale:
+		xp = np.zeros_like(s)
+
 	def ffg(x):
 		'''
 		This function returns the (optionally TV regularized) cost
@@ -385,12 +411,11 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 		# Track the run time
 		stime = time()
 
-		# Reshape slowness
-		sp[:,:,:] = s
-		sp[mask] += x
+		# Compute the perturbed slowness
+		sp[mask] = s[mask] + x
 
 		# Compute the stochastic cost and gradient
-		f, nrows, gf = cshare.evaluate(sp, nmeas)
+		f, nrows, _ = cshare.evaluate(sp, nmeas, grad=gf)
 
 		# Scale cost (and gradient) to mean-squared error
 		f /= nrows
@@ -401,8 +426,9 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 		except KeyError:
 			pass
 		else:
-			# Use total-variation regularization as desired
-			tvn, tvng = totvar(sp, **tvargs)
+			# Unpack update for regularization
+			xp[mask] = x
+			tvn, tvng = totvar(xp, **tvargs)
 			f += tvwt * tvn
 			lgf += tvwt * tvng[mask]
 
