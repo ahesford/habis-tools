@@ -27,7 +27,7 @@ from mpi4py import MPI
 
 from pycwp.cytools.boxer import Box3D
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
-from pycwp.cytools.regularize import totvar
+from pycwp.cytools.regularize import epr, totvar
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadkeymat as ldkmat, loadmatlist as ldmats
@@ -323,16 +323,18 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 	where g_{k,0} == 0, f_t is the t-th sampled cost functional for the
 	epoch and x_t is the solution at update t.
 
-	If tvreg is True, the cost function will be regularized with the
-	total-variation norm from pycwp.cytools.regularize.totvar. In this
-	case, tvreg should either be a scalar regularization parameter used to
-	weight the norm or a kwargs dictionary which must contain a 'weight'
-	keyword providing the weight. Three optional keywords, 'scale', 'min'
-	and 'every', will be used to scale the weight by the float factor
-	'scale' after every 'every' epochs (default: 1) until the weight is no
-	larger than 'min' (default: 0). The values of 'every' and 'min' are
-	ignored if 'scale' is not provided. Any additional keyword arguments
-	are passed to totvar.
+	If tvreg is True, the cost function will be regularized with a method
+	from pycwp.cytools.regularize. In this case, tvreg should either be a
+	scalar regularization parameter used to weight the norm or a kwargs
+	dictionary which must contain a 'weight' keyword providing the weight.
+	Three optional keywords, 'scale', 'min' and 'every', will be used to
+	scale the weight by the float factor 'scale' after every 'every' epochs
+	(default: 1) until the weight is no larger than 'min' (default: 0). The
+	values of 'every' and 'min' are ignored if 'scale' is not provided. An
+	optional 'method' keyword can take the value 'epr' or 'totvar' to
+	select the corresponding regularization method from the regularize
+	module. If 'method' is not provided, 'totvar' is assumed. Any
+	additional keyword arguments are passed to the regularizer.
 
 	After each round of randomized reconstruction, if mfilter is True, a
 	median filter of size mfilter will be applied to the image before
@@ -378,6 +380,9 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 	# Interpret TV regularization
 	tvscale, tvargs = { }, { }
 	if tvreg:
+		# Make sure a default regularizing method is selected
+		tvscale.setdefault('method', totvar)
+
 		try:
 			# Treat the tvreg argument as a simple float
 			tvscale['weight'] = float(tvreg)
@@ -392,11 +397,25 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 			try: tvscale['scale'] = float(tvargs.pop('scale'))
 			except KeyError: pass
 
+			try:
+				# Use a specified regularization method
+				method = str(tvargs.pop('method')).strip().lower()
+			except KeyError:
+				pass
+			else:
+				if method == 'totvar':
+					tvscale['method'] = totvar
+				elif method == 'epr':
+					tvscale['method'] = epr
+				else:
+					err = 'Unknown regularization method ' + method
+					raise ValueError(err)
+
 			# Optional 'every' and 'min' arguments
 			tvscale['every'] = int(tvargs.pop('every', 1))
 			tvscale['min'] = float(tvargs.pop('min', 0))
 
-	if 'weight' in tvscale:
+		# Allocate space for expanded update when regularizing
 		xp = np.zeros_like(s)
 
 	def ffg(x):
@@ -428,7 +447,7 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 		else:
 			# Unpack update for regularization
 			xp[mask] = x
-			tvn, tvng = totvar(xp, **tvargs)
+			tvn, tvng = tvscale['method'](xp, **tvargs)
 			f += tvwt * tvn
 			lgf += tvwt * tvng[mask]
 
