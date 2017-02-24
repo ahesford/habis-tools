@@ -12,7 +12,6 @@ import sys, os
 import numpy as np
 from numpy.linalg import norm
 
-from scipy.optimize import fmin_l_bfgs_b
 from scipy.ndimage import median_filter
 
 from math import fsum
@@ -25,9 +24,10 @@ from itertools import izip
 
 from mpi4py import MPI
 
-from pycwp.cytools.boxer import Box3D
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.regularize import epr, totvar
+
+from habis.pathtracer import PathTracer
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadkeymat as ldkmat, loadmatlist as ldmats
@@ -68,33 +68,25 @@ class TomographyTracer(object):
 	path tracing for arrival-time tomography. Each instance takes
 	responsibility for the set of arrival-time measurements provided to it.
 	'''
-	def __init__(self, box, elements, atimes, ptol=1e-3,
-			itol=1e-5, segmax=256, optargs={ },
+	def __init__(self, elements, atimes, tracer, 
 			slowdef=None, linear=True, comm=MPI.COMM_WORLD):
 		'''
-		Create a worker collaborating with other ranks in the given
-		communicator comm. The image is defined over the Box3D instance
-		box, with element locations given by element[i] for some index
-		i, and first arrival times from transmitter t to receiver r
-		given by atimes[t,r].
+		Create a worker, collaborating with other ranks in the given
+		communicator comm, to trace optimum paths through slowness maps
+		according to the PathTracer instance tracer. Elements have
+		coordinates given by element[i] for some index i, and first
+		arrival times from transmitter t to receiver r given by
+		atimes[t,r].
 
 		Any arrival times corresponding to a (t,r) key for which
 		elements[t] or elements[r] is not defined will be discarded.
 
-		When tracing propagation paths, individual path integrals are
-		computing adaptively with a tolerance of itol, while path
-		optimization proceeds with a tolerance of ptol and a maximum
-		segment count segmax.
-
 		Slowness is interpolated with LinearInterpolator3D if linear is
 		True (HermiteInterpolator3D otherwise). The interpolator will
-		inherit a default (out-of-bounds) slowness slowdef. The optargs
-		kwargs dictionary will be passed to Interpolator3D.minpath to
-		control the optimization process.
+		inherit a default (out-of-bounds) slowness slowdef. 
 		'''
-		# Make a copy of the image box
-		self.box = Box3D(box.lo, box.hi)
-		self.box.ncell = box.ncell
+		# Grab a reference to the path tracer
+		self.tracer = tracer
 
 		# Make a copy of the element and arrival-time maps
 		self.elements = { }
@@ -119,10 +111,6 @@ class TomographyTracer(object):
 				self.atimes[t,r] = v
 
 		# Record solver parameters
-		self.ptol = float(ptol)
-		self.itol = float(itol)
-		self.nmax = int(segmax)
-		self.optargs = dict(optargs)
 		self.slowdef = slowdef
 		self.interpolator = (LinearInterpolator3D if linear
 					else HermiteInterpolator3D)
@@ -136,71 +124,6 @@ class TomographyTracer(object):
 		return self.comm and not self.comm.rank
 
 
-	def pathtrace(self, si, t, r):
-		'''
-		Given an interpolated slowness map si (as Interpolator3D), a
-		transmitter t and a receiver r in world coordinates, trace an
-		optimum path from t to r using
-
-		  si.minpath(gt, gr, self.nmax, self.itol,
-				  self.ptol, self.box.cell, **self.optargs),
-
-		where gt, gr are the grid coordinates of t and r, respectively,
-		according to self.box.cart2cell.
-
-		The determined path will be marched through self.box to produce a
-		map from cell indices in the box to the length of the intersection of
-		that cell and the path (i.e., the map is a path-length matrix for a
-		single path).
-
-		The resulting path-length map will be returned, along with the
-		path-length integral si.pathint(path, self.itol, self.cell) for
-		the optimum path.
-
-		In case any failure prevents the determination of a convergent,
-		optimized path-length map, an empty map and a zero path-length
-		integral will be returned.
-		'''
-		box = self.box
-
-		# Compute the minimum path (if possible) or return an empty path
-		gsrc = box.cart2cell(*self.elements[t])
-		grcv = box.cart2cell(*self.elements[r])
-
-		try:
-			popt, pint = si.minpath(gsrc, grcv, self.nmax, self.itol,
-						self.ptol, box.cell, **self.optargs)
-		except ValueError:
-			return { }, 0.0
-
-		# Convert path to Cartesian coordinates and march segments
-		points = np.array([box.cell2cart(*p) for p in popt])
-		try: marches = box.raymarcher(points)
-		except ValueError as e:
-			print 'NOTE: ray march failed:', (t, r), str(e)
-			return { }, 0.0
-
-		# Make sure single-segment march still a list
-		if points.shape[0] < 3: marches = [marches]
-		# Accumulate the length of each path in each cell
-		plens = { }
-		for (st, ed), march in izip(izip(points, points[1:]), marches):
-			# Compute whol length of this path segment
-			dl = norm(ed - st)
-			for cell, (tmin, tmax) in march.iteritems():
-				# Convert fractional length to real length
-				# 0 <= tmin <= tmax <= 1 guaranteed by march algorithm
-				contrib = (tmax - tmin) * dl
-
-				# Add the contribution to the list for this cell
-				try: plens[cell].append(contrib)
-				except KeyError: plens[cell] = [contrib]
-
-		# Safely accumulate the contributions to each cell
-		# Return the path map and the path-length integral
-		return { k: fsum(v) for k, v in plens.iteritems() }, pint
-
-
 	def evaluate(self, s, nm, grad=None):
 		'''
 		Evaluate a stochastic sample of the cost functional and its
@@ -212,7 +135,7 @@ class TomographyTracer(object):
 		where L is a stochastic representation of the path-length
 		operator mapping the slowness at each cell in s to its
 		contribution to the travel times based on the traced paths as
-		computed by self.pathtrace. The data D consists of
+		computed by self.tracer.trace. The data D consists of
 		corresponding entries self.atimes[t,r].
 
 		The return value will be (C(s), nr, grad(C)(s)), where nr is
@@ -221,11 +144,11 @@ class TomographyTracer(object):
 		if certain paths could not be traced).
 
 		If grad is not None, it should be a floating-point Numpy array
-		of shape self.box.ncell. In this case, gf = grad(C)(s) will be
-		stored in the provided array, and the provided array will be
-		returned as gf. If grad is None, a new array will be allocated
-		for gf. If grad is provided but is not array-like or has the
-		wrong shape, a ValueError will be raised.
+		of shape self.tracer.box.ncell. In this case, gf = grad(C)(s)
+		will be stored in the provided array, and the provided array
+		will be returned as gf. If grad is None, a new array will be
+		allocated for gf. If grad is provided but is not array-like or
+		has the wrong shape, a ValueError will be raised.
 
 		The sample consists of nm transmit-receive pairs selected from
 		self.atimes with equal probability. If nm >= len(self.atimes)
@@ -234,7 +157,7 @@ class TomographyTracer(object):
 		shares from other MPI ranks in the communicator self.comm using
 		reduction operators.
 
-		For path tracing in self.pathtrace, the slowness s will be
+		For path tracing in self.tracer.trace, the slowness s will be
 		interpolated as si = self.interpolator(s).
 		'''
 		rank, size = self.comm.rank, self.comm.size
@@ -250,7 +173,7 @@ class TomographyTracer(object):
 		# Accumulate the local cost function and gradient
 		f = []
 
-		gshape = self.box.ncell
+		gshape = self.tracer.box.ncell
 		if grad is not None:
 			# Use a provided gradient, if possible
 			try:
@@ -270,11 +193,15 @@ class TomographyTracer(object):
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
-			plens, pint = self.pathtrace(si, t, r)
-			if not plens or pint <= 0:
-				# Skip bad paths
+			src, rcv = self.elements[t], self.elements[r]
+			try:
+				plens, pint = self.tracer.trace(si, src, rcv)
+				if not plens or pint <= 0: raise ValueError
+			except ValueError:
+				# Skip invalid or empty paths
 				nskip += 1
 				continue
+
 			nrows += 1
 			# Calculate error in model arrival time
 			err = pint - atimes[t,r]
@@ -299,11 +226,11 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 	Iteratively compute a slowness image by minimizing the cost functional
 	represented in the TomographyTracer instance cshare and using the
 	solution to update the given profile s defined over the grid defined in
-	cshare.box.
+	cshare.tracer.box.
 
 	If mask is not None, it should be a bool array with the same shape as s
-	(and cshare.box.ncell) that is True for cells that should be updated
-	and False for cells that should remain unchanged.
+	(and cshare.tracer.box.ncell) that is True for cells that should be
+	updated and False for cells that should remain unchanged.
 
 	The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB) method of
 	Tan, et al. (2016) is used to compute the image. The method continues
@@ -354,7 +281,7 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 	invoke traceloop().
 	'''
 	# Determine the grid shape
-	gshape = cshare.box.ncell
+	gshape = cshare.tracer.box.ncell
 
 	# Make sure the image is the right shape
 	s = np.array(s, dtype=np.float64)
@@ -587,28 +514,21 @@ if __name__ == "__main__":
 		err = 'Unable to load configuration file %s' % sys.argv[1]
 		raise HabisConfigError.fromException(err, e)
 
-	tsec = 'tomo/grid'
+	rank, size = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
+
+	# Try to build a tracer from the configuration
+	tracer = PathTracer.fromconf(config)
+	bx = tracer.box
+
+	if not rank:
+		print 'Solution defined on grid', bx.lo, bx.hi, bx.ncell
+
+	tsec = 'tomo'
 
 	def _throw(msg, e, sec=None):
 		if not sec: sec = tsec
 		raise HabisConfigError.fromException(msg + ' in [%s]' % (sec,), e)
 
-	try:
-		# Load the image grid
-		lo = config.get(tsec, 'lo')
-		hi = config.get(tsec, 'hi')
-		ncell = config.get(tsec, 'ncell')
-		bx = Box3D(lo, hi)
-		bx.ncell = ncell
-	except Exception as e:
-		_throw('Configuration must specify valid grid', e, 'tomogrid')
-
-	rank, size = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
-
-	if not rank:
-		print 'Solution defined on grid', bx.lo, bx.hi, bx.ncell
-
-	tsec = 'tomo/sgd'
 
 	try:
 		# Find the slowness map
@@ -673,32 +593,11 @@ if __name__ == "__main__":
 	try: output = config.get(tsec, 'output')
 	except Exception as e: _throw('Configuration must specify output', e)
 
-	tsec = 'tomo/tracer'
-
-	# Read optional bfgs option dictionary for path tracing
-	try:
-		bfgs_opts = config.get(tsec, 'optimizer',
-				mapper=dict, checkmap=False, default={ })
-	except Exception as e: _throw('Invalid optional optimizer', e)
-
 	try:
 		# Read element locations
 		efiles = matchfiles(config.getlist(tsec, 'elements'))
 		elements = ldmats(efiles, nkeys=1)
 	except Exception as e: _throw('Configuration must specify elements', e)
-
-	# Load integration tolerance
-	try: pintol = config.get(tsec, 'pintol', mapper=float, default=1e-5)
-	except Exception as e: _throw('Invalid optional pintol', e)
-
-	# Load maximum number of path-tracing segments
-	try: segmax = config.get(tsec, 'segmax', mapper=int, default=256)
-	except Exception as e: _throw('Invalid optional segmax', e)
-
-	# Load path-tracing tolerance
-	try: pathtol = config.get(tsec, 'pathtol', mapper=float, default=1e-3)
-	except Exception as e: _throw('Invalid optional pathtol', e)
-
 
 	# Load default background slowness
 	try: slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
@@ -718,8 +617,8 @@ if __name__ == "__main__":
 	except Exception as e: _throw('Configuration must specify valid timefile', e)
 
 	# Build the cost calculator
-	cshare = TomographyTracer(bx, elements, atimes, pathtol,
-			pintol, segmax, bfgs_opts, slowdef, linear, MPI.COMM_WORLD)
+	cshare = TomographyTracer(elements, atimes, tracer,
+					slowdef, linear, MPI.COMM_WORLD)
 
 	# Compute random updates to the image
 	ns = makeimage(cshare, s, mask, nmeas, epochs, updates,
