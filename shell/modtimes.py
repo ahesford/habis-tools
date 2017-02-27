@@ -71,6 +71,10 @@ if __name__ == '__main__':
 	try: output = config.get(tsec, 'output')
 	except Exception as e: _throw('Configuration must specify output', e)
 
+	# Use Eikonal solutions instead of tracing, if desired
+	try: eikonal = config.get(tsec, 'eikonal', mapper=bool, default=False)
+	except Exception as e: _throw('Invalid optional eikonal', e)
+
 	trpairs = sorted((t, r) for t in elements for r in targets)
 
 	MPI.COMM_WORLD.Barrier()
@@ -85,12 +89,33 @@ if __name__ == '__main__':
 	si = LinearInterpolator3D(s)
 	si.default = slowdef
 
+	if eikonal:
+		# Prepare the Eikonal solver
+		eik = FastSweep(bx)
+		# Track the solution for the last transmission
+		lt, tmi = None, None
+		if not rank: print 'Using Eikonal solution for arrival times'
+
 	# Calculate local share of transmit-receive times
 	atimes = { }
 	ipow = 1
+
 	for i, (t, r) in enumerate(trpairs[start:start+share]):
-		# Only the path integral matters
-		atimes[t,r] = tracer.trace(si, elements[t], targets[r], intonly=True)
+		src, rcv = elements[t], targets[r]
+
+		if not eikonal:
+			# Use path tracing; only the path integral matters
+			atimes[t,r] = tracer.trace(si, src, rcv, intonly=True)
+		else:
+			# Use the Eikonal solution
+			if t != lt or tmi is None:
+				# Compute interpolated solution for a new transmitter
+				tmi = LinearInterpolator3D(eik.gauss(src, s))
+				lt = t
+			# Interpolate the arrival time at the receiver
+			grcv = bx.cart2cell(*rcv)
+			atimes[t,r] = tmi.evaluate(*grcv, grad=False)
+
 		if not rank and i == ipow:
 			ipow <<= 1
 			print 'Rank 0: Finished path %d of %d' % (i, share)
