@@ -8,6 +8,8 @@ from itertools import izip
 
 from collections import defaultdict
 
+from pycwp.stats import rolling_std
+
 from habis.habiconf import matchfiles
 from habis.sigtools import Waveform, Window
 from habis.formats import loadkeymat, WaveformSet
@@ -154,9 +156,9 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 	If log is True, the plot will display log magnitudes rather than linear
 	waveforms. The maximum color value will always be the peak amplitude,
 	and cthresh, if not None, should be a negative value that specifies the
-	minimum resolvable magnitude in dB down from the maximum. (It is
-	possible to specify a positive cthresh, but all values will clip to a
-	uniform color image.)
+	minimum resolvable magnitude in dB down from the maximum or a positive
+	value that specifies the maximum resolvable magnitude in dB above an
+	estimate of the minimum noise level over a 200-sample sliding window.
 
 	If log is False, the color range will clip at cthresh standard
 	deviations above the mean peak amplitude over all signals. If cthresh
@@ -211,20 +213,40 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 		else: cmax = np.mean(pkamps) + cthresh * np.std(pkamps)
 
 		clim = [-cmax, cmax]
+		cmap = cm.RdBu
 	else:
+		# Compute signal image to log magnitude
 		img = np.log10(np.abs(hilbert(img, axis=1)))
+
 		pkval = np.max(img)
 
 		if cthresh is None:
 			clim = [np.min(img), pkval]
-		else:
+		elif cthresh < 0:
 			clim = [pkval + cthresh / 20., pkval]
+		else:
+			nlev = float('inf')
+			for w in waves:
+				# Estimate noise levels for signal
+				nw = rolling_std(w._data, 200)
+				# Find minimum of nonzero values
+				try: nwm = np.min(nw[np.nonzero(nw)])
+				except ValueError: continue
+				if nwm < nlev: nlev = nwm
+			if np.isinf(nlev):
+				# If no noise level was found, default to down-from-peak
+				clim = [pkval - cthresh / 20., pkval]
+			else:
+				ndb = np.log10(nlev)
+				clim = [ ndb, ndb + cthresh / 20. ]
+
+		cmap = cm.Reds
 
 	# Shift extent by half a pixel so grid lines are centered on samples
 	extent = [-0.5, img.shape[0] - 0.5, dwin[0] - 0.5, dwin[0] + dwin[1] - 0.5]
 
 	# Plot the waveform image
-	ax[0].imshow(img.T, vmin=clim[0], vmax=clim[1], cmap=cm.RdBu,
+	ax[0].imshow(img.T, vmin=clim[0], vmax=clim[1], cmap=cmap,
 			interpolation='nearest', origin='lower', extent=extent)
 	ax[0].grid(True)
 	ax[0].set_aspect('auto')
