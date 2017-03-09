@@ -34,12 +34,18 @@ from habis.formats import loadkeymat as ldkmat, loadmatlist as ldmats
 from habis.mpdfile import flocshare
 
 
-def getatimes(atfile, column=0, start=0, stride=1):
+def getatimes(atfile, column=0, filt=None, start=0, stride=1):
 	'''
 	Read the 2-key arrival-time map with name atfile and remove
 	backscatter entries for which key[0] == key[1]. The map is always
 	treated as a multi-value map (i.e., 'scalar' is False in loadkeymat).
 	The column argument specifies which value index should be retained.
+
+	If filt is not None, it should be a callable which, when called as
+	filt(v, t, r) for an arrival time v corresponding to transmit index t
+	and receive index r, returns True for a valid measurement and False for
+	an invalid measurement. If filt is not specified, all non-backscatter
+	measurements are assumed valid.
 
 	Only every stride-th *valid* record, starting with the start-th such
 	record, is retained.
@@ -52,8 +58,8 @@ def getatimes(atfile, column=0, start=0, stride=1):
 	idx = 0
 
 	for (t, r), v in ldkmat(atfile, nkeys=2, scalar=False).iteritems():
-		# Ignore backscatter
-		if t == r: continue
+		# Ignore backscatter and invalid waveforms
+		if t == r or (filt and not filt(v, t, r)): continue
 		# Keep every stride-th valid record
 		if idx % stride == start: atimes[t,r] = v[column]
 		# Increment the valid record count
@@ -606,6 +612,24 @@ if __name__ == "__main__":
 	# Determine interpolation mode
 	linear = config.get(tsec, 'linear', mapper=bool, default=True)
 
+	try: limits = config.getlist(tsec, 'limits', mapper=float, default=None)
+	except Exception as e: _throw('Configuration must specify valid limits')
+
+	if limits:
+		if len(limits) != 2:
+			_throw('Optional limits must be a two-element list')
+		# Define a validity filter for arrival times
+		limits = sorted(limits)
+		if not rank: print 'Restricting arrival times to average slowness in', limits
+		def atfilt(v, t, r):
+			# Sanity check
+			if t == r: return False
+			# Find average straight-ray slowness, if possible
+			try: aslw = v / norm(elements[t] - elements[r])
+			except KeyError: return False
+			return limits[0] <= aslw <= limits[1]
+	else: atfilt = None
+
 	try:
 		# Look for local files and determine local share
 		tfiles = matchfiles(config.getlist(tsec, 'timefile'))
@@ -613,7 +637,7 @@ if __name__ == "__main__":
 		tfiles = flocshare(tfiles, MPI.COMM_WORLD)
 		# Pull out local share of locally available arrival times
 		atimes = dict(kp for tf, (st, ln) in tfiles.iteritems()
-				for kp in getatimes(tf, 0, st, ln).iteritems())
+				for kp in getatimes(tf, 0, atfilt, st, ln).iteritems())
 	except Exception as e: _throw('Configuration must specify valid timefile', e)
 
 	# Build the cost calculator
