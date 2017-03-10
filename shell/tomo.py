@@ -226,8 +226,8 @@ class TomographyTracer(object):
 		return f, nrows, gf
 
 
-def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
-		tol=1e-6, tvreg=None, mfilter=None, partial_output=None):
+def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
+		tvreg=None, mfilter=None, limits=None, partial_output=None):
 	'''
 	Iteratively compute a slowness image by minimizing the cost functional
 	represented in the TomographyTracer instance cshare and using the
@@ -273,6 +273,11 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 	median filter of size mfilter will be applied to the image before
 	beginning the next round. The argument mfilter can be a scalar or a
 	three-element sequence of positive integers.
+
+	If limits is not None, it should be a tuple of the form (slo, shi),
+	where slo and shi are, respectively, the lowest and highest allowed
+	slowness values. Each update will be clipped to these limits as
+	necessary.
 
 	If partial_output is not None, it should be a string specifying a name
 	template that will be rendered to store images produced after each
@@ -399,6 +404,12 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5,
 	converged = False
 
 	for k in range(epochs):
+		if limits:
+			# Clip the update to the desired range
+			x += s[mask]
+			np.clip(x, limits[0], limits[1], x)
+			x -= s[mask]
+
 		if k < 2:
 			eta = 1.0
 		else:
@@ -646,7 +657,7 @@ if __name__ == "__main__":
 
 	# Compute random updates to the image
 	ns = makeimage(cshare, s, mask, nmeas, epochs, updates,
-			beta, tol, tvreg, mfilter, partial_output)
+			beta, tol, tvreg, mfilter, limits, partial_output)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
