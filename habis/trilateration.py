@@ -443,6 +443,35 @@ class PlaneTrilateration(MultiPointTrilateration):
 	known elements. As additional constraints, the positions of the
 	recovered elements will be constrained to approximately lie on a plane.
 	'''
+	def __init__(self, *args, **kwargs):
+		'''
+		Create a PlaneTrilateration instance using a collection of
+		known elements. The arguments are the same as those in the
+		MultiPointTrilateration constructor with the addition of an
+		optional 'planewt' argument. The argument should be a
+		floating-point value (default: 1.0) that represents a weight
+		used to scale the coplanarity constraints with respect to the
+		MultiPointTrilateration arrival-time constraints. Make planewt
+		greater than unity to more strongly enforce the coplanarity
+		requirements and less than unity to relax the coplanarity
+		requirements.
+
+		If provided, planewt shoud be the fourth (and final) positional
+		argument if it is not a keyword argument.
+		'''
+		# Consume subclass-specific 'planewt' argument
+		if len(args) > 4:
+			raise TypeError('Too many positional arguments')
+		elif len(args) == 4:
+			if 'planewt' in kwargs:
+				raise TypeError('Duplicate value for argument "planewt"')
+			self.planewt = args[3]
+			args = args[:3]
+		else: self.planewt = kwargs.pop('planewt', 1.0)
+		# Finish initialization
+		super(PlaneTrilateration, self).__init__(*args, **kwargs)
+
+
 	def jacobian(self, pos, *args, **kwargs):
 		'''
 		Computes the Jacobian matrix of the cost function described in
@@ -487,6 +516,9 @@ class PlaneTrilateration(MultiPointTrilateration):
 		# Determine the normal to element plane
 		normal = facet.lsqnormal(pos)
 
+		# Capture a current view of the plane weight
+		planewt = self.planewt
+
 		# Build the MVP and its adjoint for a LinearOperator
 		def mv(x):
 			y = np.empty((jshape[0],), dtype=self.centers.dtype)
@@ -494,8 +526,8 @@ class PlaneTrilateration(MultiPointTrilateration):
 			y[:bjshape[0]] = bjac.matvec(x)
 			# Reshape the element coordinates for convenience
 			x = np.reshape(x[:nelts*ndim], (nelts, ndim), order='C')
-			# Compute the coplanarity parts
-			relx = x - np.mean(x, axis=0)
+			# Compute the coplanarity parts (weight as desired)
+			relx = planewt * (x - np.mean(x, axis=0))
 			y[bjshape[0]:] = np.dot(relx, normal)
 			return y
 
@@ -503,9 +535,9 @@ class PlaneTrilateration(MultiPointTrilateration):
 			ntrilat = nelts * nrows
 			# Compute the independent trilateration contribution
 			x = bjac.rmatvec(y[:bjshape[0]])
-			# Include coplanarity contribution
+			# Include coplanarity contribution (weight as desired)
 			yplan = y[bjshape[0]:,np.newaxis]
-			rely = yplan - np.mean(yplan)
+			rely = planewt * (yplan - np.mean(yplan))
 			x[:nelts*ndim] += np.dot(rely, normal[np.newaxis,:]).ravel('C')
 			return x
 
@@ -548,5 +580,5 @@ class PlaneTrilateration(MultiPointTrilateration):
 		relpos = pos - np.mean(pos, axis=0)
 		normal = facet.lsqnormal(pos)
 		# Concatenate both contributions for the global cost
-		cfunc[n:] = np.dot(relpos, normal)
+		cfunc[n:] = self.planewt * np.dot(relpos, normal)
 		return cfunc

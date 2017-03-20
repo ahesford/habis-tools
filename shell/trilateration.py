@@ -61,7 +61,7 @@ def getreflpos(args):
 
 def geteltpos(args):
 	'''
-	For args = (elts, eltpos, times, reflectors, rad, c, tol), where:
+	For args = (elts, eltpos, times, reflectors, rad, c, tol, planewt), where:
 	  * elts is a list of element indices,
 	  * eltpos maps element indices to guess coordinates (x, y, z),
 	  * times maps element indices to a length-N sequence of round-trip
@@ -71,7 +71,8 @@ def geteltpos(args):
 	    background wave speed c, and radius r for each of N reflectors,
 	  * c is an arbitrary (uniform) background wave speed,
 	  * rad is an arbitrary (uniform) reflector radius,
-	  * and tol is a tolerance for Newton-Raphson iteraton,
+	  * tol is a tolerance for Newton-Raphson iteraton, and
+	  * planewt is a weighting on the emphasis of coplanarity constraints
 
 	use habis.trilateration.PlaneTrilaterion (if len(elts) > 2) or
 	habis.trilateration.MultiPointTrilateration to recover the positions of
@@ -81,7 +82,7 @@ def geteltpos(args):
 
 	The return value is a map from element indices to final coordinates.
 	'''
-	elts, eltpos, times, reflectors, rad, c, tol = args
+	elts, eltpos, times, reflectors, rad, c, tol, planewt = args
 
 	# Pull the element coordinates
 	celts = np.array([eltpos[e] for e in elts])
@@ -89,10 +90,12 @@ def geteltpos(args):
 	ctimes = ((np.array([times[e] for e in elts]) *
 			(reflectors[:,-2] / c)[np.newaxis,:]) +
 			(2 * (reflectors[:,-1] - rad) / c)[np.newaxis,:])
+	# Strip sound speed and radius from the reflectors
+	reflpos = reflectors[:,:-2]
 	# No need to enforce coplanarity for one or two elements
-	tcls = (trilateration.PlaneTrilateration if len(elts) > 2
-			else trilateration.MultiPointTrilateration)
-	pltri = tcls(reflectors[:,:-2])
+	if len(elts) > 2:
+		pltri = trilateration.PlaneTrilateration(reflpos, planewt=planewt)
+	else: pltri = trilateration.MultiPointTrilateration(reflpos)
 	repos = pltri.newton(ctimes, pos=celts, c=c, r=rad, tol=tol)
 
 	return dict(izip(elts, repos))
@@ -182,6 +185,7 @@ def trilaterationEngine(config):
 	try:
 		# Pull the facet (coplanar element groups) size
 		fctsize = config.get(tsec, 'fctsize', mapper=int, default=1)
+		if fctsize < 1: raise ValueError('fctsize must be a positive integer')
 	except Exception as e:
 		err = 'Invalid specification of optional fctsize in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
@@ -200,8 +204,13 @@ def trilaterationEngine(config):
 		err = 'Invalid specification of optional stopdist in [%s]' % tsec
 		raise HabisConfigError.fromException(err, e)
 
-	if fctsize < 1:
-		raise HabisConfigError('Optional fctsize must be a positive integer')
+	try:
+		# Pull the weight for coplanarity constraints
+		planewt = config.get(tsec, 'planewt', mapper=float, default=1.0)
+		if planewt < 0: raise ValueError('planewt must be nonnegative')
+	except Exception as e:
+		err = 'Invalid specification of optional planewt in [%s]' % tsec
+		raise HabisConfigError.fromException(err, e)
 
 	# Accumulate all element coordinates and arrival times
 	eltpos = loadmatlist(inelements)
@@ -267,9 +276,9 @@ def trilaterationEngine(config):
 
 		# Compute the element positions in parallel by facet
 		# Use async calls to correctly handle keyboard interrupts
-		result = pool.map_async(geteltpos,
-				((elts, eltpos, times, reflectors, radius, c, tol)
-					for elts in facets.itervalues()))
+		cargs = (eltpos, times, reflectors, radius, c, tol, planewt)
+		result = pool.map_async(geteltpos, 
+				((elts,) + cargs for elts in facets.itervalues()))
 		while True:
 			try:
 				relements = dict(kp for r in result.get(5) for kp in r.iteritems())
