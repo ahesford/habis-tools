@@ -286,10 +286,6 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 	where "epoch" and "iter" are the epoch index and update iteration
 	number, respectively. If partial_output is None, no partial images will
 	be stored.
-
-	Participating ranks will be pulled from the given MPI communicator,
-	wherein rank 0 must invoke this function and all other ranks must
-	invoke traceloop().
 	'''
 	# Determine the grid shape
 	gshape = cshare.tracer.box.ncell
@@ -362,8 +358,8 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 		functional and its gradient for optimization by SGD-BB to
 		obtain a contrast update.
 
-		See the traceloop documentation for the general (unregularized)
-		form of the cost functional.
+		See the TomographyTracer documentation for the general
+		(unregularized) form of the cost functional.
 		'''
 		# Track the run time
 		stime = time()

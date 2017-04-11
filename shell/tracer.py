@@ -3,7 +3,7 @@
 # Copyright (c) 2016 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import os, sys, numpy as np
+import os, sys, math, numpy as np
 from numpy.linalg import norm
 
 import time
@@ -18,6 +18,7 @@ from habis.mpdfile import flocshare
 
 from pycwp import boxer, cutil
 
+
 def maketimestr(start, end):
 	'''
 	Print the time (start - end) in seconds (with millisecond precision) if
@@ -25,10 +26,8 @@ def maketimestr(start, end):
 	precision) if the time is less than 1 second. Add a suffix (s or ms).
 	'''
 	dtime = end - start
-	if abs(dtime) < 1:
-		return '%0.3f ms' % (1000. * dtime,)
-	else:
-		return '%0.3f s' % (dtime,)
+	if abs(dtime) < 1: return '%0.3f ms' % (1000. * dtime,)
+	else: return '%0.3f s' % (dtime,)
 
 
 def makedtypes(nidx=2, nvals=3, names=None):
@@ -174,7 +173,7 @@ def tracerEngine(config):
 	except Exception as e: _throw('Configuration must specify meshctr', e)
 
 	# Load the node and triangle configuration
-	try: mesh = np.load(config.get(tsec, 'mesh'))
+	try: meshfile = config.get(tsec, 'mesh')
 	except Exception as e: _throw('Configuration must specify mesh', e)
 
 	try: levels = config.get(tsec, 'levels', mapper=int)
@@ -220,8 +219,10 @@ def tracerEngine(config):
 	stime = time.time()
 
 	# Convert the triangle node maps to triangle objects
-	nodes, triangles = mesh['nodes'], mesh['triangles']
-	triangles = [ boxer.Triangle3D([nodes[c] for c in v]) for v in triangles ]
+	with np.load(meshfile) as mesh:
+		nodes, triangles = mesh['nodes'], mesh['triangles']
+	# Retain the unique labeling of nodes in all Triangle3D objects
+	triangles = [ boxer.Triangle3D([nodes[c] for c in v], v) for v in triangles ]
 
 	# Compute an overall bounding box and an Octree for the space
 	rootbox = boxer.Box3D(*zip(*((min(j), max(j))
@@ -293,21 +294,13 @@ def tracerEngine(config):
 		# Skip very small segments
 		if cutil.almosteq(seg.length, 0.0, epsilon): continue
 
-		# A predicate to match segment-box intersections
+		# Predicates match segment-box and segment-triangle intersections
 		def bsect(b): return b.intersection(seg)
+		def tsect(i): return triangles[i].intersection(seg)
 
-		# For speed, cache segment-triangle intersections in predicate
-		trcache = { }
-		def tsect(i):
-			try:
-				return trcache[i]
-			except KeyError:
-				v = triangles[i].intersection(seg)
-				trcache[i] = v
-				return v
-
-		# Find intersections between segment and surface
-		isects = otree.search(bsect, tsect)
+		# Find intersections between segment and surface; cache
+		# segment-triangle intersections to avoid redundant tests
+		isects = otree.search(bsect, tsect, { })
 
 		if k[0] == k[1]:
 			# Backscatter: nonsense if there is no surface intersection
@@ -393,7 +386,7 @@ def tracerEngine(config):
 		t = misses['atime']
 		x = misses['exlen']
 		vbg = np.dot(t, x) / np.dot(t, t)
-		
+
 	print 'Exterior speed: %0.5g (%d paths)' % (vbg, len(misses))
 
 	# Offset arrival times by contribution from exterior speed
