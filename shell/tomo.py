@@ -32,7 +32,7 @@ from habis.pathtracer import PathTracer
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadkeymat as ldkmat, loadmatlist as ldmats
 from habis.mpdfile import flocshare
-from habis.slowness import Slowness, MaskedSlowness
+from habis.slowness import Slowness, MaskedSlowness, PiecewiseSlowness
 
 
 def getatimes(atfile, column=0, filt=None, start=0, stride=1):
@@ -393,9 +393,10 @@ def makeimage(cshare, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 			# Clip the update to the desired range
 			s.clip(x, limits[0], limits[1], x)
 
-		if k < 2:
-			eta = 1.0
-		else:
+		if k < 1:
+			f, lgf = ffg(x)
+			eta = 2 * f / norm(lgf)**2
+		elif k >= 2:
 			# Compute change in solution and gradient
 			lx += x
 			lg += cg
@@ -527,19 +528,18 @@ if __name__ == "__main__":
 		raise HabisConfigError.fromException(msg + ' in [%s]' % (sec,), e)
 
 
-	try:
-		# Find the slowness map
-		s = config.get(tsec, 'slowness')
-		# Load the map or build a constant map
-		try: s = float(s)
-		except (ValueError, TypeError): s = np.load(s).astype(np.float64)
-		else: s = s * np.ones(bx.ncell, dtype=np.float64)
+	# Load the slowness (may be a value or a file name)
+	try: s = config.get(tsec, 'slowness')
 	except Exception as e: _throw('Configuration must specify slowness', e)
 
-	# Create guess and load solution map
+	# Determine whether piecewise-constant slowness models are desired
+	try: piecewise = config.get(tsec, 'piecewise', mapper=bool, default=False)
+	except Exception as e: _throw('Invalid optional piecewise')
+
 	try:
+		# Load a slowness mask, if one is specified
 		mask = config.get(tsec, 'slowmask', default=None)
-		if mask: mask = np.load(mask).astype(bool)
+		if mask: mask = np.load(mask).astype(int if piecewise else bool)
 	except Exception as e: _throw('Invalid optional slowmask', e)
 
 	try:
@@ -635,8 +635,18 @@ if __name__ == "__main__":
 	cshare = TomographyTracer(elements, atimes, tracer,
 					slowdef, linear, MPI.COMM_WORLD)
 
-	if mask is not None: slw = MaskedSlowness(s, mask)
-	else: slw = Slowness(s)
+	if piecewise:
+		if mask is None: raise ValueError('Slowness mask is required in piecewise mode')
+		slw = PiecewiseSlowness(mask, s)
+		if not rank: print 'Assuming piecewise model with values', slw._s
+	else:
+		# Convert the scalar slowness or file name into a matrix
+		try: s = float(s)
+		except (ValueError, TypeError): s = np.load(s).astype(np.float64)
+		else: s = s * np.ones(bx.ncell, dtype=np.float64)
+
+		if mask is not None: slw = MaskedSlowness(s, mask)
+		else: slw = Slowness(s)
 
 	# Compute random updates to the image
 	ns = makeimage(cshare, slw, nmeas, epochs, updates, beta,
