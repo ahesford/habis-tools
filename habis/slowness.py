@@ -305,7 +305,7 @@ class PiecewiseSlowness(Slowness):
 		nnz = self.nnz
 		out = self._buildoutput(out, (nnz,))
 		for i in xrange(nnz):
-			out[i] = np.sum(self._voxmap == i)
+			out[i] = np.sum(s[self._voxmap == i])
 		return out
 
 
