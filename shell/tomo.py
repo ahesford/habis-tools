@@ -32,6 +32,7 @@ from habis.pathtracer import PathTracer
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadkeymat as ldkmat, loadmatlist as ldmats
 from habis.mpdfile import flocshare
+from habis.slowness import Slowness, MaskedSlowness
 
 
 def getatimes(atfile, column=0, filt=None, start=0, stride=1):
@@ -226,17 +227,14 @@ class TomographyTracer(object):
 		return f, nrows, gf
 
 
-def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
+def makeimage(cshare, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 		tvreg=None, mfilter=None, limits=None, partial_output=None):
 	'''
 	Iteratively compute a slowness image by minimizing the cost functional
 	represented in the TomographyTracer instance cshare and using the
-	solution to update the given profile s defined over the grid defined in
-	cshare.tracer.box.
-
-	If mask is not None, it should be a bool array with the same shape as s
-	(and cshare.tracer.box.ncell) that is True for cells that should be
-	updated and False for cells that should remain unchanged.
+	solution to update the given slowness model s (an instance of
+	habis.slowness.Slowness or its descendants) defined over the grid
+	defined in cshare.tracer.box.
 
 	The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB) method of
 	Tan, et al. (2016) is used to compute the image. The method continues
@@ -290,22 +288,13 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 	# Determine the grid shape
 	gshape = cshare.tracer.box.ncell
 
-	# Make sure the image is the right shape
-	s = np.array(s, dtype=np.float64)
-
-	if mask is None: mask = np.ones(s.shape, dtype=bool)
-	else: mask = np.asarray(mask, dtype=bool)
-
-	if s.shape != gshape or s.shape != mask.shape:
-		raise ValueError('Shape of s and optional mask must be %s' % (gshape,))
-
-	nnz = np.sum(mask.astype(np.int64))
+	if s.shape != gshape: raise ValueError('Shape of s must be %s' % (gshape,))
 
 	# Work arrays
-	sp = np.copy(s)
-	gf = np.zeros_like(s)
+	sp = s.perturb(0)
+	gf = np.zeros_like(sp)
 
-	work = np.zeros((nnz,4), dtype=np.float64)
+	work = np.zeros((s.nnz, 4), dtype=np.float64)
 	x = work[:,0]
 	lx = work[:,1]
 	cg = work[:,2]
@@ -350,7 +339,7 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 			tvscale['min'] = float(tvargs.pop('min', 0))
 
 		# Allocate space for expanded update when regularizing
-		xp = np.zeros_like(s)
+		xp = np.zeros(s.shape, dtype=np.float64)
 
 	def ffg(x):
 		'''
@@ -364,15 +353,15 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 		# Track the run time
 		stime = time()
 
-		# Compute the perturbed slowness
-		sp[mask] = s[mask] + x
+		# Compute the perturbed slowness into sp
+		s.perturb(x, sp)
 
 		# Compute the stochastic cost and gradient
 		f, nrows, _ = cshare.evaluate(sp, nmeas, grad=gf)
 
 		# Scale cost (and gradient) to mean-squared error
 		f /= nrows
-		lgf = gf[mask] / nrows
+		lgf = s.flatten(gf) / nrows
 
 		try:
 			tvwt = tvscale['weight']
@@ -380,10 +369,10 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 			pass
 		else:
 			# Unpack update for regularization
-			xp[mask] = x
+			s.unflatten(x, xp)
 			tvn, tvng = tvscale['method'](xp, **tvargs)
 			f += tvwt * tvn
-			lgf += tvwt * tvng[mask]
+			lgf += tvwt * s.flatten(tvng)
 
 		# The time to evaluate the function and gradient
 		stime = time() - stime
@@ -402,9 +391,7 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 	for k in range(epochs):
 		if limits:
 			# Clip the update to the desired range
-			x += s[mask]
-			np.clip(x, limits[0], limits[1], x)
-			x -= s[mask]
+			s.clip(x, limits[0], limits[1], x)
 
 		if k < 2:
 			eta = 1.0
@@ -442,7 +429,7 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 		cg[:] = 0
 
 		# Build a callback to write per-iteration results, if desired
-		if cshare.isRoot: cb = callbackgen(partial_output, s, mask, k, mfilter)
+		if cshare.isRoot: cb = callbackgen(partial_output, s, k, mfilter)
 		else: cb = None
 
 		for t in range(updates):
@@ -477,20 +464,18 @@ def makeimage(cshare, s, mask, nmeas, epochs, updates, beta=0.5, tol=1e-6,
 			tvscale['weight'] *= tvscale['scale']
 
 	# Update the image
-	s[mask] += x
-
+	sp = s.perturb(x, sp)
 	# Apply a desired filter
-	if mfilter: s[:,:,:] = median_filter(s, size=mfilter)
+	if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
 
-	return s
+	return sp
 
 
-def callbackgen(templ, s, mask, epoch, mfilter):
+def callbackgen(templ, s, epoch, mfilter):
 	'''
 	Build a callback with signature callback(x, nit) to write partial
-	images of perturbations x to an assumed slowness s, with the given
-	update mask (True where samples will be perturbed, False elsewhere),
-	for a given SGD-BB epoch 'epoch'.
+	images of perturbations x to an assumed slowness model s (as a
+	habis.slowness.Slowness instance) for a given SGD-BB epoch 'epoch'.
 
 	If mfilter is True, it should be a value passed as the "size" argument
 	to scipy.ndimage.median_filter to smooth the perturbed slowness prior
@@ -503,8 +488,7 @@ def callbackgen(templ, s, mask, epoch, mfilter):
 
 	def callback(x, nit):
 		# Write out the iterate
-		sp = s.copy()
-		sp[mask] += x
+		sp = s.perturb(x)
 		if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
 		fname = templ.format(epoch=epoch, iter=nit)
 		np.save(fname, sp.astype(np.float32))
@@ -651,9 +635,12 @@ if __name__ == "__main__":
 	cshare = TomographyTracer(elements, atimes, tracer,
 					slowdef, linear, MPI.COMM_WORLD)
 
+	if mask is not None: slw = MaskedSlowness(s, mask)
+	else: slw = Slowness(s)
+
 	# Compute random updates to the image
-	ns = makeimage(cshare, s, mask, nmeas, epochs, updates,
-			beta, tol, tvreg, mfilter, limits, partial_output)
+	ns = makeimage(cshare, slw, nmeas, epochs, updates, beta,
+			tol, tvreg, mfilter, limits, partial_output)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
