@@ -779,7 +779,7 @@ if __name__ == "__main__":
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes, tracer.box, MPI.COMM_WORLD)
 		# Compute the optimum image
-		ns = cshare.lsmr(slw)
+		ns = cshare.lsmr(slw, maxiter = epochs * updates)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
