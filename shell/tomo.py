@@ -13,6 +13,8 @@ import numpy as np
 from numpy.linalg import norm
 
 from scipy.ndimage import median_filter
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import LinearOperator
 
 from math import fsum
 
@@ -26,6 +28,7 @@ from mpi4py import MPI
 
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.regularize import epr, totvar
+from pycwp.iterative import lsmr
 
 from habis.pathtracer import PathTracer
 
@@ -69,45 +72,37 @@ def getatimes(atfile, column=0, filt=None, start=0, stride=1):
 	return atimes
 
 
-class TomographyTracer(object):
+class TomographyTask(object):
 	'''
-	A class encapsulating a single MPI rank that participates in computing
-	path tracing for arrival-time tomography. Each instance takes
-	responsibility for the set of arrival-time measurements provided to it.
+	A root class to encapsulate a single MPI rank that participates in
+	tomographic reconstructions. Each instances takes responsibility for a
+	set of arrival-time measurements provided to it.
 	'''
-	def __init__(self, elements, atimes, tracer, 
-			slowdef=None, linear=True, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, comm=MPI.COMM_WORLD):
 		'''
-		Create a worker, collaborating with other ranks in the given
-		communicator comm, to trace optimum paths through slowness maps
-		according to the PathTracer instance tracer. Elements have
-		coordinates given by element[i] for some index i, and first
-		arrival times from transmitter t to receiver r given by
-		atimes[t,r].
+		Create a worker that collaborates with other ranks in the given
+		MPI communicator comm to compute tomographic images. Elements
+		have coordinates given by elements[i] for some integer index i,
+		and first-arrival times from transmitter t ot receiver r are
+		given by atimes[t,r].
 
-		Any arrival times corresponding to a (t,r) key for which
-		elements[t] or elements[r] is not defined will be discarded.
-
-		Slowness is interpolated with LinearInterpolator3D if linear is
-		True (HermiteInterpolator3D otherwise). The interpolator will
-		inherit a default (out-of-bounds) slowness slowdef. 
+		Any arrival times corresponding to a (t, r) pair for which
+		elements[t] or elements[r] is not defined, or for which t == r,
+		will be discarded.
 		'''
-		# Grab a reference to the path tracer
-		self.tracer = tracer
+		# Record the communicator
+		self.comm = comm
 
 		# Make a copy of the element and arrival-time maps
 		self.elements = { }
 		self.atimes = { }
 
-		# Record the MPI communicator
-		self.comm = comm
-
 		for (t, r), v in atimes.iteritems():
-			# The transmit and receive indices must be distinct
+			# Make sure t-r indices are distinct
 			if t == r: continue
 
 			try:
-				# Ensure this arrival time has element locations
+				# Ensure arrival time has element locations
 				et = elements[t]
 				er = elements[r]
 			except KeyError:
@@ -117,19 +112,136 @@ class TomographyTracer(object):
 				self.elements[r] = er
 				self.atimes[t,r] = v
 
-		# Record solver parameters
-		self.slowdef = slowdef
-		self.interpolator = (LinearInterpolator3D if linear
-					else HermiteInterpolator3D)
-
 	@property
 	def isRoot(self):
 		'''
-		True if this instance has a communicator and is rank 0 of its
+		True if this instance has a communicator and is rank 0 in that
 		communicator, False otherwise.
 		'''
 		return self.comm and not self.comm.rank
 
+
+class StraightRayTracer(TomographyTask):
+	'''
+	A subclass of TomographyTask to perform straight-ray path tracing.
+	'''
+	def __init__(self, elements, atimes, box, comm=MPI.COMM_WORLD):
+		'''
+		Create a worker for straight-ray tomography on the element
+		pairs present in atimes. The imaging grid is represented by the
+		Box3D box.
+		'''
+		# Initialize the data and communicator
+		super(StraightRayTracer, self).__init__(elements, atimes, comm)
+
+		# Grab a reference to the box
+		self.box = box
+		ncell = self.box.ncell
+
+
+		# Build the path-length matrix and RHS vector
+		indptr = [ 0 ]
+		indices = [ ]
+		data = [ ]
+		rhs = [ ]
+		pts = np.empty((2, 3), dtype=np.float64)
+		for (t, r), v in sorted(self.atimes.iteritems()):
+			# March straight through the grid
+			pts[0] = self.elements[t]
+			pts[1] = self.elements[r]
+			# Compute the total segment length
+			slen = norm(pts[1] - pts[0])
+			path = self.box.raymarcher(pts)
+			# Build this row of the path-length matrix
+			for cidx, (s, e) in path.iteritems():
+				data.append(slen * (e - s))
+				indices.append(np.ravel_multi_index(cidx, ncell))
+			indptr.append(len(indices))
+			rhs.append(v)
+
+		self.pathmat = csr_matrix((data, indices, indptr),
+				shape=(len(rhs), np.prod(ncell)), dtype=np.float64)
+		self.rhs = np.array(rhs, dtype=np.float64)
+
+	def lsmr(self, s, **kwargs):
+		'''
+		Iteratively compute, using LSMR, a slowness image that
+		satisfies the straight-ray arrival-time equations implicit in
+		this StraightRayTracer instance. The solution is represented as
+		a perturbation to the slowness s, an instance of
+		habis.slowness.Slowness or its descendants, defined on the grid
+		self.box.
+
+		The LSMR implementation uses pycwp.iterative.lsmr to support
+		arrival times distributed across multiple MPI tasks in
+		self.comm. The keyword arguments kwargs will be passed to
+		lsmr to customize the solution process. Forbidden keyword
+		arguments are "A", "b", "unorm" and "vnorm".
+
+		The return value will be the final, perturbed solution.
+		'''
+		if not self.isRoot:
+			# Make sure non-root tasks are always silent
+			kwargs['show'] = False
+
+		if 'calc_var' in kwargs:
+			raise TypeError('Argument "calc_var" is forbidden')
+
+		# RHS is arrival times minus unperturbed solution
+		rhs = self.rhs - self.pathmat.dot(s.perturb(0).ravel('C'))
+		ncell = self.box.ncell
+
+		# Build linear operator
+		def mvp(v):
+			# Expand a constrained solution to the grid, then multiply
+			return self.pathmat.dot(s.unflatten(v).ravel('C'))
+		def amvp(u):
+			# Synchronize
+			self.comm.Barrier()
+			# Multiple by transposed local share, then flatten
+			v = s.flatten(self.pathmat.T.dot(u).reshape(ncell, order='C'))
+			# Accumulate contributions from all ranks
+			self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
+			return v
+		shape = (len(rhs), s.nnz)
+
+		A = LinearOperator(shape=shape, matvec=mvp, rmatvec=amvp, dtype=rhs.dtype)
+
+		def unorm(u):
+			# Norm of distributed vectors, to all ranks
+			un = norm(u)**2
+			return np.sqrt(self.comm.allreduce(un, op=MPI.SUM))
+
+		results = lsmr(A, rhs, unorm=unorm, vnorm=norm, **kwargs)
+		if self.isRoot:
+			print 'LSMR terminated after %d iterations for reason %d' % (results[2], results[1])
+
+		return s.perturb(results[0])
+
+
+class BentRayTracer(TomographyTask):
+	'''
+	A subclass of TomographyTask to perform bent-ray path tracing.
+	'''
+	def __init__(self, elements, atimes, tracer,
+			slowdef=None, linear=True, comm=MPI.COMM_WORLD):
+		'''
+		Create a worker to do path tracing on the element pairs present
+		in atimes. Slowness will be interpolated with
+		LinearInterpolator3D if linear is True (HermiteInterpolator3D
+		otherwise). The interpolator will inherit a default
+		(out-of-bounds) slowness slowdef.
+		'''
+		# Initialize the data and communicator
+		super(BentRayTracer, self).__init__(elements, atimes, comm)
+
+		# Grab a reference to the path tracer
+		self.tracer = tracer
+
+		# Record solver parameters
+		self.slowdef = slowdef
+		self.interpolator = (LinearInterpolator3D if linear
+					else HermiteInterpolator3D)
 
 	def evaluate(self, s, nm, grad=None):
 		'''
@@ -226,275 +338,283 @@ class TomographyTracer(object):
 
 		return f, nrows, gf
 
+	@staticmethod
+	def callbackgen(templ, s, epoch, mfilter):
+		'''
+		Build a callback with signature callback(x, nit) to write
+		partial images of perturbations x to an assumed slowness model
+		s (as a habis.slowness.Slowness instance) for a given SGD-BB
+		epoch 'epoch'.
 
-def makeimage(cshare, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
-		tvreg=None, mfilter=None, limits=None, partial_output=None):
-	'''
-	Iteratively compute a slowness image by minimizing the cost functional
-	represented in the TomographyTracer instance cshare and using the
-	solution to update the given slowness model s (an instance of
-	habis.slowness.Slowness or its descendants) defined over the grid
-	defined in cshare.tracer.box.
+		If mfilter is True, it should be a value passed as the "size"
+		argument to scipy.ndimage.median_filter to smooth the perturbed
+		slowness prior to output.
 
-	The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB) method of
-	Tan, et al. (2016) is used to compute the image. The method continues
-	for at most 'epochs' epochs, with a total of 'updates' stochastic
-	descent steps per epoch. A single stochastic descent is made by
-	sampling the global cost functional (mean-squared arrival-time
-	error) using nmeas measurements per MPI rank.
+		The callback will store images in npy format with the name
+		given by templ.format(epoch=epoch, iter=nit).
+		'''
+		if not templ: return None
 
-	The descent step is selecting using a stochastic Barzilai-Borwein (BB)
-	scheme. The first two epochs will each use a fixed step size of 1.
-	Later updates rely on approximations to the gradient in previous
-	epochs. The approximate gradient at epoch k is defined recursively over
-	t updates as
+		def callback(x, nit):
+			# Write out the iterate
+			sp = s.perturb(x)
+			if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
+			fname = templ.format(epoch=epoch, iter=nit)
+			np.save(fname, sp.astype(np.float32))
 
-		g_{k,t} = beta * grad(f_t)(x_t) + (1 - beta) g_{k,t-1},
+		return callback
 
-	where g_{k,0} == 0, f_t is the t-th sampled cost functional for the
-	epoch and x_t is the solution at update t.
+	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
+			tvreg=None, mfilter=None, limits=None, partial_output=None):
+		'''
+		Iteratively compute a slowness image by minimizing the cost
+		functional represented in this BentRayTracer instance and using
+		the solution to update the given slowness model s (an instance
+		of habis.slowness.Slowness or its descendants) defined over the
+		grid defined in self.tracer.box.
 
-	If tvreg is True, the cost function will be regularized with a method
-	from pycwp.cytools.regularize. In this case, tvreg should either be a
-	scalar regularization parameter used to weight the norm or a kwargs
-	dictionary which must contain a 'weight' keyword providing the weight.
-	Three optional keywords, 'scale', 'min' and 'every', will be used to
-	scale the weight by the float factor 'scale' after every 'every' epochs
-	(default: 1) until the weight is no larger than 'min' (default: 0). The
-	values of 'every' and 'min' are ignored if 'scale' is not provided. An
-	optional 'method' keyword can take the value 'epr' or 'totvar' to
-	select the corresponding regularization method from the regularize
-	module. If 'method' is not provided, 'totvar' is assumed. Any
-	additional keyword arguments are passed to the regularizer.
+		The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB)
+		method of Tan, et al. (2016) is used to compute the image. The
+		method continues for at most 'epochs' epochs, with a total of
+		'updates' stochastic descent steps per epoch. A single
+		stochastic descent is made by sampling the global cost
+		functional (mean-squared arrival-time error) using nmeas
+		measurements per MPI rank.
 
-	After each round of randomized reconstruction, if mfilter is True, a
-	median filter of size mfilter will be applied to the image before
-	beginning the next round. The argument mfilter can be a scalar or a
-	three-element sequence of positive integers.
+		The descent step is selecting using a stochastic
+		Barzilai-Borwein (BB) scheme. The first two epochs will each
+		use a fixed step size of 1. Later updates rely on
+		approximations to the gradient in previous epochs. The
+		approximate gradient at epoch k is defined recursively over t
+		updates as
 
-	If limits is not None, it should be a tuple of the form (slo, shi),
-	where slo and shi are, respectively, the lowest and highest allowed
-	slowness values. Each update will be clipped to these limits as
-	necessary.
+		  g_{k,t} = beta * grad(f_t)(x_t) + (1 - beta) g_{k,t-1},
 
-	If partial_output is not None, it should be a string specifying a name
-	template that will be rendered to store images produced after each
-	update. An "update" counts as a update in a single epoch. The formatted
-	output name will be partial_output.format(epoch=epoch, iter=iter),
-	where "epoch" and "iter" are the epoch index and update iteration
-	number, respectively. If partial_output is None, no partial images will
-	be stored.
-	'''
-	# Determine the grid shape
-	gshape = cshare.tracer.box.ncell
+		where g_{k,0} == 0, f_t is the t-th sampled cost functional for
+		the epoch and x_t is the solution at update t.
 
-	if s.shape != gshape: raise ValueError('Shape of s must be %s' % (gshape,))
+		If tvreg is True, the cost function will be regularized with a
+		method from pycwp.cytools.regularize. In this case, tvreg
+		should either be a scalar regularization parameter used to
+		weight the norm or a kwargs dictionary which must contain a
+		'weight' keyword providing the weight.  Three optional
+		keywords, 'scale', 'min' and 'every', will be used to scale the
+		weight by the float factor 'scale' after every 'every' epochs
+		(default: 1) until the weight is no larger than 'min' (default:
+		0). The values of 'every' and 'min' are ignored if 'scale' is
+		not provided. An optional 'method' keyword can take the value
+		'epr' or 'totvar' to select the corresponding regularization
+		method from the regularize module. If 'method' is not provided,
+		'totvar' is assumed. Any additional keyword arguments are
+		passed to the regularizer.
 
-	# Work arrays
-	sp = s.perturb(0)
-	gf = np.zeros_like(sp)
+		After each round of randomized reconstruction, if mfilter is
+		True, a median filter of size mfilter will be applied to the
+		image before beginning the next round. The argument mfilter can
+		be a scalar or a three-element sequence of positive integers.
 
-	work = np.zeros((s.nnz, 4), dtype=np.float64)
-	x = work[:,0]
-	lx = work[:,1]
-	cg = work[:,2]
-	lg = work[:,3]
+		If limits is not None, it should be a tuple of the form (slo,
+		shi), where slo and shi are, respectively, the lowest and
+		highest allowed slowness values. Each update will be clipped to
+		these limits as necessary.
 
-	# Interpret TV regularization
-	tvscale, tvargs = { }, { }
-	if tvreg:
-		# Make sure a default regularizing method is selected
-		tvscale.setdefault('method', totvar)
+		If partial_output is not None, it should be a string specifying
+		a name template that will be rendered to store images produced
+		after each update. An "update" counts as a update in a single
+		epoch. The formatted output name will be
+		partial_output.format(epoch=epoch, iter=iter), where "epoch"
+		and "iter" are the epoch index and update iteration number,
+		respectively. If partial_output is None, no partial images will
+		be stored.
+		'''
+		# Determine the grid shape
+		gshape = self.tracer.box.ncell
 
-		try:
-			# Treat the tvreg argument as a simple float
-			tvscale['weight'] = float(tvreg)
-		except TypeError:
-			# Non-numeric tvreg should be a dictionary
-			tvargs = dict(tvreg)
+		if s.shape != gshape:
+			raise ValueError('Shape of s must be %s' % (gshape,))
 
-			# Required weight parameter
-			tvscale['weight'] = float(tvargs.pop('weight'))
+		# Work arrays
+		sp = s.perturb(0)
+		gf = np.zeros_like(sp)
 
-			# Optional 'scale' argument
-			try: tvscale['scale'] = float(tvargs.pop('scale'))
-			except KeyError: pass
+		work = np.zeros((s.nnz, 4), dtype=np.float64)
+		x = work[:,0]
+		lx = work[:,1]
+		cg = work[:,2]
+		lg = work[:,3]
+
+		# Interpret TV regularization
+		tvscale, tvargs = { }, { }
+		if tvreg:
+			# Make sure a default regularizing method is selected
+			tvscale.setdefault('method', totvar)
 
 			try:
-				# Use a specified regularization method
-				method = str(tvargs.pop('method')).strip().lower()
+				# Treat the tvreg argument as a simple float
+				tvscale['weight'] = float(tvreg)
+			except TypeError:
+				# Non-numeric tvreg should be a dictionary
+				tvargs = dict(tvreg)
+
+				# Required weight parameter
+				tvscale['weight'] = float(tvargs.pop('weight'))
+
+				# Optional 'scale' argument
+				try: tvscale['scale'] = float(tvargs.pop('scale'))
+				except KeyError: pass
+
+				try:
+					# Use a specified regularization method
+					method = str(tvargs.pop('method')).strip().lower()
+				except KeyError:
+					pass
+				else:
+					if method == 'totvar':
+						tvscale['method'] = totvar
+					elif method == 'epr':
+						tvscale['method'] = epr
+					else:
+						err = 'Unknown regularization ' + method
+						raise ValueError(err)
+
+				# Optional 'every' and 'min' arguments
+				tvscale['every'] = int(tvargs.pop('every', 1))
+				tvscale['min'] = float(tvargs.pop('min', 0))
+
+			# Allocate space for expanded update when regularizing
+			xp = np.zeros(s.shape, dtype=np.float64)
+
+		def ffg(x):
+			'''
+			This function returns the (optionally TV regularized) cost
+			functional and its gradient for optimization by SGD-BB to
+			obtain a contrast update.
+
+			See the BentRayTracer documentation for the general
+			(unregularized) form of the cost functional.
+			'''
+			# Track the run time
+			stime = time()
+
+			# Compute the perturbed slowness into sp
+			s.perturb(x, sp)
+
+			# Compute the stochastic cost and gradient
+			f, nrows, _ = self.evaluate(sp, nmeas, grad=gf)
+
+			# Scale cost (and gradient) to mean-squared error
+			f /= nrows
+			lgf = s.flatten(gf) / nrows
+
+			try:
+				tvwt = tvscale['weight']
 			except KeyError:
 				pass
 			else:
-				if method == 'totvar':
-					tvscale['method'] = totvar
-				elif method == 'epr':
-					tvscale['method'] = epr
-				else:
-					err = 'Unknown regularization method ' + method
-					raise ValueError(err)
+				# Unpack update for regularization
+				s.unflatten(x, xp)
+				tvn, tvng = tvscale['method'](xp, **tvargs)
+				f += tvwt * tvn
+				lgf += tvwt * s.flatten(tvng)
 
-			# Optional 'every' and 'min' arguments
-			tvscale['every'] = int(tvargs.pop('every', 1))
-			tvscale['min'] = float(tvargs.pop('min', 0))
+			# The time to evaluate the function and gradient
+			stime = time() - stime
 
-		# Allocate space for expanded update when regularizing
-		xp = np.zeros(s.shape, dtype=np.float64)
+			if self.isRoot:
+				print 'Cost evaluation time: %0.2f sec' % (stime,)
 
-	def ffg(x):
-		'''
-		This function returns the (optionally TV regularized) cost
-		functional and its gradient for optimization by SGD-BB to
-		obtain a contrast update.
+			return f, lgf
 
-		See the TomographyTracer documentation for the general
-		(unregularized) form of the cost functional.
-		'''
-		# Track the run time
-		stime = time()
+		# Step smoothing coefficient
+		lck = 0.0
 
-		# Compute the perturbed slowness into sp
-		s.perturb(x, sp)
+		# For convergence testing
+		maxcost = 0.0
+		converged = False
 
-		# Compute the stochastic cost and gradient
-		f, nrows, _ = cshare.evaluate(sp, nmeas, grad=gf)
+		for k in range(epochs):
+			if limits:
+				# Clip the update to the desired range
+				s.clip(x, limits[0], limits[1], x)
 
-		# Scale cost (and gradient) to mean-squared error
-		f /= nrows
-		lgf = s.flatten(gf) / nrows
+			if k < 1:
+				f, lgf = ffg(x)
+				eta = min(2 * f / norm(lgf)**2, 10.)
+			elif k >= 2:
+				# Compute change in solution and gradient
+				lx += x
+				lg += cg
 
-		try:
-			tvwt = tvscale['weight']
-		except KeyError:
-			pass
-		else:
-			# Unpack update for regularization
-			s.unflatten(x, xp)
-			tvn, tvng = tvscale['method'](xp, **tvargs)
-			f += tvwt * tvn
-			lgf += tvwt * s.flatten(tvng)
+				nlx = norm(lx)**2
+				xdg = abs(np.dot(lx, lg))
 
-		# The time to evaluate the function and gradient
-		stime = time() - stime
+				if xdg < sys.float_info.epsilon * nlx:
+					# Terminate if step size blows up
+					if self.isRoot:
+						print 'TERMINATE: epoch', k, 'step size breakdown'
+					break
 
-		if cshare.isRoot: print 'Cost evaluation time: %0.2f sec' % (stime,)
+				eta = nlx / xdg / updates
 
-		return f, lgf
+				# Smooth the step (use logs to avoid overflow)
+				lkp = np.log(k + 1.0)
+				lck = ((k - 2) * lck + np.log(eta) + lkp) / (k - 1.0)
+				eta = np.exp(lck - lkp)
 
-	# Step smoothing coefficient
-	lck = 0.0
+			if self.isRoot:
+				print 'Epoch', k,
+				if tvscale: print 'TV weight', tvscale['weight'],
+				print 'gradient descent step', eta
 
-	# For convergence testing
-	maxcost = 0.0
-	converged = False
+			# Copy negative of last solution and gradient
+			lx[:] = -x
+			lg[:] = -cg
 
-	for k in range(epochs):
-		if limits:
-			# Clip the update to the desired range
-			s.clip(x, limits[0], limits[1], x)
+			# Clear gradient for next iteration
+			cg[:] = 0
 
-		if k < 1:
-			f, lgf = ffg(x)
-			eta = 2 * f / norm(lgf)**2
-		elif k >= 2:
-			# Compute change in solution and gradient
-			lx += x
-			lg += cg
+			# Build a callback to write per-iteration results, if desired
+			if self.isRoot:
+				cb = self.callbackgen(partial_output, s, k, mfilter)
+			else: cb = None
 
-			nlx = norm(lx)**2
-			xdg = abs(np.dot(lx, lg))
+			for t in range(updates):
+				# Compute the sampled cost functional and its gradient
+				f, lgf = ffg(x)
 
-			if xdg < sys.float_info.epsilon * nlx:
-				# Terminate if step size blows up
-				if cshare.isRoot:
-					print 'TERMINATE: epoch', k, 'step size breakdown'
+				# Print some convergence numbers
+				if self.isRoot: print 'At epoch', k, 'update', t, 'cost', f
+
+				# Adjust the solution against the gradient
+				x -= eta * lgf
+
+				# Store the partial update if desired
+				if cb: cb(x, t)
+
+				# Check for convergence
+				maxcost = max(f, maxcost)
+				if f < tol * maxcost:
+					converged = True
+					break
+
+				# Update the average gradient
+				cg[:] = beta * lgf + (1 - beta) * cg
+
+			if converged:
+				if self.isRoot: print 'TERMINATE: Convergence achieved'
 				break
 
-			eta = nlx / xdg / updates
+			# Adjust the regularization weight as appropriate
+			if ('scale' in tvscale and not (k + 1) % tvscale['every']
+					and tvscale['weight'] > tvscale['min']):
+				tvscale['weight'] *= tvscale['scale']
 
-			# Smooth the step (use logs to avoid overflow)
-			lkp = np.log(k + 1.0)
-			lck = ((k - 2) * lck + np.log(eta) + lkp) / (k - 1.0)
-			eta = np.exp(lck - lkp)
-
-		if cshare.isRoot:
-			print 'Epoch', k,
-			if tvscale: print 'TV weight', tvscale['weight'],
-			print 'gradient descent step', eta
-
-		# Copy negative of last solution and gradient
-		lx[:] = -x
-		lg[:] = -cg
-
-		# Clear gradient for next iteration
-		cg[:] = 0
-
-		# Build a callback to write per-iteration results, if desired
-		if cshare.isRoot: cb = callbackgen(partial_output, s, k, mfilter)
-		else: cb = None
-
-		for t in range(updates):
-			# Compute the sampled cost functional and its gradient
-			f, lgf = ffg(x)
-
-			# Print some convergence numbers
-			if cshare.isRoot: print 'At epoch', k, 'update', t, 'cost', f
-
-			# Adjust the solution against the gradient
-			x -= eta * lgf
-
-			# Store the partial update if desired
-			if cb: cb(x, t)
-
-			# Check for convergence
-			maxcost = max(f, maxcost)
-			if f < tol * maxcost:
-				converged = True
-				break
-
-			# Update the average gradient
-			cg[:] = beta * lgf + (1 - beta) * cg
-
-		if converged:
-			if cshare.isRoot: print 'TERMINATE: Convergence achieved'
-			break
-
-		# Adjust the regularization weight as appropriate
-		if ('scale' in tvscale and not (k + 1) % tvscale['every']
-				and tvscale['weight'] > tvscale['min']):
-			tvscale['weight'] *= tvscale['scale']
-
-	# Update the image
-	sp = s.perturb(x, sp)
-	# Apply a desired filter
-	if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
-
-	return sp
-
-
-def callbackgen(templ, s, epoch, mfilter):
-	'''
-	Build a callback with signature callback(x, nit) to write partial
-	images of perturbations x to an assumed slowness model s (as a
-	habis.slowness.Slowness instance) for a given SGD-BB epoch 'epoch'.
-
-	If mfilter is True, it should be a value passed as the "size" argument
-	to scipy.ndimage.median_filter to smooth the perturbed slowness prior
-	to output.
-
-	The callback will store images in npy format with the name given by
-	templ.format(epoch=epoch, iter=nit).
-	'''
-	if not templ: return None
-
-	def callback(x, nit):
-		# Write out the iterate
-		sp = s.perturb(x)
+		# Update the image
+		sp = s.perturb(x, sp)
+		# Apply a desired filter
 		if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
-		fname = templ.format(epoch=epoch, iter=nit)
-		np.save(fname, sp.astype(np.float32))
 
-	return callback
+		return sp
 
 
 def usage(progname=None, retcode=1):
@@ -606,6 +726,9 @@ if __name__ == "__main__":
 	try: limits = config.getlist(tsec, 'limits', mapper=float, default=None)
 	except Exception as e: _throw('Configuration must specify valid limits')
 
+	try: straightray = config.get(tsec, 'straightray', mapper=bool, default=False)
+	except Exception as e: _throw('Invalid optional straightray', e)
+
 	if limits:
 		if len(limits) != 2:
 			_throw('Optional limits must be a two-element list')
@@ -631,10 +754,6 @@ if __name__ == "__main__":
 				for kp in getatimes(tf, 0, atfilt, st, ln).iteritems())
 	except Exception as e: _throw('Configuration must specify valid timefile', e)
 
-	# Build the cost calculator
-	cshare = TomographyTracer(elements, atimes, tracer,
-					slowdef, linear, MPI.COMM_WORLD)
-
 	if piecewise:
 		if mask is None: raise ValueError('Slowness mask is required in piecewise mode')
 		slw = PiecewiseSlowness(mask, s)
@@ -648,9 +767,19 @@ if __name__ == "__main__":
 		if mask is not None: slw = MaskedSlowness(s, mask)
 		else: slw = Slowness(s)
 
-	# Compute random updates to the image
-	ns = makeimage(cshare, slw, nmeas, epochs, updates, beta,
-			tol, tvreg, mfilter, limits, partial_output)
+	if not straightray:
+		# Build the cost calculator
+		cshare = BentRayTracer(elements, atimes, tracer,
+					slowdef, linear, MPI.COMM_WORLD)
+
+		# Compute random updates to the image
+		ns = cshare.sgd(slw, nmeas, epochs, updates, beta,
+				tol, tvreg, mfilter, limits, partial_output)
+	else:
+		# Build the straight-ray tracer
+		cshare = StraightRayTracer(elements, atimes, tracer.box, MPI.COMM_WORLD)
+		# Compute the optimum image
+		ns = cshare.lsmr(slw)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
