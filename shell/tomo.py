@@ -662,50 +662,6 @@ if __name__ == "__main__":
 		if mask: mask = np.load(mask).astype(int if piecewise else bool)
 	except Exception as e: _throw('Invalid optional slowmask', e)
 
-	try:
-		# Read the number of measurements per round
-		nmeas = config.get(tsec, 'nmeas', mapper=int, default=0)
-		if nmeas < 0: raise ValueError('nmeas must be nonnegative')
-	except Exception as e: _throw('Invalid optional nmeas', e)
-
-	try:
-		# Read the number of epochs
-		epochs = config.get(tsec, 'epochs', mapper=int, default=1)
-		if epochs < 1: raise ValueError('epochs must be positive')
-	except Exception as e: _throw('Invalid optional epochs', e)
-
-	try:
-		# Read the number of updates per epoch
-		updates = config.get(tsec, 'updates', mapper=int, default=1)
-		if updates < 1: raise ValueError('updates must be positive')
-	except Exception as e: _throw('Invalid optional updates', e)
-
-	try:
-		# Read the number sampled gradient approximation weight
-		beta = config.get(tsec, 'beta', mapper=float, default=0.5)
-		if not 0 < beta <= 1.0: raise ValueError('beta must be in range (0, 1]')
-	except Exception as e: _throw('Invalid optional beta', e)
-
-	try:
-		# Read the number sampled gradient approximation weight
-		tol = config.get(tsec, 'tol', mapper=float, default=1e-6)
-		if not tol > 0: raise ValueError('tol must be positive')
-	except Exception as e: _throw('Invalid optional tol', e)
-
-	try:
-		# Read optional total-variation regularization parameter
-		tvreg = config.get(tsec, 'tvreg', mapper=dict,
-					checkmap=False, default=None)
-	except Exception as e: _throw('Invalid optional tvreg', e)
-
-	try:
-		# Read optional the filter parameters
-		mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
-	except Exception as e: _throw('Invalid optional mfilter', e)
-
-	# Read optional partial_output format string
-	partial_output = config.get(tsec, 'partial_output', default=None)
-
 	# Read required final output
 	try: output = config.get(tsec, 'output')
 	except Exception as e: _throw('Configuration must specify output', e)
@@ -723,11 +679,20 @@ if __name__ == "__main__":
 	# Determine interpolation mode
 	linear = config.get(tsec, 'linear', mapper=bool, default=True)
 
+	try:
+		# Read straight-ray tomography options, if provided
+		sropts = config.get(tsec, 'straight', default={ },
+					mapper=dict, checkmap=False)
+	except Exception as e: _throw('Invalid optional map "straight"', e)
+
+	if not sropts:
+		# Read bent-ray options if straight-ray tomography isn't desired
+		try: bropts = config.get(tsec, 'bent', mapper=dict, checkmap=False)
+		except Exception as e: _throw('Configuration must specify "bent" map', e)
+	else: bropts = { }
+
 	try: limits = config.getlist(tsec, 'limits', mapper=float, default=None)
 	except Exception as e: _throw('Configuration must specify valid limits')
-
-	try: straightray = config.get(tsec, 'straightray', mapper=bool, default=False)
-	except Exception as e: _throw('Invalid optional straightray', e)
 
 	if limits:
 		if len(limits) != 2:
@@ -767,19 +732,18 @@ if __name__ == "__main__":
 		if mask is not None: slw = MaskedSlowness(s, mask)
 		else: slw = Slowness(s)
 
-	if not straightray:
+	if not sropts:
 		# Build the cost calculator
 		cshare = BentRayTracer(elements, atimes, tracer,
 					slowdef, linear, MPI.COMM_WORLD)
 
-		# Compute random updates to the image
-		ns = cshare.sgd(slw, nmeas, epochs, updates, beta,
-				tol, tvreg, mfilter, limits, partial_output)
+		# Compute random updates to the image; SGD can use value limits
+		ns = cshare.sgd(slw, limits=limits, **bropts)
 	else:
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes, tracer.box, MPI.COMM_WORLD)
-		# Compute the optimum image
-		ns = cshare.lsmr(slw, maxiter = epochs * updates)
+		# Pass configured options to the solver
+		ns = cshare.lsmr(slw, **sropts)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
