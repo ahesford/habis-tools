@@ -691,8 +691,12 @@ if __name__ == "__main__":
 		except Exception as e: _throw('Configuration must specify "bent" map', e)
 	else: bropts = { }
 
+	# Read parameters for optional median filter
+	try: mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
+	except Exception as e: _throw('Invalid optional mfilter', e)
+
 	try: limits = config.getlist(tsec, 'limits', mapper=float, default=None)
-	except Exception as e: _throw('Configuration must specify valid limits')
+	except Exception as e: _throw('Invalid optional limits', e)
 
 	if limits:
 		if len(limits) != 2:
@@ -738,12 +742,13 @@ if __name__ == "__main__":
 					slowdef, linear, MPI.COMM_WORLD)
 
 		# Compute random updates to the image; SGD can use value limits
-		ns = cshare.sgd(slw, limits=limits, **bropts)
+		ns = cshare.sgd(slw, mfilter=mfilter, limits=limits, **bropts)
 	else:
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes, tracer.box, MPI.COMM_WORLD)
 		# Pass configured options to the solver
 		ns = cshare.lsmr(slw, **sropts)
+		if mfilter: ns = median_filter(ns, size=mfilter)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
