@@ -4,6 +4,8 @@ of parameters.
 '''
 
 import numpy as np
+from scipy.sparse import csr_matrix
+
 from itertools import izip
 
 class Slowness(object):
@@ -124,6 +126,14 @@ class Slowness(object):
 		return out
 
 
+	def tosparse(self):
+		'''
+		Return a scalar representation of the linear transformation
+		represented by this Slowness, which is just an identity.
+		'''
+		return np.array(1., dtype=np.float64)
+
+
 class MaskedSlowness(Slowness):
 	'''
 	A class representing an unconstrained slowness on a masked 3-D grid.
@@ -211,6 +221,28 @@ class MaskedSlowness(Slowness):
 		return out
 
 
+	def tosparse(self):
+		'''
+		Return a CSR representation of the linear transformation
+		represented by this Slowness, which is an M x N matrix
+		consisting of an N x N permutation matrix with a collection of
+		(M - N) zero rows inserted throughout the matrix. In this case,
+		N = self.nnz and M = product(self.mask.shape).
+		'''
+		# Flatten the mask for operator representations
+		mask = self._mask.ravel('C')
+		# Nonzero row indices in operator are nonzero indices in flat mask
+		rows = np.nonzero(mask)[0]
+		# Columns proceed sequentially
+		cols = np.arange(len(rows))
+		# Nonzero entries are all unity
+		data = np.ones((len(rows),), dtype=np.float64)
+
+		# Return the sparse linear operator
+		M, N = len(mask), len(cols)
+		return csr_matrix((data, (rows, cols)), shape=(M, N))
+
+
 class PiecewiseSlowness(Slowness):
 	'''
 	A class representing a piecewise-constant slowness on a 3-D grid, where
@@ -222,37 +254,46 @@ class PiecewiseSlowness(Slowness):
 		Initialize a PiecewiseSlowness instance where the voxel (i,j,k)
 		in a 3-D grid has a slowness s[voxmap[i,j,k]].
 		'''
-		self._voxmap = np.array(voxmap)
-		if not np.issubdtype(self._voxmap.dtype, np.integer):
+		voxmap = np.asarray(voxmap)
+		if not np.issubdtype(voxmap.dtype, np.integer):
 			raise TypeError('Argument voxmap must have an integral type')
-		if not self._voxmap.ndim == 3:
+		if not voxmap.ndim == 3:
 			raise ValueError('Argument voxmap must be a 3-D array')
 
-		minv = np.min(self._voxmap)
-		if minv < 0: raise ValueError('Values in voxmap must be nonnegative')
+		# Copy the unflatted shape of the slowness
+		self._shape = voxmap.shape
 
-		maxv = np.max(self._voxmap)
+		# Find the unique type codes and column indices for voxel values
+		typ, cols = np.unique(voxmap.ravel('C'), return_inverse=True)
+
+		M = np.prod(voxmap.shape)
+		N = len(typ)
+
+		# Ensure nonnegative values
+		if typ[0] < 0: raise ValueError('Values in voxmap must be nonnegative')
+
 		self._s = np.array(s, dtype=np.float64)
-
 		if not self._s.shape:
 			# Special case: reference slowness is a scalar
-			self._s = np.array([s] * (maxv + 1), dtype=np.float64)
-			return
+			self._s = np.array([s] * N, dtype=np.float64)
 		elif self._s.ndim != 1:
 			raise ValueError('Slowness array must be 1-D')
 
-		if maxv >= len(self._s):
-			raise ValueError('Values in voxmap must be less than %d' % (len(self._s),))
+		if len(self._s) != N:
+			raise ValueError('Number of slowness values must be %d' % (N,))
 
-	@property
-	def shape(self):
-		'''The shape of the slowness model'''
-		return self._voxmap.shape
+		# In linear operator, rows are sequential
+		rows = np.arange(M)
+		# Entries of operator are all unity
+		data = np.ones((M,), dtype=np.float64)
+		# Build the sparse map
+		self._voxmap = csr_matrix((data, (rows, cols)), shape=(M,N))
+
 
 	@property
 	def nnz(self):
 		'''The number of parameters in the slowness model'''
-		return len(self._s)
+		return self._voxmap.shape[1]
 
 
 	def perturb(self, x, out=None):
@@ -292,8 +333,9 @@ class PiecewiseSlowness(Slowness):
 
 	def flatten(self, s, out=None):
 		'''
-		Project the array s, with shape self.shape, into a 1-D array in
-		the space of piecewise constant slowness values.
+		Project the array s into a 1-D array in the space of piecewise
+		constant slowness values. The slowness s will be raveled in
+		C-order, so its shape must be compatible with self.shape.
 
 		If out is provided, it must be an array of shape (self.nnz,)
 		that will hold the projected slowness. The contents of out may
@@ -303,9 +345,11 @@ class PiecewiseSlowness(Slowness):
 		identical to out if it is provided.
 		'''
 		nnz = self.nnz
-		out = self._buildoutput(out, (nnz,))
-		for i in xrange(nnz):
-			out[i] = np.sum(s[self._voxmap == i])
+		res = self._voxmap.T.dot(np.ravel(s, 'C'))
+		if out is None: return res
+
+		# Copy the output into equivalent storage
+		out[:] = res
 		return out
 
 
@@ -315,8 +359,24 @@ class PiecewiseSlowness(Slowness):
 		(self.nnz,), into an array of shape self.shape.
 		'''
 		shape = self.shape
-		out = self._buildoutput(out, shape)
 		s = np.asarray(s)
-		if s.shape: out[:,:,:] = s[self._voxmap]
-		else: out[:,:,:] = s
+
+		if not s.shape:
+			# Special case: s is a scalar
+			s = np.array([s] * self.nnz, dtype=np.float64)
+
+		res = self._voxmap.dot(s).reshape(self.shape, order='C')
+		if out is None: return res
+
+		# Copy output into equivalent storage
+		out[:,:,:] = res
 		return out
+
+
+	def tosparse(self):
+		'''
+		Return a CSR representation of the linear transformation
+		represented by this Slowness, which maps one of an arbitrary
+		number of slowness values to each voxel type.
+		'''
+		return self._voxmap.copy()

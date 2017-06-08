@@ -14,7 +14,7 @@ from numpy.linalg import norm
 
 from scipy.ndimage import median_filter
 from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import LinearOperator
+from scipy.sparse.linalg import LinearOperator, norm as snorm
 
 from math import fsum
 
@@ -187,27 +187,41 @@ class StraightRayTracer(TomographyTask):
 		if 'calc_var' in kwargs:
 			raise TypeError('Argument "calc_var" is forbidden')
 
-		# RHS is arrival times minus unperturbed solution
-		rhs = self.rhs - self.pathmat.dot(s.perturb(0).ravel('C'))
 		ncell = self.box.ncell
 
-		# Build linear operator
-		def mvp(v):
-			# Expand a constrained solution to the grid, then multiply
-			return self.pathmat.dot(s.unflatten(v).ravel('C'))
+		# RHS is arrival times minus unperturbed solution
+		rhs = self.rhs - self.pathmat.dot(s.perturb(0).ravel('C'))
+
+		# Composite slowness transform and path-length operator as CSR
+		pathmat = self.pathmat.dot(s.tosparse()).tocsr()
+
+		# Compute norms of columns of global matrix
+		colscale = snorm(pathmat, axis=0)**2
+		self.comm.Allreduce(MPI.IN_PLACE, colscale, op=MPI.SUM)
+		np.sqrt(colscale, colscale)
+
+		# Clip normalization factors to avoid blow-up
+		mxnrm = np.max(colscale)
+		np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
+
+		# Normalize the columns
+		pathmat.data /= np.take(colscale, pathmat.indices)
+
+		# Transpose operation requires communications
 		def amvp(u):
 			# Synchronize
 			self.comm.Barrier()
 			# Multiple by transposed local share, then flatten
-			v = s.flatten(self.pathmat.T.dot(u).reshape(ncell, order='C'))
+			v = pathmat.T.dot(u)
 			# Accumulate contributions from all ranks
 			self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
 			return v
-		shape = (len(rhs), s.nnz)
-
-		A = LinearOperator(shape=shape, matvec=mvp, rmatvec=amvp, dtype=rhs.dtype)
+		A = LinearOperator(shape=pathmat.shape,
+				matvec=pathmat.dot, rmatvec=amvp, dtype=pathmat.dtype)
 
 		def unorm(u):
+			# Synchronize
+			self.comm.Barrier()
 			# Norm of distributed vectors, to all ranks
 			un = norm(u)**2
 			return np.sqrt(self.comm.allreduce(un, op=MPI.SUM))
@@ -216,7 +230,8 @@ class StraightRayTracer(TomographyTask):
 		if self.isRoot:
 			print 'LSMR terminated after %d iterations for reason %d' % (results[2], results[1])
 
-		return s.perturb(results[0])
+		# Correct column scaling in perturbation solution
+		return s.perturb(results[0] / colscale)
 
 
 class BentRayTracer(TomographyTask):
