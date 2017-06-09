@@ -258,7 +258,7 @@ class BentRayTracer(TomographyTask):
 		self.interpolator = (LinearInterpolator3D if linear
 					else HermiteInterpolator3D)
 
-	def evaluate(self, s, nm, grad=None):
+	def evaluate(self, s, nm):
 		'''
 		Evaluate a stochastic sample of the cost functional and its
 		gradient
@@ -276,13 +276,6 @@ class BentRayTracer(TomographyTask):
 		the number of measurements participating in the sample (this
 		may be different than nm if nm < 1, nm > len(self.atimes), or
 		if certain paths could not be traced).
-
-		If grad is not None, it should be a floating-point Numpy array
-		of shape self.tracer.box.ncell. In this case, gf = grad(C)(s)
-		will be stored in the provided array, and the provided array
-		will be returned as gf. If grad is None, a new array will be
-		allocated for gf. If grad is provided but is not array-like or
-		has the wrong shape, a ValueError will be raised.
 
 		The sample consists of nm transmit-receive pairs selected from
 		self.atimes with equal probability. If nm >= len(self.atimes)
@@ -308,20 +301,7 @@ class BentRayTracer(TomographyTask):
 		f = []
 
 		gshape = self.tracer.box.ncell
-		if grad is not None:
-			# Use a provided gradient, if possible
-			try:
-				gsh = grad.shape
-				gdtype = grad.dtype
-			except AttributeError:
-				raise ValueError('Argument "grad" must be None or Numpy-array compatible')
-
-			if gshape != gsh or not np.issubdtype(gdtype, np.inexact):
-				raise ValueError('Non-None "grad" must be a floating-point array of shape %s' % (gshape,))
-
-			grad[:,:,:] = 0.
-			gf = grad
-		else: gf = np.zeros(gshape, dtype=np.float64, order='C')
+		gf = np.zeros(gshape, dtype=np.float64, order='C')
 
 		nrows, nskip = 0L, 0L
 
@@ -448,16 +428,6 @@ class BentRayTracer(TomographyTask):
 		if s.shape != gshape:
 			raise ValueError('Shape of s must be %s' % (gshape,))
 
-		# Work arrays
-		sp = s.perturb(0)
-		gf = np.zeros_like(sp)
-
-		work = np.zeros((s.nnz, 4), dtype=np.float64)
-		x = work[:,0]
-		lx = work[:,1]
-		cg = work[:,2]
-		lg = work[:,3]
-
 		# Interpret TV regularization
 		tvscale, tvargs = { }, { }
 		if tvreg:
@@ -512,10 +482,10 @@ class BentRayTracer(TomographyTask):
 			stime = time()
 
 			# Compute the perturbed slowness into sp
-			s.perturb(x, sp)
+			sp = s.perturb(x)
 
 			# Compute the stochastic cost and gradient
-			f, nrows, _ = self.evaluate(sp, nmeas, grad=gf)
+			f, nrows, gf = self.evaluate(sp, nmeas)
 
 			# Scale cost (and gradient) to mean-squared error
 			f /= nrows
@@ -527,7 +497,7 @@ class BentRayTracer(TomographyTask):
 				pass
 			else:
 				# Unpack update for regularization
-				s.unflatten(x, xp)
+				xp = s.unflatten(x)
 				tvn, tvng = tvscale['method'](xp, **tvargs)
 				f += tvwt * tvn
 				lgf += tvwt * s.flatten(tvng)
@@ -547,10 +517,14 @@ class BentRayTracer(TomographyTask):
 		maxcost = 0.0
 		converged = False
 
+		# The first guess at a solution and its gradient
+		x = np.zeros((s.nnz,), dtype=np.float64)
+		cg = np.zeros((s.nnz,), dtype=np.float64)
+
 		for k in range(epochs):
 			if limits:
 				# Clip the update to the desired range
-				s.clip(x, limits[0], limits[1], x)
+				x = s.clip(x, limits[0], limits[1])
 
 			if k < 1:
 				f, lgf = ffg(x)
@@ -582,11 +556,11 @@ class BentRayTracer(TomographyTask):
 				print 'gradient descent step', eta
 
 			# Copy negative of last solution and gradient
-			lx[:] = -x
-			lg[:] = -cg
+			lx = -x
+			lg = -cg
 
 			# Clear gradient for next iteration
-			cg[:] = 0
+			cg[:] = 0.
 
 			# Build a callback to write per-iteration results, if desired
 			if self.isRoot:
@@ -613,7 +587,7 @@ class BentRayTracer(TomographyTask):
 					break
 
 				# Update the average gradient
-				cg[:] = beta * lgf + (1 - beta) * cg
+				cg = beta * lgf + (1 - beta) * cg
 
 			if converged:
 				if self.isRoot: print 'TERMINATE: Convergence achieved'
@@ -625,9 +599,9 @@ class BentRayTracer(TomographyTask):
 				tvscale['weight'] *= tvscale['scale']
 
 		# Update the image
-		sp = s.perturb(x, sp)
+		sp = s.perturb(x)
 		# Apply a desired filter
-		if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
+		if mfilter: sp = median_filter(sp, size=mfilter)
 
 		return sp
 

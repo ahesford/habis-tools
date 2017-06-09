@@ -18,23 +18,29 @@ class Slowness(object):
 		Initialize a Slowness instance with a reference s, which must
 		be a rank-3 floating-point array or a scalar.
 
-		If s is a scalar, shape must be provided as a 3-tuple of
-		positive integers. If s is a Numpy array, shape must be None.
+		If s is a scalar, shape must be a 3-tuple of positive integers.
+		If s is a Numpy array, shape must match s.shape.
 		'''
 		# Make a copy of the array (may be a scalar)
 		self._s = np.array(s, dtype=np.float64)
 
+		if shape is None: shape = self._s.shape
+		else: shape = tuple(int(s) for s in shape)
+
+		if not shape:
+			raise ValueError('Either s must have a shape, or the shape argument is required')
+
+		if len(shape) != 3:
+			raise ValueError('Slowness shape must be three-dimensional')
+		if any(sv < 1 for sv in shape):
+			raise ValueError('Slowness shape must contain positive values')
+
 		if not self._s.shape:
-			if len(shape) != 3:
-				raise ValueError('Slowness shape must be a 3-tuple')
-			self._shape = tuple(int(s) for s in shape)
-			if any(s != sv or s < 1 for s, sv in izip(self._shape, shape)):
-				raise ValueError('Slowness shape must contain positive integers')
+			self._shape = shape
 		else:
-			if shape: raise ValueError('Cannot specify shape when s is an array')
-			if self._s.ndim != 3: 
-				raise ValueError('Slowness array must be 3-D')
 			self._shape = None
+			if shape != self._s.shape:
+				raise ValueError('Argument shape, if provided, must agree with s.shape')
 
 	@property
 	def shape(self):
@@ -47,82 +53,50 @@ class Slowness(object):
 		return np.prod(self.shape)
 
 
-	@staticmethod
-	def _buildoutput(out, shape):
-		'''
-		If out is a Numpy array, verify that out.shape matches shape
-		and return out. If out is None, create a float64-array of the
-		given shape. The argument out should not be anything besides a
-		Numpy array or None.
-		'''
-		if out is None: return np.empty(shape, dtype=np.float64)
-		if out.shape != shape:
-			raise ValueError('Shape of out must be %s' % (shape,))
-		return out
-
-
-	def perturb(self, x, out=None):
+	def perturb(self, x):
 		'''
 		Perturb the reference slowness by adding x, which must either
 		be a scalar or have shape compatible with self.shape. The input
 		x will be reshaped in row-major order to match the voxel grid.
-
-		If out is provided, it must be an array of shape self.shape
-		that will hold the perturbed slowness. The contents of out may
-		be corrupted if this method fails to complete successfully.
-
-		The return value will be the perturbed slowness, which will be
-		identical to out if out is provided.
 		'''
 		# Expand perturbation onto voxel grid, then add reference
-		out = self.unflatten(x, out)
-		out += self._s
+		out = self.unflatten(x) + self._s
 		return out
 
 
-	def clip(self, x, smin, smax, out=None):
+	def clip(self, x, smin, smax):
 		'''
 		Clip the perturbation x so that self.perturb(x) clips to the
 		range [smin, smax].
-
-		If out is provided, it must be an array of shape self.shape
-		that will hold the clipped perturbation. The contents of out
-		may be corrupted if this method fails to complete successfully.
-
-		The return value will be the clipped perturbation, which will
-		be identical to out if out is provided.
 		'''
-		# Create or verify output array
-		out = self.perturb(x, out)
+		out = self.perturb(x)
 		# Clip the perturbed slowness and subtract the background
 		np.clip(out, smin, smax, out)
 		out -= self._s
 		return out
 
 
-	def flatten(self, s, out=None):
+	def flatten(self, s):
 		'''
 		Flatten the array s, with shape self.shape, into a 1-D array.
 		'''
-		# Create or verify output array
-		out = self._buildoutput(out, (self.nnz,))
 		# Just unravel in C order
-		out[:] = s.ravel('C')
-		return out
+		return np.ravel(s, order='C')
 
 
-	def unflatten(self, s, out=None):
+	def unflatten(self, s):
 		'''
 		Unflatten the array s, which must be a scalar or have a shape
 		compatible with (self.nnz,), into an array of shape self.shape.
 		'''
 		shape = self.shape
-		# Create or verify output array
-		out = self._buildoutput(out, shape)
 		# Make sure non-scalar s has the right shape
 		s = np.asarray(s)
-		if s.shape: s = s.reshape(shape, order='C')
-		out[:,:,:] = s
+		if s.shape:
+			out = s.reshape(shape, order='C')
+		else:
+			out = np.empty(shape, dtype=s.dtype)
+			out[:,:,:] = s
 		return out
 
 
@@ -152,12 +126,18 @@ class MaskedSlowness(Slowness):
 		shape (as appropriate). See the class docstring for more
 		information about the mask.
 		'''
+		# Copy the mask and use its shape by default
+		mask = np.array(mask, dtype=bool)
+		if shape is None: shape = mask.shape
+
 		# Initialize the background slowness
 		super(MaskedSlowness, self).__init__(s, shape)
-		# Copy the mask
-		self._mask = np.array(mask, dtype=bool)
+
+		# Check agreement of the mask
+		self._mask = mask
 		if self._mask.shape != self.shape:
 			raise ValueError('Array "mask" must have shape %s' % (self.shape,))
+
 		# Figure the number of parameters in the model
 		self._nnz = np.sum(self._mask)
 
@@ -172,51 +152,39 @@ class MaskedSlowness(Slowness):
 		return self._mask.copy()
 
 
-	def clip(self, x, smin, smax, out=None):
+	def clip(self, x, smin, smax):
 		'''
 		Clip the perturbation x so that self.perturb(x) clips to the
 		range [smin, smax] for True-masked voxels.
-
-		If out is provided, it must be an array of shape (self.nnz,)
-		that will hold the clipped perturbation. The contents of out
-		may be corrupted if this method fails to complete successfully.
-
-		The return value will be the clipped perturbation, which will
-		be identical to out if out is provided.
 		'''
-		# Create or verify output array
-		out = self._buildoutput(out, (self.nnz,))
+		out = np.array(x)
+		if not out.shape:
+			out = np.empty((self.nnz,), dtype=out.dtype)
+			out[:] = x
 		# Add the reference to the perturbation and clip
-		rs = self._s[self._mask]
-		out[:] = x + rs
+		rs = self._s[self._mask] if self._s.shape else self._s
+		out += rs
 		np.clip(out, smin, smax, out)
 		# Subtract the reference
 		out -= rs
 		return out
 
 
-	def flatten(self, s, out=None):
+	def flatten(self, s):
 		'''
 		Flatten the array s, with shape self.shape, into a 1-D array of
 		shape (self.nnz,) by pulling only the True-masked values of s.
 		'''
-		# Create or verify output
-		out = self._buildoutput(out, (self.nnz,))
-		# Pull the True-masked values of s into out
-		out[:] = s[self._mask]
-		return out
+		return s[self._mask]
 
 
-	def unflatten(self, s, out=None):
+	def unflatten(self, s):
 		'''
 		Expand the array s, which must be a scalar or have a shape
 		(self.nnz,), into a 3-D grid where self.mask is True. Voxels
 		masked False will be 0.
 		'''
-		# Create or verify output array
-		out = self._buildoutput(out, self.shape)
-		# Zero the entire array
-		out[:,:,:] = 0
+		out = np.zeros(self.shape, dtype=self._s.dtype)
 		out[self._mask] = s
 		return out
 
@@ -296,64 +264,41 @@ class PiecewiseSlowness(Slowness):
 		return self._voxmap.shape[1]
 
 
-	def perturb(self, x, out=None):
+	def perturb(self, x):
 		'''
 		Perturb the reference slowness by adding x, then expanding the
 		slowness values onto the grid according to the predefined voxel
 		map.
-
-		If out is provided, it must be an array of shape self.shape
-		that will hold the expanded slowness. The contents of out may
-		be corrupted if this method fails to complete successfully.
-
-		The return value will be the perturbed slowness, which will be
-		identical to out if out is provided.
 		'''
-		return self.unflatten(self._s + x, out)
+		return self.unflatten(self._s + x)
 
 
-	def clip(self, x, smin, smax, out=None):
+	def clip(self, x, smin, smax):
 		'''
 		Clip the perturbation x so that self.perturb(x) clips to the
 		range [smin, smax].
-
-		If out is provided, it must be an array of shape (self.nnz,)
-		that will hold the clipped perturbation. The contents of out
-		may be corrupted if this method fails to complete
-		successfully.
-
-		The return value will be the clipped perturbation, which will
-		be identical to out if out is provided.
 		'''
-		out = self._buildoutput(out, (self.nnz,))
-		np.clip(self._s + x, smin, smax, out)
+		out = np.array(x)
+		if not out.shape:
+			out = np.empty((self.nnz,), dtype=out.dtype)
+			out[:] = x
+		out += self._s
+		np.clip(out, smin, smax, out)
 		out -= self._s
 		return out
 
 
-	def flatten(self, s, out=None):
+	def flatten(self, s):
 		'''
 		Project the array s into a 1-D array in the space of piecewise
 		constant slowness values. The slowness s will be raveled in
 		C-order, so its shape must be compatible with self.shape.
-
-		If out is provided, it must be an array of shape (self.nnz,)
-		that will hold the projected slowness. The contents of out may
-		be corrupted if this method fails to complete successfully.
-
-		The return value will be the projected slowness, which will be
-		identical to out if it is provided.
 		'''
 		nnz = self.nnz
-		res = self._voxmap.T.dot(np.ravel(s, 'C'))
-		if out is None: return res
-
-		# Copy the output into equivalent storage
-		out[:] = res
-		return out
+		return self._voxmap.T.dot(np.ravel(s, 'C'))
 
 
-	def unflatten(self, s, out=None):
+	def unflatten(self, s):
 		'''
 		Expand the array s, which must be a scalar or have shape
 		(self.nnz,), into an array of shape self.shape.
@@ -362,15 +307,11 @@ class PiecewiseSlowness(Slowness):
 		s = np.asarray(s)
 
 		if not s.shape:
-			# Special case: s is a scalar
-			s = np.array([s] * self.nnz, dtype=np.float64)
+			os = s
+			s = np.empty((self.nnz,), dtype=os.dtype)
+			s[:] = os
 
-		res = self._voxmap.dot(s).reshape(self.shape, order='C')
-		if out is None: return res
-
-		# Copy output into equivalent storage
-		out[:,:,:] = res
-		return out
+		return self._voxmap.dot(s).reshape(self.shape, order='C')
 
 
 	def tosparse(self):
