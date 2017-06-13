@@ -613,8 +613,7 @@ class PathTracer(object):
 		arguments to be passed to minpath.
 		'''
 		# Define the grid for images
-		self.box = Box3D(lo, hi)
-		self.box.ncell = ncell
+		self.box = Box3D(lo, hi, ncell)
 
 		# Copy adaptive parameters
 		self.ptol = float(ptol)

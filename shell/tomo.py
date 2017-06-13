@@ -178,6 +178,12 @@ class StraightRayTracer(TomographyTask):
 		lsmr to customize the solution process. Forbidden keyword
 		arguments are "A", "b", "unorm" and "vnorm".
 
+		If a special keyword argument, 'coleq', is True, the columns of
+		the path-length operator will be scaled to that they all have
+		unity norm. The value of 'coleq' is False by default. The
+		'coleq' keyword argument will not be provided to
+		pycwp.iterative.lsmr.
+
 		The return value will be the final, perturbed solution.
 		'''
 		if not self.isRoot:
@@ -187,6 +193,8 @@ class StraightRayTracer(TomographyTask):
 		if 'calc_var' in kwargs:
 			raise TypeError('Argument "calc_var" is forbidden')
 
+		coleq = kwargs.pop('coleq', False)
+
 		ncell = self.box.ncell
 
 		# RHS is arrival times minus unperturbed solution
@@ -195,17 +203,20 @@ class StraightRayTracer(TomographyTask):
 		# Composite slowness transform and path-length operator as CSR
 		pathmat = self.pathmat.dot(s.tosparse()).tocsr()
 
-		# Compute norms of columns of global matrix
-		colscale = snorm(pathmat, axis=0)**2
-		self.comm.Allreduce(MPI.IN_PLACE, colscale, op=MPI.SUM)
-		np.sqrt(colscale, colscale)
+		if coleq:
+			# Compute norms of columns of global matrix
+			colscale = snorm(pathmat, axis=0)**2
+			self.comm.Allreduce(MPI.IN_PLACE, colscale, op=MPI.SUM)
+			np.sqrt(colscale, colscale)
 
-		# Clip normalization factors to avoid blow-up
-		mxnrm = np.max(colscale)
-		np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
+			# Clip normalization factors to avoid blow-up
+			mxnrm = np.max(colscale)
+			np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
 
-		# Normalize the columns
-		pathmat.data /= np.take(colscale, pathmat.indices)
+			# Normalize the columns
+			pathmat.data /= np.take(colscale, pathmat.indices)
+		else:
+			colscale = 1.0
 
 		# Transpose operation requires communications
 		def amvp(u):
