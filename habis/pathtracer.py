@@ -624,7 +624,7 @@ class PathTracer(object):
 		self.optargs = dict(optargs)
 
 
-	def trace(self, si, src, rcv, intonly=False):
+	def trace(self, si, src, rcv, fresnel=0, intonly=False):
 		'''
 		Given an interpolatored slowness map si (as a 3-D Numpy array
 		or pycwp.cytools.interpolator.Interpolator3D), a source with
@@ -641,6 +641,11 @@ class PathTracer(object):
 		(a descendant of) Interpolator3D as
 
 		  si = pycwp.cytools.interpolator.LinearInterpolator3D(si).
+
+		If fresnel is a positive numeric value, rays will be expanded
+		into ellipsoids that represent the first Fresnel zone for a
+		dominant wavelength specified as the value of fresnel, in the
+		same units as self.box.cell.
 
 		If intonly is True, only the integral of the slowness over the
 		optimum path will be returned. Otherwise, the optimum path will
@@ -677,10 +682,28 @@ class PathTracer(object):
 				self.itol, self.ptol, box.cell, **self.optargs)
 
 		# If only the integral is desired, just return it
-		if intonly: return pint
+		if intonly and fresnel <= 0: return pint
 
-		# Convert path to world coordinates and march
+		# Convert path to world coordinates for marching
 		points = np.array([box.cell2cart(*p) for p in popt])
+
+		if fresnel > 0:
+			# Trace the Fresnel zone through the box
+			plens = box.fresnel(points, fresnel)
+
+			# Compute the total length of the path
+			tlen = fsum(norm(r - l) for r, l in izip(points, points[1:]))
+
+			# Convert Fresnel-zone weights to integral contributions
+			wtot = fsum(plens.itervalues())
+			plens = { k: tlen * v / wtot for k, v in plens.iteritems() }
+
+			# Reintegrate over Fresnel path
+			pint = fsum(v * si.evaluate(*k, grad=False)
+					for k, v in plens.iteritems())
+
+			return pint if intonly else (plens, pint)
+
 		marches = box.raymarcher(points)
 
 		# Make sure single-segment march still a list

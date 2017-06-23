@@ -126,13 +126,14 @@ class StraightRayTracer(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform straight-ray path tracing.
 	'''
-	def __init__(self, elements, atimes, box, fresnel=0, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, box, fresnel=None, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker for straight-ray tomography on the element
 		pairs present in atimes. The imaging grid is represented by the
 		Box3D box.
 
-		If Fresnel is nonzero, rays are represented as ellipsoids that
+		If Fresnel is not None, it should be a positive floating-point
+		value. In this case, rays are represented as ellipsoids that
 		embody the first Fresnel zone for a principal wavelength of
 		fresnel (in units that match the units of box.cell).
 		'''
@@ -161,9 +162,9 @@ class StraightRayTracer(TomographyTask):
 			else:
 				# Build a row based on the first Fresnel zone
 				hits = self.box.fresnel(seg, fresnel)
-				htot = fsum(1.0 - ll for ll in hits.itervalues())
+				htot = fsum(hits.itervalues())
 				for cidx, ll in hits.iteritems():
-					data.append(seg.length * (1.0 - ll) / htot)
+					data.append(seg.length * ll / htot)
 					indices.append(np.ravel_multi_index(cidx, ncell))
 			indptr.append(len(indices))
 			rhs.append(v)
@@ -258,7 +259,7 @@ class BentRayTracer(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform bent-ray path tracing.
 	'''
-	def __init__(self, elements, atimes, tracer,
+	def __init__(self, elements, atimes, tracer, fresnel=None,
 			slowdef=None, linear=True, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker to do path tracing on the element pairs present
@@ -272,6 +273,8 @@ class BentRayTracer(TomographyTask):
 
 		# Grab a reference to the path tracer
 		self.tracer = tracer
+		# Copy the Fresnel parameter
+		self.fresnel = fresnel
 
 		# Record solver parameters
 		self.slowdef = slowdef
@@ -313,6 +316,9 @@ class BentRayTracer(TomographyTask):
 		si = self.interpolator(s)
 		si.default = self.slowdef
 
+		# The Fresnel wavelength parameter (or None)
+		fresnel = self.fresnel
+
 		# Compute the random sample of measurements
 		if nm < 1 or nm > len(self.atimes): nm = len(self.atimes)
 		trset = sample(atimes.keys(), nm)
@@ -329,7 +335,7 @@ class BentRayTracer(TomographyTask):
 		for t, r in trset:
 			src, rcv = self.elements[t], self.elements[r]
 			try:
-				plens, pint = self.tracer.trace(si, src, rcv)
+				plens, pint = self.tracer.trace(si, src, rcv, fresnel)
 				if not plens or pint <= 0: raise ValueError
 			except ValueError:
 				# Skip invalid or empty paths
@@ -707,6 +713,9 @@ if __name__ == "__main__":
 	try: limits = config.getlist(tsec, 'limits', mapper=float, default=None)
 	except Exception as e: _throw('Invalid optional limits', e)
 
+	try: fresnel = config.get(tsec, 'fresnel', mapper=float, default=None)
+	except Exception as e: _throw('Invalid optional fresnel', e)
+
 	if limits:
 		if len(limits) != 2:
 			_throw('Optional limits must be a two-element list')
@@ -747,14 +756,13 @@ if __name__ == "__main__":
 
 	if not sropts:
 		# Build the cost calculator
-		cshare = BentRayTracer(elements, atimes, tracer,
+		cshare = BentRayTracer(elements, atimes, tracer, fresnel,
 					slowdef, linear, MPI.COMM_WORLD)
 
 		# Compute random updates to the image; SGD can use value limits
 		ns = cshare.sgd(slw, mfilter=mfilter, limits=limits, **bropts)
 	else:
 		# Build the straight-ray tracer
-		fresnel = sropts.pop('neighborhood', 0)
 		cshare = StraightRayTracer(elements, atimes,
 				tracer.box, fresnel, MPI.COMM_WORLD)
 		# Pass configured options to the solver
