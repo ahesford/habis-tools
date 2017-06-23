@@ -29,6 +29,7 @@ from mpi4py import MPI
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.regularize import epr, totvar
 from pycwp.iterative import lsmr
+from pycwp.cytools.boxer import Segment3D
 
 from habis.pathtracer import PathTracer
 
@@ -125,11 +126,15 @@ class StraightRayTracer(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform straight-ray path tracing.
 	'''
-	def __init__(self, elements, atimes, box, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, box, fresnel=0, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker for straight-ray tomography on the element
 		pairs present in atimes. The imaging grid is represented by the
 		Box3D box.
+
+		If Fresnel is nonzero, rays are represented as ellipsoids that
+		embody the first Fresnel zone for a principal wavelength of
+		fresnel (in units that match the units of box.cell).
 		'''
 		# Initialize the data and communicator
 		super(StraightRayTracer, self).__init__(elements, atimes, comm)
@@ -138,24 +143,28 @@ class StraightRayTracer(TomographyTask):
 		self.box = box
 		ncell = self.box.ncell
 
-
 		# Build the path-length matrix and RHS vector
 		indptr = [ 0 ]
 		indices = [ ]
 		data = [ ]
 		rhs = [ ]
-		pts = np.empty((2, 3), dtype=np.float64)
 		for (t, r), v in sorted(self.atimes.iteritems()):
 			# March straight through the grid
-			pts[0] = self.elements[t]
-			pts[1] = self.elements[r]
+			seg = Segment3D(self.elements[t], self.elements[r])
 			# Compute the total segment length
-			slen = norm(pts[1] - pts[0])
-			path = self.box.raymarcher(pts)
-			# Build this row of the path-length matrix
-			for cidx, (s, e) in path.iteritems():
-				data.append(slen * (e - s))
-				indices.append(np.ravel_multi_index(cidx, ncell))
+			if not fresnel:
+				# Build a simple row of the path-length matrix
+				path = self.box.raymarcher(seg)
+				for cidx, (s, e) in path.iteritems():
+					data.append(seg.length * (e - s))
+					indices.append(np.ravel_multi_index(cidx, ncell))
+			else:
+				# Build a row based on the first Fresnel zone
+				hits = self.box.fresnel(seg, fresnel)
+				htot = fsum(1.0 - ll for ll in hits.itervalues())
+				for cidx, ll in hits.iteritems():
+					data.append(seg.length * (1.0 - ll) / htot)
+					indices.append(np.ravel_multi_index(cidx, ncell))
 			indptr.append(len(indices))
 			rhs.append(v)
 
@@ -745,7 +754,9 @@ if __name__ == "__main__":
 		ns = cshare.sgd(slw, mfilter=mfilter, limits=limits, **bropts)
 	else:
 		# Build the straight-ray tracer
-		cshare = StraightRayTracer(elements, atimes, tracer.box, MPI.COMM_WORLD)
+		fresnel = sropts.pop('neighborhood', 0)
+		cshare = StraightRayTracer(elements, atimes,
+				tracer.box, fresnel, MPI.COMM_WORLD)
 		# Pass configured options to the solver
 		ns = cshare.lsmr(slw, **sropts)
 		if mfilter: ns = median_filter(ns, size=mfilter)
