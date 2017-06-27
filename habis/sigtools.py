@@ -494,7 +494,7 @@ class Waveform(object):
 
 
 	def __imul__(self, other): return self.__iscale(other, 'mul')
-	def __idiv(self, other): return self.__iscale(other, 'div')
+	def __idiv__(self, other): return self.__iscale(other, 'div')
 	def __itruediv__(self, other): return self.__iscale(other, 'truediv')
 	def __ifloordiv__(self, other): return self.__iscale(other, 'floordiv')
 

@@ -2,6 +2,8 @@
 
 import numpy as np, getopt, sys, os
 
+from math import sqrt
+
 from scipy.signal import hilbert
 
 from itertools import izip
@@ -16,7 +18,7 @@ from habis.formats import loadkeymat, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
-	print >> sys.stderr, 'USAGE: %s [-b bitrate] [-m] [-l] [-w s,e] [-a file[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname
+	print >> sys.stderr, 'USAGE: %s [-b bitrate] [-e] [-m] [-l] [-w s,e] [-a file[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname
 	sys.exit(fatal)
 
 
@@ -316,7 +318,7 @@ def getatimes(atarg, freq=1, scalar=True):
 	return { k[0]: freq * v[acols] for k, v in atmap.iteritems() if k[0] == k[1] }
 
 
-def getbsgroups(infiles, atimes=None, nsamp=None):
+def getbsgroups(infiles, atimes=None, nsamp=None, equalize=False):
 	'''
 	For a sequence infiles of input WaveformSet files, prepare a mapping
 	from element indices to a list of Waveform objects representing
@@ -330,6 +332,17 @@ def getbsgroups(infiles, atimes=None, nsamp=None):
 	received by the element). If an entry exists in atimes for a given
 	element, all waveforms for that element will be aligned to the first
 	Waveform for the element (using only the arrival times).
+
+	If equalize is True, waveforms in each waveform list will be scaled by
+	the inverse of the maximum (over all waveforms in the list) peak
+	amplitude. After equalization, at least one waveform will have a peak
+	amplitude of unity, while others in the list will have peak amplitudes
+	no greater than unity, with relative proportions preserved within the
+	list. Ratios between different lists will not be preserved. If the
+	maximum peak amplitude for a list is less than the square root of
+	machine precision (sys.float_info.epsilon) multiplied by the maximum
+	peak amplitude over all lists (or unity, whichever is greater), no
+	equalization will be performed for that list.
 
 	Only element indices whose Waveform lists have a length that matches
 	that of the longest Waveform list will be included.
@@ -353,10 +366,26 @@ def getbsgroups(infiles, atimes=None, nsamp=None):
 			bswaves[rx].append(nwf)
 
 	maxlen = max(len(w) for w in bswaves.itervalues())
-	return { k: v for k, v in bswaves.iteritems() if len(v) == maxlen }
+	# Filter the list to exclude short lists
+	bswaves = { k: v for k, v in bswaves.iteritems() if len(v) == maxlen }
+
+	if not equalize: return bswaves
+
+	# Find the peak amplitudes
+	pkamps = { k: max(wf.envelope().extremum()[0] for wf in v) 
+					for k, wf in bswaves.iteritems() }
+	# Find the low-amplitude threshold
+	minamp = max(1., max(pkamps.itervalues())) * sqrt(sys.float_info.epsilon)
+
+	# Equalize the waveforms in each group, if desired
+	for k, pamp in pkamps.iteritems():
+		if pamp < minamp: continue
+		for v in bswaves[k]: v /= pamp
+
+	return bswaves
 
 
-def getbswaves(infile, atimes=None, nsamp=None):
+def getbswaves(infile, atimes=None, nsamp=None, equalize=False):
 	'''
 	For an input WaveformSet file infile, return a dictionary mapping
 	receive-channel indices to backscatter Waveforms. All data windows are
@@ -369,6 +398,12 @@ def getbswaves(infile, atimes=None, nsamp=None):
 
 	If nsamp is not None, the nsamp property of each read wavefrom is
 	replaced with the specified value.
+
+	If equalize is True, waveforms are scaled by the inverses of their peak
+	amplitudes. If the peak amplitude for a waveform is less than the
+	maximum peak amplitude across all waveforms multiplied by the square
+	root of machine precision (sys.float_info.epsilon), that waveform will
+	not be equalized.
 	'''
 	wset = WaveformSet.fromfile(infile)
 	f2c = wset.f2c
@@ -389,6 +424,14 @@ def getbswaves(infile, atimes=None, nsamp=None):
 
 		bswaves[rx] = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
 
+	if equalize:
+		pkamps = { k: wf.envelope().extremum()[0]
+				for k, wf in bswaves.iteritems() }
+		minamp = max(1., max(pkamps.itervalues())) * sqrt(sys.float_info.epsilon)
+		for k, pamp in pkamps.iteritems():
+			if pamp < minamp: continue
+			bswaves[k] /= pamp
+
 	return bswaves
 
 
@@ -402,8 +445,9 @@ if __name__ == '__main__':
 	freq = 20.
 	hidewf = False
 	bitrate = -1
+	equalize = False
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:ml')
+	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:mle')
 
 	for opt in optlist:
 		if opt[0] == '-h':
@@ -426,6 +470,8 @@ if __name__ == '__main__':
 			bitrate = int(opt[1])
 		elif opt[0] == '-m':
 			hidewf = True
+		elif opt[0] == '-e':
+			equalize = True
 		else:
 			usage(fatal=True)
 
@@ -458,13 +504,13 @@ if __name__ == '__main__':
 
 	if vidmode:
 		# Load the backscatter waves in groups by element
-		bswaves = getbsgroups(infiles, atimes, nsamp)
+		bswaves = getbsgroups(infiles, atimes, nsamp, equalize)
 		print 'Storing waveform video to file', imgname
 		plotframes(imgname, bswaves, atimes, dwin, cthresh, bitrate)
 	else:
 		# Load and align all waves
 		bswaves = dict(kp for infile in infiles
-				for kp in getbswaves(infile, atimes, nsamp).iteritems())
+				for kp in getbswaves(infile, atimes, nsamp, equalize).iteritems())
 
 		if not atimes:
 			if dwin is not None:

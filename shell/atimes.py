@@ -222,6 +222,14 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	* queue: If not none, the return list is passed as an argument to
 	  queue.put().
+
+	* eleak: If not None, a floating-point value in the range [0, 1) that
+	  specifies the maximum permissible fraction of the total signal energy
+	  that may arrive before identified arrival times. Any waveform for
+	  which the fraction of total energy arriving before the arrival time
+	  exceeds eleak will be rejected as unacceptable. Energy estimates are
+	  performed after any signal processing and do not consider fractional
+	  parts of the arrival time (in samples).
 	'''
 	# Read the data and reference
 	data = WaveformSet.fromfile(datafile)
@@ -236,6 +244,13 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	try: gmap = kwargs.pop('groupmap')
 	except KeyError: pass
 	else: data.groupmap = gmap
+
+	# Determine if an energy "leak" threshold is desired
+	try: eleak = float(kwargs.pop('eleak'))
+	except KeyError: eleak = None
+	else:
+		if not 0 <= eleak < 1:
+			raise ValueError('Argument eleak must be in range [0, 1)')
 
 	# Interpret the element map
 	elmap = kwargs.pop('elmap', 'backscatter')
@@ -416,6 +431,15 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		if negcorr:
 			if dl[1] < 0: numneg += 1
 			dl = dl[0]
+
+		if eleak:
+			dwin = sig.datawin
+			ssamp = int(dl) - dwin.start
+			if ssamp >= 0:
+				if ssamp >= dwin.length: continue
+				esig = np.cumsum(sig._data**2)
+				if esig[ssamp] > eleak * esig[-1]: continue
+
 		result[(tid, rid)] = dl + data.f2c
 
 	if negcorr and numneg:
@@ -548,6 +572,15 @@ def atimesEngine(config):
 		pass
 	except Exception as e:
 		err = 'Invalid specification of optional window in [%s]' % asec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine an energy leakage threshold
+		kwargs['eleak'] = config.get(asec, 'eleak', mapper=float)
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional eleak in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
