@@ -679,7 +679,8 @@ class PathTracer(object):
 
 		# Use preconfigured options to evaluate minimum path
 		popt, pint = si.minpath(gsrc, grcv, self.nmax,
-				self.itol, self.ptol, box.cell, **self.optargs)
+				self.itol, self.ptol, box.cell,
+				raise_on_fail=True, **self.optargs)
 
 		# If only the integral is desired, just return it
 		if intonly and fresnel <= 0: return pint

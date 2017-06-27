@@ -27,6 +27,7 @@ from itertools import izip
 from mpi4py import MPI
 
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
+from pycwp.cytools.interpolator import TraceError
 from pycwp.cytools.regularize import epr, totvar
 from pycwp.iterative import lsmr
 from pycwp.cytools.boxer import Segment3D
@@ -337,7 +338,7 @@ class BentRayTracer(TomographyTask):
 			try:
 				plens, pint = self.tracer.trace(si, src, rcv, fresnel)
 				if not plens or pint <= 0: raise ValueError
-			except ValueError:
+			except (ValueError, TraceError):
 				# Skip invalid or empty paths
 				nskip += 1
 				continue
@@ -348,8 +349,6 @@ class BentRayTracer(TomographyTask):
 			f.append(err**2)
 			# Add gradient contribution
 			for c, l in plens.iteritems(): gf[c] += l * err
-
-		if nskip: print 'MPI rank %d of %d: skipped %d untraceable paths' % (rank, size, nskip)
 
 		# Accumulate the cost functional and row count
 		f = self.comm.allreduce(0.5 * fsum(f), op=MPI.SUM)
@@ -495,6 +494,9 @@ class BentRayTracer(TomographyTask):
 			# Allocate space for expanded update when regularizing
 			xp = np.zeros(s.shape, dtype=np.float64)
 
+		# Track whether paths have been skipped in each iteration
+		maxrows = nmeas * self.comm.size
+
 		def ffg(x):
 			'''
 			This function returns the (optionally TV regularized) cost
@@ -513,9 +515,10 @@ class BentRayTracer(TomographyTask):
 			# Compute the stochastic cost and gradient
 			f, nrows, gf = self.evaluate(sp, nmeas)
 
-			# Scale cost (and gradient) to mean-squared error
-			f /= nrows
-			lgf = s.flatten(gf) / nrows
+			if nrows:
+				# Scale cost (and gradient) to mean-squared error
+				f /= nrows
+				lgf = s.flatten(gf) / nrows
 
 			try:
 				tvwt = tvscale['weight']
@@ -532,6 +535,9 @@ class BentRayTracer(TomographyTask):
 			stime = time() - stime
 
 			if self.isRoot:
+				msg = 'Cost evaluation time: %0.2f sec' % (stime,)
+				if nrows != maxrows:
+					msg += ' (%d untraceable paths)' % (maxrows - nrows,)
 				print 'Cost evaluation time: %0.2f sec' % (stime,)
 
 			return f, lgf
