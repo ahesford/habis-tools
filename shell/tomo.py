@@ -28,7 +28,7 @@ from mpi4py import MPI
 
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.interpolator import TraceError
-from pycwp.cytools.regularize import epr, totvar
+from pycwp.cytools.regularize import epr, totvar, tikhonov
 from pycwp.iterative import lsmr
 from pycwp.cytools.boxer import Segment3D
 
@@ -385,7 +385,8 @@ class BentRayTracer(TomographyTask):
 		return callback
 
 	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
-			tvreg=None, mfilter=None, limits=None, partial_output=None):
+			regularizer=None, mfilter=None,
+			limits=None, partial_output=None):
 		'''
 		Iteratively compute a slowness image by minimizing the cost
 		functional represented in this BentRayTracer instance and using
@@ -413,20 +414,20 @@ class BentRayTracer(TomographyTask):
 		where g_{k,0} == 0, f_t is the t-th sampled cost functional for
 		the epoch and x_t is the solution at update t.
 
-		If tvreg is True, the cost function will be regularized with a
-		method from pycwp.cytools.regularize. In this case, tvreg
-		should either be a scalar regularization parameter used to
-		weight the norm or a kwargs dictionary which must contain a
-		'weight' keyword providing the weight.  Three optional
-		keywords, 'scale', 'min' and 'every', will be used to scale the
-		weight by the float factor 'scale' after every 'every' epochs
-		(default: 1) until the weight is no larger than 'min' (default:
-		0). The values of 'every' and 'min' are ignored if 'scale' is
-		not provided. An optional 'method' keyword can take the value
-		'epr' or 'totvar' to select the corresponding regularization
-		method from the regularize module. If 'method' is not provided,
-		'totvar' is assumed. Any additional keyword arguments are
-		passed to the regularizer.
+		If regularizer is not None, the cost function will be
+		regularized with a method from pycwp.cytools.regularize. The
+		value of regularizer must be None or a kwargs dictionary that
+		contains at least a 'weight' keyword that provides a scalar
+		weight for the regularization term. Three optional keywords,
+		'scale', 'min' and 'every', will be used to scale the weight by
+		the float factor 'scale' after every 'every' epochs (default:
+		1) until the weight is no larger than 'min' (default: 0). The
+		values of 'every' and 'min' are ignored if 'scale' is not
+		provided. An optional 'method' keyword can take the value
+		'epr', 'totvar' or 'tikhonov' to select the corresponding
+		regularization method from the regularize module. If 'method'
+		is not provided, 'totvar' is assumed. Any remaining keyword
+		arguments are passed through to the regularizer.
 
 		After each round of randomized reconstruction, if mfilter is
 		True, a median filter of size mfilter will be applied to the
@@ -454,42 +455,34 @@ class BentRayTracer(TomographyTask):
 			raise ValueError('Shape of s must be %s' % (gshape,))
 
 		# Interpret TV regularization
-		tvscale, tvargs = { }, { }
-		if tvreg:
-			# Make sure a default regularizing method is selected
-			tvscale.setdefault('method', totvar)
+		rgwt, rgfunc, rgargs = { }, None, { }
+		if regularizer:
+			# Copy the regularizer dictionary
+			rgargs = dict(regularizer)
 
+			# Make sure a weight is specified
 			try:
-				# Treat the tvreg argument as a simple float
-				tvscale['weight'] = float(tvreg)
-			except TypeError:
-				# Non-numeric tvreg should be a dictionary
-				tvargs = dict(tvreg)
+				rgwt['weight'] = float(rgargs.pop('weight'))
+			except KeyError:
+				raise KeyError('Regularizer must specify a weight')
+			if rgwt['weight'] <= 0:
+				raise ValueError('Regularizer weight must be positive')
 
-				# Required weight parameter
-				tvscale['weight'] = float(tvargs.pop('weight'))
+			# Pull the desired regularization function
+			rgname = rgargs.pop('method', 'totvar').strip().lower()
+			try:
+				rgfunc = { 'totvar': totvar, 'epr': epr,
+						'tikhonov': tikhonov, }[rgname]
+			except KeyError:
+				raise NameError('Unrecognized regularization method "%s"' % (rgname,))
 
-				# Optional 'scale' argument
-				try: tvscale['scale'] = float(tvargs.pop('scale'))
-				except KeyError: pass
+			# Optional 'scale' argument
+			try: rgwt['scale'] = float(rgargs.pop('scale'))
+			except KeyError: pass
 
-				try:
-					# Use a specified regularization method
-					method = str(tvargs.pop('method')).strip().lower()
-				except KeyError:
-					pass
-				else:
-					if method == 'totvar':
-						tvscale['method'] = totvar
-					elif method == 'epr':
-						tvscale['method'] = epr
-					else:
-						err = 'Unknown regularization ' + method
-						raise ValueError(err)
-
-				# Optional 'every' and 'min' arguments
-				tvscale['every'] = int(tvargs.pop('every', 1))
-				tvscale['min'] = float(tvargs.pop('min', 0))
+			# Optional 'every' and 'min' arguments
+			rgwt['every'] = int(rgargs.pop('every', 1))
+			rgwt['min'] = float(rgargs.pop('min', 0))
 
 			# Allocate space for expanded update when regularizing
 			xp = np.zeros(s.shape, dtype=np.float64)
@@ -520,16 +513,13 @@ class BentRayTracer(TomographyTask):
 				f /= nrows
 				lgf = s.flatten(gf) / nrows
 
-			try:
-				tvwt = tvscale['weight']
-			except KeyError:
-				pass
-			else:
+			if rgfunc:
+				rw = rgwt['weight']
 				# Unpack update for regularization
 				xp = s.unflatten(x)
-				tvn, tvng = tvscale['method'](xp, **tvargs)
-				f += tvwt * tvn
-				lgf += tvwt * s.flatten(tvng)
+				rgn, rgng = rgfunc(xp, **rgargs)
+				f += rw * rgn
+				lgf += rw * s.flatten(rgng)
 
 			# The time to evaluate the function and gradient
 			stime = time() - stime
@@ -584,7 +574,7 @@ class BentRayTracer(TomographyTask):
 
 			if self.isRoot:
 				print 'Epoch', k,
-				if tvscale: print 'TV weight', tvscale['weight'],
+				if rgwt: print 'regularizer weight', rgwt['weight'],
 				print 'gradient descent step', eta
 
 			# Copy negative of last solution and gradient
@@ -626,9 +616,9 @@ class BentRayTracer(TomographyTask):
 				break
 
 			# Adjust the regularization weight as appropriate
-			if ('scale' in tvscale and not (k + 1) % tvscale['every']
-					and tvscale['weight'] > tvscale['min']):
-				tvscale['weight'] *= tvscale['scale']
+			if ('scale' in rgwt and not (k + 1) % rgwt['every']
+					and rgwt['weight'] > rgwt['min']):
+				rgwt['weight'] *= rgwt['scale']
 
 		# Update the image
 		sp = s.perturb(x)
