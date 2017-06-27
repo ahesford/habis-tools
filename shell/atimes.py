@@ -399,7 +399,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		if eleak:
 			# Calculate cumulative energy in unwindowed waveform
 			ewin = sig.datawin
-			cenergy = np.cumsum(sig.getsignal(ewin, forcecopy=False))
+			cenergy = np.cumsum(sig.getsignal(ewin, forcecopy=False)**2)
 
 		# Square the signal if desired
 		if signsquare: sig = sig.signsquare()
