@@ -227,9 +227,12 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  specifies the maximum permissible fraction of the total signal energy
 	  that may arrive before identified arrival times. Any waveform for
 	  which the fraction of total energy arriving before the arrival time
-	  exceeds eleak will be rejected as unacceptable. Energy estimates are
-	  performed after any signal processing and do not consider fractional
-	  parts of the arrival time (in samples).
+	  exceeds eleak will be rejected as unacceptable.
+
+	  Estimates of energy leaks ignore any fractional parts of arrival
+	  times. If bandpass filtering is specified, energy leaks are estimated
+	  from filtered signals. Estimates never consider windowing or peak
+	  isolation.
 	'''
 	# Read the data and reference
 	data = WaveformSet.fromfile(datafile)
@@ -246,8 +249,10 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	else: data.groupmap = gmap
 
 	# Determine if an energy "leak" threshold is desired
-	try: eleak = float(kwargs.pop('eleak'))
-	except KeyError: eleak = None
+	try:
+		eleak = float(kwargs.pop('eleak'))
+	except KeyError:
+		eleak = None
 	else:
 		if not 0 <= eleak < 1:
 			raise ValueError('Argument eleak must be in range [0, 1)')
@@ -391,6 +396,11 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			# Bandpass and crop to original data window
 			sig = sig.bandpass(**bandpass).window(sig.datawin)
 
+		if eleak:
+			# Calculate cumulative energy in unwindowed waveform
+			ewin = sig.datawin
+			cenergy = np.cumsum(sig.getsignal(ewin, forcecopy=False))
+
 		# Square the signal if desired
 		if signsquare: sig = sig.signsquare()
 
@@ -433,12 +443,11 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			dl = dl[0]
 
 		if eleak:
-			dwin = sig.datawin
-			ssamp = int(dl) - dwin.start
-			if ssamp >= 0:
-				if ssamp >= dwin.length: continue
-				esig = np.cumsum(sig._data**2)
-				if esig[ssamp] > eleak * esig[-1]: continue
+			# Evaluate leaked energy
+			ssamp = int(dl) - ewin.start - 1
+			if ssamp < 0: pass
+			elif ssamp >= len(cenergy): continue
+			elif cenergy[ssamp] > eleak * cenergy[-1]: continue
 
 		result[(tid, rid)] = dl + data.f2c
 
