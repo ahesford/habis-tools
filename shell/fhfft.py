@@ -264,16 +264,25 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	ntx = wset.ntx
 
-	try:
-		gcount, gsize = wset.txgrps
-	except TypeError:
-		raise ValueError('A valid Tx-group configuration must be specified')
+	if grpmap is not None:
+		# Make sure the WaveformSet has a local configuration
+		try:
+			gcount, gsize = wset.txgrps
+		except TypeError:
+			raise ValueError('A valid Tx-group configuration is required')
 
-	# Validate the group map for the input
-	wset.groupmap = grpmap
+		# Validate local portion of the group map
+		wset.groupmap = grpmap
 
-	# Map global indices to transmission number
-	outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.iteritems()))
+		# Map global indices to transmission number
+		outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.iteritems()))
+	else:
+		# Must specify a group map for FHT decoding
+		if dofht: raise ValueError('A valid Tx-group configuration is required')
+		# Otherwise, with no configuration, use passthrough transmission ordering
+		gsize = 1
+		outidx = OrderedDict((i, i) for i in xrange(wset.ntx))
+
 
 	# Handle TGC compensation if necessary
 	try: tgc = np.asarray(wset.context['tgc'], dtype=np.float32)
