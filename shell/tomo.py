@@ -490,7 +490,7 @@ class BentRayTracer(TomographyTask):
 		# Track whether paths have been skipped in each iteration
 		maxrows = nmeas * self.comm.size
 
-		def ffg(x):
+		def ffg(x, epoch, update):
 			'''
 			This function returns the (optionally TV regularized) cost
 			functional and its gradient for optimization by SGD-BB to
@@ -513,6 +513,9 @@ class BentRayTracer(TomographyTask):
 				f /= nrows
 				lgf = s.flatten(gf) / nrows
 
+			# Calculate RMS data error
+			rmserr = np.sqrt(2. * f)
+
 			if rgfunc:
 				rw = rgwt['weight']
 				# Unpack update for regularization
@@ -524,11 +527,13 @@ class BentRayTracer(TomographyTask):
 			# The time to evaluate the function and gradient
 			stime = time() - stime
 
-			if self.isRoot:
-				msg = 'Cost evaluation time: %0.2f sec' % (stime,)
+			if self.isRoot and epoch >= 0 and update >= 0:
+				# Print some convergence numbers
+				msgfmt = ('At epoch %d update %d cost %#0.4g '
+						'RMSE %#0.4g (time: %0.2f sec)')
+				print msgfmt % (epoch, update, f, rmserr, stime)
 				if nrows != maxrows:
-					msg += ' (%d untraceable paths)' % (maxrows - nrows,)
-				print 'Cost evaluation time: %0.2f sec' % (stime,)
+					print '%d/%d untraceable paths' % (maxrows - nrows, maxrows)
 
 			return f, lgf
 
@@ -549,7 +554,7 @@ class BentRayTracer(TomographyTask):
 				x = s.clip(x, limits[0], limits[1])
 
 			if k < 1:
-				f, lgf = ffg(x)
+				f, lgf = ffg(x, -1, -1)
 				eta = min(2 * f / norm(lgf)**2, 10.)
 			elif k >= 2:
 				# Compute change in solution and gradient
@@ -591,10 +596,7 @@ class BentRayTracer(TomographyTask):
 
 			for t in range(updates):
 				# Compute the sampled cost functional and its gradient
-				f, lgf = ffg(x)
-
-				# Print some convergence numbers
-				if self.isRoot: print 'At epoch', k, 'update', t, 'cost', f
+				f, lgf = ffg(x, k, t)
 
 				# Adjust the solution against the gradient
 				x -= eta * lgf
