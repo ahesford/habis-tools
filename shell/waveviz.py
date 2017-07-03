@@ -26,8 +26,9 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	'''
 	Prepare, using the ffmpeg writer in matplotlib.animation, a video in
 	which each frame depicts aligned waveforms received by a common
-	element. The argument waves should be a mapping from element index to a
-	list of Waveform objects, prealigned if alignment is desired.
+	element. The argument waves should be a mapping from transmit-receive
+	pairs to a list of Waveform objects, prealigned if alignment is
+	desired.
 
 	The argument atimes should be a mapping from element index to a list of
 	at least one arrival time. If the mapping contains at least one arrival
@@ -39,13 +40,13 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	which the waveforms (and arrival times) will be plotted. In the
 	relative mode, the actual plot window starts at
 
-		start + min(atimes[elt][0] for elt in celts)
+		start + min(atimes[pair][0] for pair in cpairs)
 
 	and ends at
 
-		end + max(atimes[elt][0] for elt in celts),
+		end + max(atimes[pair][0] for pair in cpairs),
 
-	where celts is the list of comment keys in atimes and waves.
+	where cpairs is the list of comment keys in atimes and waves.
 
 	If dwin is None, the window will be chosen to encompass all data
 	windows in the waves map.
@@ -87,9 +88,9 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	else:
 		if atimes is not None:
 			# The window is relative to the arrival-time range
-			celts = set(waves.iterkeys()).intersection(atimes.iterkeys())
-			dstart = min(atimes[elt][0] for elt in celts)
-			dend = max(atimes[elt][0] for elt in celts)
+			cpairs = set(waves.iterkeys()).intersection(atimes.iterkeys())
+			dstart = min(atimes[pair][0] for pair in cpairs)
+			dend = max(atimes[pair][0] for pair in cpairs)
 			dwin = Window(max(0, int(dstart + dwin[0])), end=int(dend + dwin[1]))
 		else:
 			dwin = Window(dwin[0], end=dwin[1])
@@ -111,32 +112,31 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	with writer.saving(fig, output, fig.get_dpi()):
 		# Create the empty plot for efficiency
 		lines = ax.plot(*[[] for i in range(2 * nsets)])
-		ax.hold(True)
 		apoint, = ax.plot([], [], 'bs')
 		ax.axis([taxis[0], taxis[-1], -vmax, vmax])
 		ax.set_xlabel('Time, samples', fontsize=14)
 		ax.set_ylabel('Amplitude', fontsize=14)
 		ax.grid(True)
 
-		for i, (elt, wlist) in enumerate(sorted(waves.iteritems())):
+		for i, (pair, wlist) in enumerate(sorted(waves.iteritems())):
 			# Update the line data
 			for l, w in izip(lines, wlist):
 				l.set_data(taxis, w.getsignal(dwin))
 
 			# Plot an arrival time, if possible
 			try:
-				atelt = int(atimes[elt][0])
+				atelt = int(atimes[pair][0])
 			except (KeyError, TypeError):
 				apoint.set_visible(False)
 			else:
 				apoint.set_data([atelt], [wlist[0][atelt]])
 				apoint.set_visible(True)
 
-			ax.set_title('Waveform %d' % elt, fontsize=14)
+			ax.set_title('Waveform %s' % (pair,), fontsize=14)
 
 			# Capture the frame
 			writer.grab_frame()
-			if not i % 50: print 'Stored frame %d' % elt
+			if not i % 50: print 'Stored frame %s' % (pair,)
 
 
 def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
@@ -176,7 +176,7 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 
 	# Pull the relevant arrival times for a subplot
 	if atimes is not None:
-		atimes = [atimes[k] if k in atimes else float('nan') for k in widx]
+		atimes = [ atimes.get(k, float('nan')) for k in widx ]
 
 	if dwin is None:
 		dstart = min(w.datawin.start for w in waves)
@@ -315,20 +315,21 @@ def getatimes(atarg, freq=1, scalar=True):
 			raise ValueError('Scalar arrival-time map requires a single column specification')
 		acols = acols[0]
 
-	return { k[0]: freq * v[acols] for k, v in atmap.iteritems() if k[0] == k[1] }
+	return { k: freq * v[acols] for k, v in atmap.iteritems() }
 
 
-def getbsgroups(infiles, atimes=None, nsamp=None, equalize=False):
+def getwavegrps(infiles, atimes=None, nsamp=None, equalize=False):
 	'''
-	For a sequence infiles of input WaveformSet files, prepare a mapping
-	from element indices to a list of Waveform objects representing
-	backscatter waves observed at the indexed element. The Waveforms are
-	ordered according to a lexicographical ordering of infiles. If nsamp is
-	not None, the nsamp property of each Waveform object will be
-	overridden.
+	For a sequence infiles of input WaveformSet files that each contain a
+	single waveform, prepare a mapping from transmit-receiver pairs to a
+	list of Waveform objects representing backscatter waves observed at the
+	pair. The pair is given by (wset.rxidx[0], wset.txidx.next()) for each
+	file. Waveforms are ordered according to a lexicographical ordering of
+	infiles. If nsamp is not None, the nsamp property of each Waveform
+	object will be overridden.
 
-	If atimes is not None, it should map element indices to a list of
-	arrival times (one for each unique Waveform in the set of Waveforms
+	If atimes is not None, it should map transmit-receive pairs to a list
+	of arrival times (one for each unique Waveform in the set of Waveforms
 	received by the element). If an entry exists in atimes for a given
 	element, all waveforms for that element will be aligned to the first
 	Waveform for the element (using only the arrival times).
@@ -347,49 +348,58 @@ def getbsgroups(infiles, atimes=None, nsamp=None, equalize=False):
 	Only element indices whose Waveform lists have a length that matches
 	that of the longest Waveform list will be included.
 	'''
-	bswaves = defaultdict(list)
+	wavegrps = defaultdict(list)
 
 	for infile in sorted(infiles):
 		wset = WaveformSet.fromfile(infile)
 		f2c = wset.f2c
 
-		for rx in wset.rxidx:
-			wf = wset.getwaveform(rx, rx, maptids=True)
-			if nsamp: wf.nsamp = nsamp
+		if wset.ntx != 1 or wset.nrx != 1:
+			raise IOError('Input %s must contain a single waveform' % (infile,))
 
-			try: atlist = atimes[rx]
-			except (KeyError, TypeError): pass
-			else: wf = wf.shift(atlist[0] - atlist[len(bswaves[rx])])
+		rx = wset.rxidx[0]
+		tx = wset.txidx.next()
 
-			dwin = wf.datawin
-			nwf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
-			bswaves[rx].append(nwf)
+		wf = wset.getwaveform(rx, tx)
+		if nsamp: wf.nsamp = nsamp
 
-	maxlen = max(len(w) for w in bswaves.itervalues())
+		try: atlist = atimes[tx, rx]
+		except (KeyError, TypeError): pass
+		else: wf = wf.shift(atlist[0] - atlist[len(wavegrps[tx,rx])])
+
+		# Remove the F2C
+		dwin = wf.datawin
+		nwf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
+		wavegrps[tx,rx].append(nwf)
+
+	maxlen = max(len(w) for w in wavegrps.itervalues())
 	# Filter the list to exclude short lists
-	bswaves = { k: v for k, v in bswaves.iteritems() if len(v) == maxlen }
+	wavegrps = { k: v for k, v in wavegrps.iteritems() if len(v) == maxlen }
 
-	if not equalize: return bswaves
+	if not equalize: return wavegrps
 
 	# Find the peak amplitudes
 	pkamps = { k: max(wf.envelope().extremum()[0] for wf in v) 
-					for k, wf in bswaves.iteritems() }
+					for k, v in wavegrps.iteritems() }
 	# Find the low-amplitude threshold
 	minamp = max(1., max(pkamps.itervalues())) * sqrt(sys.float_info.epsilon)
 
 	# Equalize the waveforms in each group, if desired
 	for k, pamp in pkamps.iteritems():
 		if pamp < minamp: continue
-		for v in bswaves[k]: v /= pamp
+		for v in wavegrps[k]: v /= pamp
 
-	return bswaves
+	return wavegrps
 
 
-def getbswaves(infile, atimes=None, nsamp=None, equalize=False):
+def getwave(infile, atimes=None, nsamp=None, equalize=False):
 	'''
-	For an input WaveformSet file infile, return a dictionary mapping
-	receive-channel indices to backscatter Waveforms. All data windows are
-	adjusted to 0 f2c.
+	For an input WaveformSet file infile that contains a single waveform,
+	return the (t, r) index pair stored in the file and the waveform it
+	contains. The (t, r) index pair is given by the tuple
+	(wset.rxidx[0], wset.txidx.next()).
+
+	An IOError will be raised if the file contains more than one waveform.
 
 	If atimes is not None, it should map element indices to arrival times.
 	In this case, every waveform will be aligned to the average arrival
@@ -399,11 +409,8 @@ def getbswaves(infile, atimes=None, nsamp=None, equalize=False):
 	If nsamp is not None, the nsamp property of each read wavefrom is
 	replaced with the specified value.
 
-	If equalize is True, waveforms are scaled by the inverses of their peak
-	amplitudes. If the peak amplitude for a waveform is less than the
-	maximum peak amplitude across all waveforms multiplied by the square
-	root of machine precision (sys.float_info.epsilon), that waveform will
-	not be equalized.
+	If equalize is True, the waveform will be scaled by the inverse of its
+	peak amplitude if the amplitude exceeds sqrt(sys.float_info.epsilon).
 	'''
 	wset = WaveformSet.fromfile(infile)
 	f2c = wset.f2c
@@ -411,28 +418,28 @@ def getbswaves(infile, atimes=None, nsamp=None, equalize=False):
 	if atimes: mtime = np.mean(atimes.values())
 	else: mtime = None
 
-	bswaves = { }
-	for rx in wset.rxidx:
-		wf = wset.getwaveform(rx, rx, maptids=True)
-		if nsamp: wf.nsamp = nsamp
+	if wset.ntx != 1 or wset.nrx != 1:
+		raise IOError('Input %s must contain a single waveform' % (infile,))
 
-		try: shift = mtime - atimes[rx]
-		except (KeyError, TypeError): pass
-		else: wf = wf.shift(shift)
+	rx = wset.rxidx[0]
+	tx = wset.txidx.next()
 
-		dwin = wf.datawin
+	wf = wset.getwaveform(rx, tx)
+	if nsamp: wf.nsamp = nsamp
 
-		bswaves[rx] = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
+	try: shift = mtime - atimes[rx, tx]
+	except (KeyError, TypeError): pass
+	else: wf = wf.shift(shift)
+
+	# Shift out the F2C
+	dwin = wf.datawin 
+	wf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
 
 	if equalize:
-		pkamps = { k: wf.envelope().extremum()[0]
-				for k, wf in bswaves.iteritems() }
-		minamp = max(1., max(pkamps.itervalues())) * sqrt(sys.float_info.epsilon)
-		for k, pamp in pkamps.iteritems():
-			if pamp < minamp: continue
-			bswaves[k] /= pamp
+		pkamp = wf.envelope().extremum()[0]
+		if pkamp > sqrt(sys.float_info.epsilon): wf /= pkamp
 
-	return bswaves
+	return (tx, rx), wf
 
 
 if __name__ == '__main__':
@@ -504,13 +511,12 @@ if __name__ == '__main__':
 
 	if vidmode:
 		# Load the backscatter waves in groups by element
-		bswaves = getbsgroups(infiles, atimes, nsamp, equalize)
+		wavegrps = getwavegrps(infiles, atimes, nsamp, equalize)
 		print 'Storing waveform video to file', imgname
-		plotframes(imgname, bswaves, atimes, dwin, cthresh, bitrate)
+		plotframes(imgname, wavegrps, atimes, dwin, cthresh, bitrate)
 	else:
 		# Load and align all waves
-		bswaves = dict(kp for infile in infiles
-				for kp in getbswaves(infile, atimes, nsamp, equalize).iteritems())
+		waves = dict(getwave(infile, atimes, nsamp, equalize) for infile in infiles)
 
 		if not atimes:
 			if dwin is not None:
@@ -524,8 +530,8 @@ if __name__ == '__main__':
 
 		if hidewf and atimes:
 			print 'Suppressing unaligned waveforms'
-			for k, v in bswaves.iteritems():
+			for k, v in waves.iteritems():
 				if k not in atimes: v *= 0
 
 		print 'Storing waveform image to file', imgname
-		plotwaves(imgname, bswaves, atimes, dwin, log, cthresh)
+		plotwaves(imgname, waves, atimes, dwin, log, cthresh)
