@@ -218,7 +218,11 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 		cmap = cm.RdBu
 	else:
 		# Compute signal image to log magnitude
-		img = np.log10(np.abs(hilbert(img, axis=1)))
+		img = np.abs(hilbert(img, axis=1))
+		# Clip approximately-zero values
+		imax = np.max(img)
+		imin = np.min(img[np.nonzero(img)])
+		img = np.log10(np.clip(img, imin, imax))
 
 		pkval = np.max(img)
 
