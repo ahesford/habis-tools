@@ -67,10 +67,18 @@ def loadmatlist(files, *a, **k):
 
 	If files is a string instead of any other iterable, it will be replaced
 	with glob.glob(files) before being inserted into the above constructor.
+
+	When files is a string, a special keyword argument, forcematch, may be
+	provided. This argument will be stripped from the kwargs dictionary k
+	and, when True, will cause an IOError to be raised if the glob matches
+	no files. Otherwise, if forcematch is omitted or False, a glob that
+	matches no files will cause an empty map to be returned.
 	'''
 	if isinstance(files, basestring):
 		from glob import glob
 		files = glob(files)
+		forcematch = k.pop('forcematch', False)
+		if forcematch and not files: raise IOError('No matches for glob "files"')
 
 	return OrderedDict(sorted(kv for f in files
 		for kv in loadkeymat(f, *a, **k).iteritems()))

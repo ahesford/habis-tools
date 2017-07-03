@@ -14,11 +14,11 @@ from pycwp.stats import rolling_std
 
 from habis.habiconf import matchfiles
 from habis.sigtools import Waveform, Window
-from habis.formats import loadkeymat, WaveformSet
+from habis.formats import loadmatlist, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
-	print >> sys.stderr, 'USAGE: %s [-b bitrate] [-e] [-m] [-l] [-w s,e] [-a file[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname
+	print >> sys.stderr, 'USAGE: %s [-b bitrate] [-e] [-m] [-l] [-w s,e] [-a glob[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname
 	sys.exit(fatal)
 
 
@@ -279,14 +279,14 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 
 def getatimes(atarg, freq=1, scalar=True):
 	'''
-	Given a file name with an optional ":<column>,<column>,..." suffix of
-	integer indices, try to open the arrival-time map with
-	habis.formats.loadkeymat() and pull the specified column. Keys of the
-	map should be transmit-receive pairs (t, r), although only keys of the
-	form (r, r) are of interest.
+	Given a glob with an optional ":<column>,<column>,..." suffix of
+	integer indices, try to open arrival-time maps matching the glob with
+	habis.formats.loadmatlist() and pull the specified columns. Keys of the
+	map should be transmit-receive pairs (t, r).
 
-	A file with the full name in atarg will first be checked. If none
-	exists or the file cannot be opened, and the name constains a suffix of
+	A glob matching the full name in atarg will first be checked. If no
+	matches exist or the file cannot be opened, and the name
+	constains a suffix of
 	integer indices, a file whose name matches atarg up to the suffix will
 	be checked and the specified column will be pulled.
 
@@ -300,14 +300,14 @@ def getatimes(atarg, freq=1, scalar=True):
 	acols = [0]
 	try:
 		# Try to load the file with the full name
-		atmap = loadkeymat(atarg, scalar=False, nkeys=2)
+		atmap = loadmatlist(atarg, scalar=False, nkeys=2, forcematch=True)
 	except IOError as err:
 		atcomps = atarg.split(':')
 		if len(atcomps) < 2: raise err
 		# Treat the name as a name + column
 		acols = [int(av, base=10) for av in atcomps[-1].split(',')]
 		atname = ':'.join(atcomps[:-1])
-		atmap = loadkeymat(atname, scalar=False, nkeys=2)
+		atmap = loadmatlist(atname, scalar=False, nkeys=2, forcematch=True)
 		print 'Loading columns %s from arrival-time file %s' % (acols, atname)
 
 	if scalar:
