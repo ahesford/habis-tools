@@ -1113,9 +1113,8 @@ class Waveform(object):
 		  threshold. For 'relative', the minprom threshold is specified
 		  as a fraction of the prominence of the most prominent peak.
 		  For 'noisedb', the minprom threshold specifies a ratio, in
-		  dB, between the peak prominence and the noise standard
-		  deviation (computed using pycwp.stats.rolling_variance; see
-		  the 'noisewin' kwarg).
+		  dB, between the peak prominence and the noise floor (computed
+		  using self.noisefloor); see the 'noisewin' kwarg.
 
 		* useheight: If False (default), the 'prominence' used to
 		  filter peaks according to minprom and prommode is the
@@ -1124,9 +1123,9 @@ class Waveform(object):
 		  'prominence' is simply the height of the peak above 0.
 
 		* noisewin: If prommode is 'noisedb', this optional kwarg
-		  specifies the width of the pycwp.stats.rolling_variance
-		  window used to estimate noise standard deviation. Defaults to
-		  100 and is ignored when prommode is not 'noisedb'.
+		  specifies the width of the window used to estimate noise
+		  floor with self.noisefloor. Defaults to 100 and is ignored
+		  when prommode is not 'noisedb'.
 
 		* minwidth: Only peaks with a width (the distance between the
 		  index of the peak and the index of its key col) no less than
@@ -1176,10 +1175,10 @@ class Waveform(object):
 		if prommode == 'noisedb':
 			# Compute the noise standard deviation
 			try:
-				nstd = min(stats.rolling_std(self._data, noisewin))
+				nfloor  = self.noisefloor(noisewin)
 			except ValueError:
 				raise ValueError('Noise window %d too wide to compute standard deviation' % noisewin)
-			minprom = 10.**(minprom / 20.) * nstd
+			minprom = 10.**((minprom + nfloor) / 20.)
 		elif prommode == 'relative':
 			try:
 				minprom = minprom * max(pk['peak'][1] for pk in peaks)
@@ -1334,6 +1333,29 @@ class Waveform(object):
 		return sigft.ifft(real=self.isReal)
 
 
+	def noisefloor(self, noisewin):
+		'''
+		Estimate the noise floor, in dB, of the signal by sliding a
+		window of width noisewin over the signal and identifying the
+		minimum standard deviation (minstd). The noise floor is usually
+		given by 20 * log10(minstd); however, if minstd is less than
+		the floating-point epsilon for self.dtype (or, if self.dtype is
+		an integer, for a 64-bit double) as indicated by np.finfo, the
+		value of minstd will be replaced by the floating-point epsilon
+		to estimate the noise floor.
+		'''
+		if len(self._data) < 2:
+			raise ValueError('Signal data window must have at least 2 samples')
+
+		# Find machine precision
+		try: eps = np.finfo(self.dtype).eps
+		except ValueError: eps = np.finfo('float64').eps
+
+		# Compute minimum standard deviation and convert to dB
+		mstd = min(stats.rolling_std(self._data, noisewin))
+		return 20. * np.log10(max(mstd, eps))
+
+
 	def snr(self, noisewin):
 		'''
 		Estimate the signal SNR (in dB) of the signal by comparing the
@@ -1342,10 +1364,9 @@ class Waveform(object):
 		'''
 		if len(self._data) < 2:
 			raise ValueError('Signal data window must have at least 2 samples')
-		# Compute the minimum variance and the peak amplitude
-		mvar = min(stats.rolling_variance(self._data, noisewin))
+		# Convert the peak amplitude, in dB, and subtract noise dB
 		env = max(np.abs(hilbert(self._data)))
-		return 10. * np.log10(env**2 / mvar)
+		return 20. * np.log10(env) - self.noisefloor(noisewin)
 
 
 def dimcompat(sig, ndim=1):

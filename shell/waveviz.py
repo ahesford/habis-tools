@@ -231,20 +231,12 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 		elif cthresh < 0:
 			clim = [pkval + cthresh / 20., pkval]
 		else:
-			nlev = float('inf')
-			for w in waves:
-				# Estimate noise levels for signal
-				nw = rolling_std(w._data, 200)
-				# Find minimum of nonzero values
-				try: nwm = np.min(nw[np.nonzero(nw)])
-				except ValueError: continue
-				if nwm < nlev: nlev = nwm
-			if np.isinf(nlev):
-				# If no noise level was found, default to down-from-peak
-				clim = [pkval - cthresh / 20., pkval]
-			else:
-				ndb = np.log10(nlev)
-				clim = [ ndb, ndb + cthresh / 20. ]
+			# Estimate noise levels for image
+			nlev = min(w.noisefloor(200) for w in waves)
+			# If no noise level was found, default to down-from-peak
+			# Otherwise, convert dB to simple log values
+			if np.isinf(nlev): clim = [pkval - cthresh / 20., pkval]
+			else: clim = [ nlev / 20., (nlev + cthresh) / 20. ]
 
 		cmap = cm.Reds
 
