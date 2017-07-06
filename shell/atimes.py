@@ -230,9 +230,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  exceeds eleak will be rejected as unacceptable.
 
 	  Estimates of energy leaks ignore any fractional parts of arrival
-	  times. If bandpass filtering is specified, energy leaks are estimated
-	  from filtered signals. Estimates never consider windowing or peak
-	  isolation.
+	  times. Energy leaks are estimated after any bandpass filtering or
+	  windowing. Estimates never consider peak isolation.
 	'''
 	# Read the data and reference
 	data = WaveformSet.fromfile(datafile)
@@ -396,17 +395,6 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			# Bandpass and crop to original data window
 			sig = sig.bandpass(**bandpass).window(sig.datawin)
 
-		if eleak:
-			# Calculate cumulative energy in unwindowed waveform
-			ewin = sig.datawin
-			cenergy = np.cumsum(sig.getsignal(ewin, forcecopy=False)**2)
-
-		# Square the signal if desired
-		if signsquare: sig = sig.signsquare()
-
-		if minsnr is not None and noisewin is not None:
-			if sig.snr(noisewin) < minsnr: continue
-
 		if window:
 			wargs = { }
 			try: wargs['tails'] = window['tails']
@@ -426,6 +414,17 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 			# Apply a desired window
 			if swin: sig = sig.window(swin, **wargs)
+
+		if eleak:
+			# Calculate cumulative energy in unwindowed waveform
+			ewin = sig.datawin
+			cenergy = np.cumsum(sig.getsignal(ewin, forcecopy=False)**2)
+
+		# Square the signal if desired
+		if signsquare: sig = sig.signsquare()
+
+		if minsnr is not None and noisewin is not None:
+			if sig.snr(noisewin) < minsnr: continue
 
 		if peaks:
 			# Isolate the peak nearest the expected location (if one exists)
