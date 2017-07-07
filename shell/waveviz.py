@@ -10,8 +10,6 @@ from itertools import izip
 
 from collections import defaultdict
 
-from pycwp.stats import rolling_std
-
 from habis.habiconf import matchfiles
 from habis.sigtools import Waveform, Window
 from habis.formats import loadmatlist, WaveformSet
@@ -139,7 +137,8 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 			if not i % 50: print 'Stored frame %s' % (pair,)
 
 
-def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
+def plotwaves(output, waves, atimes=None, mtime=None,
+		dwin=None, log=False, cthresh=None):
 	'''
 	Plot, into the image file output, the habis.sigtools.Waveform objects
 	mapped (by index) in waves, with temporal variations along the vertical
@@ -150,6 +149,10 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 	A subplot will show these arrival times on the same horizontal axis as
 	the waveform image. Elements in waves that do not exist in atimes will
 	be replaced with NaN when plotting arrival times.
+
+	If mtimes is not None, it should be the mean arrival time use to align
+	the waveforms. In this case, the time will be printed in the title of
+	the arrival-time plot.
 
 	The waves are cropped to the specified data window prior to plotting.
 	If dwin is None, the smallest data window that encompasses all plotted
@@ -251,6 +254,7 @@ def plotwaves(output, waves, atimes=None, dwin=None, log=False, cthresh=None):
 	ax[0].set_ylabel('Time, samples', fontsize=16)
 	if atimes is not None:
 		title = 'Waveforms aligned to mean arrival time'
+		if mtime: title += ' (%s samples)' % (mtime,)
 	else:
 		title = 'Waveforms with natural alignment'
 	ax[0].set_title(title + (' (log magnitude)' if log else ''), fontsize=16)
@@ -314,7 +318,63 @@ def getatimes(atarg, freq=1, scalar=True):
 	return { k: freq * v[acols] for k, v in atmap.iteritems() }
 
 
-def getwavegrps(infiles, atimes=None, nsamp=None, equalize=False):
+def shiftgrps(wavegrps, atimes):
+	'''
+	In a mapping wavegrps as returned by getwavegrps, shift each waveform
+	wavegrps[t,r][i] by the difference atimes[t,r][0] - atimes[t,r][i]. If
+	a list atimes[t,r] cannot be found, no shift will be performed for that
+	(t, r) pair.
+
+	If atimes[t,r] exists but its length does not match the length of
+	wavegrps[t,r], an IndexError will be raised.
+
+	The shifting is done in place, but wavegrps is also returned.
+	'''
+	for (t,r) in wavegrps.iterkeys():
+		# Pull the waveform list
+		waves = wavegrps[t,r]
+
+		# Pull the arrival-time list, if possible
+		try: atlist = atimes[t,r]
+		except KeyError: continue
+
+		if len(atlist) != len(waves):
+			raise IndexError('Length of arrival-time list does not match length of wave-group list for pair %s' % ((t,r),))
+
+		# Build the new list of shifted waves
+		wavegrps[t,r] = [ waves[0] ]
+		wavegrps[t,r].extend(wf.shift(atlist[0] - atv)
+					for wv, atv in izip(waves[1:], atlist[1:]))
+
+	return wavegrps
+
+
+def eqwavegrps(wavegrps):
+	'''
+	In a mapping wavegrps as returned by getwavegrps, scale the peak
+	amplitude of each waveform wavegrps[t,r][i] by the inverse of the
+	maximum peak amplitude of all waveforms in wavegrps[t,r], unless the
+	maximum value is less than sqrt(sys.float_info.epsilon) times the
+	maximum amplitude across all waveforms in wavegrps.
+
+	The shifting is done in place, but wavegrps is also returned.
+	'''
+	# Find the peak amplitudes for each group
+	pkamps = { k: max(wf.envelope().extremum()[0] for wf in v) 
+			for k, v in wavegrps.iteritems() }
+
+	# Find low-amplitude threshold
+	minamp = max(pkamps.itervalues()) * sqrt(sys.float_info.epsilon)
+
+	# Equalize the waveforms in each group, if desired
+	for k, pamp in pkamps.iteritems():
+		if pamp < minamp: continue
+		for v in wavegrps[k]: v /= pamp
+
+	return wavegrps
+
+
+def getwavegrps(infiles, nsamp=None):
 	'''
 	For a sequence infiles of input WaveformSet files that each contain a
 	single waveform, prepare a mapping from transmit-receiver pairs to a
@@ -323,23 +383,6 @@ def getwavegrps(infiles, atimes=None, nsamp=None, equalize=False):
 	file. Waveforms are ordered according to a lexicographical ordering of
 	infiles. If nsamp is not None, the nsamp property of each Waveform
 	object will be overridden.
-
-	If atimes is not None, it should map transmit-receive pairs to a list
-	of arrival times (one for each unique Waveform in the set of Waveforms
-	received by the element). If an entry exists in atimes for a given
-	element, all waveforms for that element will be aligned to the first
-	Waveform for the element (using only the arrival times).
-
-	If equalize is True, waveforms in each waveform list will be scaled by
-	the inverse of the maximum (over all waveforms in the list) peak
-	amplitude. After equalization, at least one waveform will have a peak
-	amplitude of unity, while others in the list will have peak amplitudes
-	no greater than unity, with relative proportions preserved within the
-	list. Ratios between different lists will not be preserved. If the
-	maximum peak amplitude for a list is less than the square root of
-	machine precision (sys.float_info.epsilon) multiplied by the maximum
-	peak amplitude over all lists (or unity, whichever is greater), no
-	equalization will be performed for that list.
 
 	Only element indices whose Waveform lists have a length that matches
 	that of the longest Waveform list will be included.
@@ -359,60 +402,34 @@ def getwavegrps(infiles, atimes=None, nsamp=None, equalize=False):
 		wf = wset.getwaveform(rx, tx)
 		if nsamp: wf.nsamp = nsamp
 
-		try: atlist = atimes[tx, rx]
-		except (KeyError, TypeError): pass
-		else: wf = wf.shift(atlist[0] - atlist[len(wavegrps[tx,rx])])
-
-		# Remove the F2C
+		# Remove F2C
 		dwin = wf.datawin
 		nwf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
 		wavegrps[tx,rx].append(nwf)
 
-	maxlen = max(len(w) for w in wavegrps.itervalues())
 	# Filter the list to exclude short lists
-	wavegrps = { k: v for k, v in wavegrps.iteritems() if len(v) == maxlen }
-
-	if not equalize: return wavegrps
-
-	# Find the peak amplitudes
-	pkamps = { k: max(wf.envelope().extremum()[0] for wf in v) 
-					for k, v in wavegrps.iteritems() }
-	# Find the low-amplitude threshold
-	minamp = max(1., max(pkamps.itervalues())) * sqrt(sys.float_info.epsilon)
-
-	# Equalize the waveforms in each group, if desired
-	for k, pamp in pkamps.iteritems():
-		if pamp < minamp: continue
-		for v in wavegrps[k]: v /= pamp
-
-	return wavegrps
+	maxlen = max(len(w) for w in wavegrps.itervalues())
+	return { k: v for k, v in wavegrps.iteritems() if len(v) == maxlen }
 
 
-def getwave(infile, atimes=None, nsamp=None, equalize=False):
+def getwave(infile, nsamp=None, equalize=False):
 	'''
 	For an input WaveformSet file infile that contains a single waveform,
 	return the (t, r) index pair stored in the file and the waveform it
 	contains. The (t, r) index pair is given by the tuple
 	(wset.rxidx[0], wset.txidx.next()).
 
-	An IOError will be raised if the file contains more than one waveform.
-
-	If atimes is not None, it should map element indices to arrival times.
-	In this case, every waveform will be aligned to the average arrival
-	time if the waveform has an entry in atimes. (If a waveform is not
-	listed in atimes, it will not be shifted.)
-
 	If nsamp is not None, the nsamp property of each read wavefrom is
 	replaced with the specified value.
 
-	If equalize is True, the waveform will be scaled by the inverse of its
-	peak amplitude if the amplitude exceeds sqrt(sys.float_info.epsilon).
+	If equalize is True, each waveform will be scaled by the inverse of its
+	peak amplitude as long as the peak amplitude is larger than the value
+	sqrt(sys.float_info.epsilon).
+
+	An IOError will be raised if the file contains more than one waveform.
 	'''
 	wset = WaveformSet.fromfile(infile)
 	f2c = wset.f2c
-
-	if atimes: mtime = np.mean(atimes.values())
-	else: mtime = None
 
 	if wset.ntx != 1 or wset.nrx != 1:
 		raise IOError('Input %s must contain a single waveform' % (infile,))
@@ -422,10 +439,6 @@ def getwave(infile, atimes=None, nsamp=None, equalize=False):
 
 	wf = wset.getwaveform(rx, tx)
 	if nsamp: wf.nsamp = nsamp
-
-	try: shift = mtime - atimes[rx, tx]
-	except (KeyError, TypeError): pass
-	else: wf = wf.shift(shift)
 
 	# Shift out the F2C
 	dwin = wf.datawin 
@@ -498,6 +511,7 @@ if __name__ == '__main__':
 	if atimes is not None:
 		# Load arrival times and convert to samples
 		atimes = getatimes(atimes, freq, not vidmode)
+		print 'Parsed arrival times'
 
 	try:
 		infiles = matchfiles(args)
@@ -507,22 +521,38 @@ if __name__ == '__main__':
 
 	if vidmode:
 		# Load the backscatter waves in groups by element
-		wavegrps = getwavegrps(infiles, atimes, nsamp, equalize)
+		wavegrps = getwavegrps(infiles, nsamp)
+		# Shift waveforms if arrival times are provided
+		if atimes:
+			wavegrps = shiftgrps(wavegrps, atimes)
+			print 'Shifted waveform groups'
+		# Equalize waveforms as desired
+		if equalize:
+			wavegrps = eqwavegrps(wavegrps)
+			print 'Equalized waveform groups'
 		print 'Storing waveform video to file', imgname
 		plotframes(imgname, wavegrps, atimes, dwin, cthresh, bitrate)
 	else:
-		# Load and align all waves
-		waves = dict(getwave(infile, atimes, nsamp, equalize) for infile in infiles)
+		# Load the waveforms
+		waves = dict(getwave(inf, nsamp, equalize) for inf in infiles)
 
-		if not atimes:
-			if dwin is not None:
-				# Convert the window specification to a Window object
-				dwin = Window(dwin[0], end=dwin[1], nonneg=True)
-		else:
+		# There is no mean arrival time unless arrival times are provided
+		mtime = None
+
+		if atimes:
+			# Find the mean arrival time for all waveforms
+			celts = set(waves).intersection(atimes)
+			mtime = int(np.mean([atimes[c] for c in celts]))
+			# Shift all waveforms with an arrival time to the mean
+			for k in celts:
+				waves[k] = waves[k].shift(mtime - atimes[k])
+			print 'Shifted waveforms'
 			if dwin is not None:
 				# The window specification is relative to the mean time
-				mtime = int(np.mean(atimes.values()))
 				dwin = Window(max(0, mtime + dwin[0]), end=mtime + dwin[1])
+		elif dwin is not None:
+			# Convert the window specification to a Window object
+			dwin = Window(dwin[0], end=dwin[1], nonneg=True)
 
 		if hidewf and atimes:
 			print 'Suppressing unaligned waveforms'
@@ -530,4 +560,4 @@ if __name__ == '__main__':
 				if k not in atimes: v *= 0
 
 		print 'Storing waveform image to file', imgname
-		plotwaves(imgname, waves, atimes, dwin, log, cthresh)
+		plotwaves(imgname, waves, atimes, mtime, dwin, log, cthresh)
