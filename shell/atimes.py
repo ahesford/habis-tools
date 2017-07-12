@@ -611,9 +611,12 @@ def atimesEngine(config):
 
 	maskoutliers = config.get(asec, 'maskoutliers', mapper=bool, default=False)
 	optimize = config.get(asec, 'optimize', mapper=bool, default=False)
-	cachedelay = config.get(asec, 'cachedelay', mapper=bool, default=True)
 	kwargs['negcorr'] = config.get(asec, 'negcorr', mapper=bool, default=False)
 	kwargs['signsquare'] = config.get(asec, 'signsquare', mapper=bool, default=False)
+
+	# Check for delay cache specifications as boolean or file suffix
+	cachedelay = config.get(asec, 'cachedelay', default=True)
+	if instance(cachedelay, bool) and cachedelay: cachedelay = 'delays.npz'
 
 	try:
 		# Remove the nearmap file key
@@ -656,7 +659,7 @@ def atimesEngine(config):
 			kwargs['peaks']['nearmap'] = nearmap
 
 		if cachedelay:
-			delayfiles = buildpaths(datafiles, extension='delays.npz')
+			delayfiles = buildpaths(datafiles, extension=cachedelay)
 		else:
 			delayfiles = [None]*len(datafiles)
 
