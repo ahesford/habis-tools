@@ -616,7 +616,7 @@ def atimesEngine(config):
 
 	# Check for delay cache specifications as boolean or file suffix
 	cachedelay = config.get(asec, 'cachedelay', default=True)
-	if instance(cachedelay, bool) and cachedelay: cachedelay = 'delays.npz'
+	if isinstance(cachedelay, bool) and cachedelay: cachedelay = 'delays.npz'
 
 	try:
 		# Remove the nearmap file key
