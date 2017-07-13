@@ -100,7 +100,8 @@ def usage(progname=None, fatal=True):
 	sys.exit(int(fatal))
 
 
-def getatimes(atfile, elements, column=0, vclip=None, start=0, stride=1):
+def getatimes(atfile, elements, column=0, vclip=None,
+		mask_outliers=False, start=0, stride=1):
 	'''
 	Read the 2-key arrival-time map with name atfile and filter the map to
 	include only keys such that each index is a key in the mapping elements
@@ -108,6 +109,14 @@ def getatimes(atfile, elements, column=0, vclip=None, start=0, stride=1):
 	path length, computed from element locations, divided by the arrival
 	time) falls between vclip[0] and vclip[1]. The column argument
 	specifies which index in multi-value arrival-time maps should be selected.
+
+	If mask_outliers is specified, it should either be a Boolean True or a
+	positive floating-point value. Arrival times will be excluded if they
+	correspond to average speeds that fall more than M * IQR below the
+	first quartile or more than M * IQR above the third quartile, where M
+	is 1.5 if mask_outliers is a Boolean True and M is the floating-point
+	value of mask_outliers otherwise. Outlier exclusion does not apply to
+	backscatter times.
 
 	Backscatter waveforms are included in the map but will not be filtered
 	by vclip because the average sound speed is undefined for backscatter.
@@ -122,22 +131,44 @@ def getatimes(atfile, elements, column=0, vclip=None, start=0, stride=1):
 	atimes = { }
 	idx = 0
 
+	if mask_outliers:
+		# Record the element distances and all speed values for filtering
+		eldists = { }
+		spdvals = [ ]
+
 	for (t, r), v in ldkmat(atfile, nkeys=2, scalar=False).iteritems():
 		try: elt, elr = elements[t], elements[r]
 		except KeyError: continue
 
 		time = v[column]
 
-		if t != r and vclip:
-			aspd = norm(elt - elr) / time
-			if aspd < vclip[0] or aspd > vclip[1]: continue
+		if t != r:
+			# Compute average speed
+			trdist = norm(elt - elr)
+			aspd = trdist / time
+			if vclip and not vclip[0] <= aspd <= vclip[1]: continue
+			if mask_outliers:
+				eldists[t,r] = trdist
+				spdvals.append(aspd)
 
 		# Keep every stride-th valid record
 		if idx % stride == start: atimes[t,r] = time
 		# Increment the valid record count
 		idx += 1
 
-	return atimes
+	if not mask_outliers: return atimes
+
+	if isinstance(mask_outliers, bool): mask_outliers = 1.5
+	else: mask_outliers = float(mask_outliers)
+
+	# Define outlier limits
+	q1, q3 = np.percentile(spdvals, [25, 75])
+	iqr = q3 - q1
+	lo, hi = q1 - mask_outliers * iqr, q3 + mask_outliers * iqr
+
+	# Filter arrival times to remove outliers
+	return { (t, r): v for (t, r), v in atimes.iteritems()
+			if t == r or lo <= eldists[t,r] / v <= hi }
 
 
 def tracerEngine(config):
@@ -211,6 +242,9 @@ def tracerEngine(config):
 	try: epsilon = config.get(tsec, 'epsilon', default=1e-3)
 	except Exception as e: _throw('Invalid optional epsilon', e)
 
+	try: mask_outliers = config.get(tsec, 'maskoutliers', default=False)
+	except Exception as e: _throw('Invalid optional maskoutliers', e)
+
 	WORLD = MPI.COMM_WORLD
 	mpirank, mpisize = WORLD.rank, WORLD.size
 
@@ -259,12 +293,15 @@ def tracerEngine(config):
 
 	WORLD.Barrier()
 
-	if not mpirank: print 'Reading and gathering arrival times'
+	if not mpirank:
+		print 'Reading and gathering arrival times'
+		if mask_outliers: print 'Will exclude outlier arrival times'
 
 	# Collect the arrival times from local shares of all local maps
 	atimes = { }
 	for tfile, (start, stride) in flocshare(timefiles, MPI.COMM_WORLD).iteritems():
-		atimes.update(getatimes(tfile, elements, targidx, vclip, start, stride))
+		atimes.update(getatimes(tfile, elements, targidx,
+					vclip, mask_outliers, start, stride))
 
 	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)
 

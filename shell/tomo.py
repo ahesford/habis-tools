@@ -40,19 +40,20 @@ from habis.mpdfile import flocshare
 from habis.slowness import Slowness, MaskedSlowness, PiecewiseSlowness
 
 
-def getatimes(atfile, column=0, filt=None, start=0, stride=1):
+def getatimes(atfile, elements, column=0, mask_outliers=False, start=0, stride=1):
 	'''
 	Read the 2-key arrival-time map with name atfile and remove
 	backscatter entries for which key[0] == key[1]. The map is always
 	treated as a multi-value map (i.e., 'scalar' is False in loadkeymat).
 	The column argument specifies which value index should be retained.
 
-	If filt is not None, it should be a callable which, when called as
-	filt(v, t, r) for an arrival time v corresponding to transmit index t
-	and receive index r, returns True for a valid measurement and False for
-	an invalid measurement. If filt is not specified, all non-backscatter
-	measurements are assumed valid.
-
+	Arrival times are ignored if elements[t] or elements[r] does not exist.
+	If mask_outliers is True or a positive floating-point value, arrival
+	times that correspond to outlier average speeds---those that fall more
+	than M * IQR below the first quartile or above the third quartile,
+	where M is 1.5 is mask_outliers is True or the float value of
+	mask_outliers otherwise---will be excluded from the arrival-time list.
+ 
 	Only every stride-th *valid* record, starting with the start-th such
 	record, is retained.
 	'''
@@ -63,15 +64,43 @@ def getatimes(atfile, column=0, filt=None, start=0, stride=1):
 	atimes = { }
 	idx = 0
 
+	if mask_outliers: 
+		# Record element distances and all speed values for filtering
+		spdvals = [ ]
+		eldists = { }
+
 	for (t, r), v in ldkmat(atfile, nkeys=2, scalar=False).iteritems():
 		# Ignore backscatter and invalid waveforms
-		if t == r or (filt and not filt(v, t, r)): continue
+		if t == r: continue
+
+		try: elt, elr = elements[t], elements[r]
+		except KeyError: continue
+
+		# Grab the relevant time
+		time = v[column]
 		# Keep every stride-th valid record
-		if idx % stride == start: atimes[t,r] = v[column]
+		if idx % stride == start: atimes[t,r] = time
 		# Increment the valid record count
 		idx += 1
 
-	return atimes
+		# Record all times for outlier exclusion
+		if mask_outliers: 
+			eldists[t,r] = norm(elt - elr)
+			spdvals.append(eldists[t,r] / time)
+
+	if not mask_outliers: return atimes
+
+	if isinstance(mask_outliers, bool): mask_outliers = 1.5
+	else: mask_outliers = float(mask_outliers)
+
+	# Define outlier limits
+	q1, q3 = np.percentile(spdvals, [25, 75])
+	iqr = q3 - q1
+	lo, hi = q1 - mask_outliers * iqr, q3 + mask_outliers * iqr
+
+	# Filter arrival times to remove outliers
+	return { (t, r): v for (t, r), v in atimes.iteritems()
+				if lo <= eldists[t,r] / v <= hi }
 
 
 class TomographyTask(object):
@@ -385,8 +414,7 @@ class BentRayTracer(TomographyTask):
 		return callback
 
 	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
-			regularizer=None, mfilter=None,
-			limits=None, partial_output=None):
+			regularizer=None, mfilter=None, partial_output=None):
 		'''
 		Iteratively compute a slowness image by minimizing the cost
 		functional represented in this BentRayTracer instance and using
@@ -433,11 +461,6 @@ class BentRayTracer(TomographyTask):
 		True, a median filter of size mfilter will be applied to the
 		image before beginning the next round. The argument mfilter can
 		be a scalar or a three-element sequence of positive integers.
-
-		If limits is not None, it should be a tuple of the form (slo,
-		shi), where slo and shi are, respectively, the lowest and
-		highest allowed slowness values. Each update will be clipped to
-		these limits as necessary.
 
 		If partial_output is not None, it should be a string specifying
 		a name template that will be rendered to store images produced
@@ -549,10 +572,6 @@ class BentRayTracer(TomographyTask):
 		cg = np.zeros((s.nnz,), dtype=np.float64)
 
 		for k in range(epochs):
-			if limits:
-				# Clip the update to the desired range
-				x = s.clip(x, limits[0], limits[1])
-
 			if k < 1:
 				f, lgf = ffg(x, -1, -1)
 				eta = min(2 * f / norm(lgf)**2, 10.)
@@ -708,26 +727,13 @@ if __name__ == "__main__":
 	try: mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
 	except Exception as e: _throw('Invalid optional mfilter', e)
 
-	try: limits = config.getlist(tsec, 'limits', mapper=float, default=None)
-	except Exception as e: _throw('Invalid optional limits', e)
+	try: mask_outliers = config.getlist(tsec, 'maskoutliers', default=False)
+	except Exception as e: _throw('Invalid optional maskoutliers', e)
+
+	if not rank and mask_outliers: print 'Will exclude outlier arrival times'
 
 	try: fresnel = config.get(tsec, 'fresnel', mapper=float, default=None)
 	except Exception as e: _throw('Invalid optional fresnel', e)
-
-	if limits:
-		if len(limits) != 2:
-			_throw('Optional limits must be a two-element list')
-		# Define a validity filter for arrival times
-		limits = sorted(limits)
-		if not rank: print 'Restricting arrival times to average slowness in', limits
-		def atfilt(v, t, r):
-			# Sanity check
-			if t == r: return False
-			# Find average straight-ray slowness, if possible
-			try: aslw = v / norm(elements[t] - elements[r])
-			except KeyError: return False
-			return limits[0] <= aslw <= limits[1]
-	else: atfilt = None
 
 	try:
 		# Look for local files and determine local share
@@ -735,8 +741,9 @@ if __name__ == "__main__":
 		# Determine the local shares of every file
 		tfiles = flocshare(tfiles, MPI.COMM_WORLD)
 		# Pull out local share of locally available arrival times
-		atimes = dict(kp for tf, (st, ln) in tfiles.iteritems()
-				for kp in getatimes(tf, 0, atfilt, st, ln).iteritems())
+		atimes = { }
+		for tf, (st, ln) in tfiles.iteritems():
+			atimes.update(getatimes(tf, elements, 0, mask_outliers, st, ln))
 	except Exception as e: _throw('Configuration must specify valid timefile', e)
 
 	if piecewise:
@@ -757,8 +764,8 @@ if __name__ == "__main__":
 		cshare = BentRayTracer(elements, atimes, tracer, fresnel,
 					slowdef, linear, MPI.COMM_WORLD)
 
-		# Compute random updates to the image; SGD can use value limits
-		ns = cshare.sgd(slw, mfilter=mfilter, limits=limits, **bropts)
+		# Compute random updates to the image
+		ns = cshare.sgd(slw, mfilter=mfilter, **bropts)
 	else:
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes,
