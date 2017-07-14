@@ -675,8 +675,10 @@ if __name__ == "__main__":
 	try:
 		# Pull a range of valid sound speeds for clipping
 		vclip = config.getlist(tsec, 'vclip', mapper=float, default=None)
-		if vclip and len(vclip) != 2:
-			raise ValueError('Range must specify two elements')
+		if vclip:
+			if len(vclip) != 2:
+				raise ValueError('Range must specify two elements')
+			elif not rank: print 'Will limit average path speeds to', vclip
 	except Exception as e:
 		_throw('Invalid optional vclip', e)
 

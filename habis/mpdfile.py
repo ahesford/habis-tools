@@ -40,6 +40,7 @@ def getatimes(atfile, elements, column=0, backscatter=True,
 	'''
 	from .formats import loadkeymat
 	from numpy.linalg import norm
+	from numpy import percentile
 
 	if not 0 <= start < stride:
 		raise ValueError('Index start must be at least zero and less than stride')
@@ -87,7 +88,7 @@ def getatimes(atfile, elements, column=0, backscatter=True,
 	else: mask_outliers = float(mask_outliers)
 
 	# Define outlier limits
-	q1, q3 = np.percentile(spdvals, [25, 75])
+	q1, q3 = percentile(spdvals, [25, 75])
 	iqr = q3 - q1
 	lo, hi = q1 - mask_outliers * iqr, q3 + mask_outliers * iqr
 
