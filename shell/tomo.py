@@ -35,72 +35,9 @@ from pycwp.cytools.boxer import Segment3D
 from habis.pathtracer import PathTracer
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
-from habis.formats import loadkeymat as ldkmat, loadmatlist as ldmats
-from habis.mpdfile import flocshare
+from habis.formats import loadmatlist as ldmats
+from habis.mpdfile import flocshare, getatimes
 from habis.slowness import Slowness, MaskedSlowness, PiecewiseSlowness
-
-
-def getatimes(atfile, elements, column=0, mask_outliers=False, start=0, stride=1):
-	'''
-	Read the 2-key arrival-time map with name atfile and remove
-	backscatter entries for which key[0] == key[1]. The map is always
-	treated as a multi-value map (i.e., 'scalar' is False in loadkeymat).
-	The column argument specifies which value index should be retained.
-
-	Arrival times are ignored if elements[t] or elements[r] does not exist.
-	If mask_outliers is True or a positive floating-point value, arrival
-	times that correspond to outlier average speeds---those that fall more
-	than M * IQR below the first quartile or above the third quartile,
-	where M is 1.5 is mask_outliers is True or the float value of
-	mask_outliers otherwise---will be excluded from the arrival-time list.
- 
-	Only every stride-th *valid* record, starting with the start-th such
-	record, is retained.
-	'''
-	if not 0 <= start < stride:
-		raise ValueError('Index start must be at least zero and less than stride')
-
-	# Load the map, eliminate invalid elemenets, and keep the right portion
-	atimes = { }
-	idx = 0
-
-	if mask_outliers: 
-		# Record element distances and all speed values for filtering
-		spdvals = [ ]
-		eldists = { }
-
-	for (t, r), v in ldkmat(atfile, nkeys=2, scalar=False).iteritems():
-		# Ignore backscatter and invalid waveforms
-		if t == r: continue
-
-		try: elt, elr = elements[t], elements[r]
-		except KeyError: continue
-
-		# Grab the relevant time
-		time = v[column]
-		# Keep every stride-th valid record
-		if idx % stride == start: atimes[t,r] = time
-		# Increment the valid record count
-		idx += 1
-
-		# Record all times for outlier exclusion
-		if mask_outliers: 
-			eldists[t,r] = norm(elt - elr)
-			spdvals.append(eldists[t,r] / time)
-
-	if not mask_outliers: return atimes
-
-	if isinstance(mask_outliers, bool): mask_outliers = 1.5
-	else: mask_outliers = float(mask_outliers)
-
-	# Define outlier limits
-	q1, q3 = np.percentile(spdvals, [25, 75])
-	iqr = q3 - q1
-	lo, hi = q1 - mask_outliers * iqr, q3 + mask_outliers * iqr
-
-	# Filter arrival times to remove outliers
-	return { (t, r): v for (t, r), v in atimes.iteritems()
-				if lo <= eldists[t,r] / v <= hi }
 
 
 class TomographyTask(object):
@@ -736,6 +673,14 @@ if __name__ == "__main__":
 	except Exception as e: _throw('Invalid optional fresnel', e)
 
 	try:
+		# Pull a range of valid sound speeds for clipping
+		vclip = config.getlist(tsec, 'vclip', mapper=float, default=None)
+		if vclip and len(vclip) != 2:
+			raise ValueError('Range must specify two elements')
+	except Exception as e:
+		_throw('Invalid optional vclip', e)
+
+	try:
 		# Look for local files and determine local share
 		tfiles = matchfiles(config.getlist(tsec, 'timefile'))
 		# Determine the local shares of every file
@@ -743,7 +688,8 @@ if __name__ == "__main__":
 		# Pull out local share of locally available arrival times
 		atimes = { }
 		for tf, (st, ln) in tfiles.iteritems():
-			atimes.update(getatimes(tf, elements, 0, mask_outliers, st, ln))
+			atimes.update(getatimes(tf, elements, 0, False,
+						vclip, mask_outliers, st, ln))
 	except Exception as e: _throw('Configuration must specify valid timefile', e)
 
 	if piecewise:
