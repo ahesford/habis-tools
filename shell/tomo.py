@@ -577,6 +577,10 @@ class BentRayTracer(TomographyTask):
 			if ('scale' in rgwt and not (k + 1) % rgwt['every']
 					and rgwt['weight'] > rgwt['min']):
 				rgwt['weight'] *= rgwt['scale']
+				if rgwt['weight'] < rgwt['min']:
+					# Clip small regularizer weights, stop scaling
+					rgwt['weight'] = rgwt['min']
+					del rgwt['scale']
 
 		# Update the image
 		sp = s.perturb(x)
@@ -684,7 +688,7 @@ if __name__ == "__main__":
 
 	try:
 		# Look for local files and determine local share
-		tfiles = matchfiles(config.getlist(tsec, 'timefile'))
+		tfiles = matchfiles(config.getlist(tsec, 'timefile'), forcematch=False)
 		# Determine the local shares of every file
 		tfiles = flocshare(tfiles, MPI.COMM_WORLD)
 		# Pull out local share of locally available arrival times

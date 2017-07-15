@@ -118,7 +118,7 @@ def tracerEngine(config):
 		raise HabisConfigError.fromException(msg + ' in [%s]' % (sec,), e)
 
 	# Find all arrival-time maps visible to this node
-	try: timefiles = matchfiles(config.getlist(tsec, 'timefile'))
+	try: timefiles = matchfiles(config.getlist(tsec, 'timefile'), forcematch=False)
 	except Exception as e: _throw('Configuration must specify timefile', e)
 
 	try: targidx = config.get(tsec, 'targidx', mapper=int, default=0)
