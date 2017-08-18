@@ -17,6 +17,7 @@ from itertools import izip
 from pycwp.cytools.boxer import Box3D, Segment3D
 from pycwp.boxer import Octree
 from pycwp.cytools.interpolator import LinearInterpolator3D
+from pycwp.cytools import quadrature
 
 from .habiconf import HabisConfigParser, HabisConfigError
 
@@ -726,3 +727,67 @@ class PathTracer(object):
 		# Accumulate the contributions to each cell
 		# Return the path map and the path-length integral
 		return { k: fsum(v) for k, v in plens.iteritems() }, pint
+
+
+def srcompensate(trpairs, elements, bx, si, N):
+	'''
+	For a given list of (t, r) pairs trpairs that describe transmit-receive
+	indices into elements, a coordinate grid defined by the Box3D bx, an
+	interpolated slowness image si (as an Interpolator3D instance) defined
+	on the grid, and a desired quadrature order N, return a list of tuples
+	(I, dl, rn) for each entry in trpairs, where I is the compensated
+	straight-ray arrival time, dl is the unit direction of the straight-ray
+	path from elements[t] to elements[r], and rn is the final wavefront
+	normal at the receiver.
+	'''
+	# Verify grid
+	cell = np.array(bx.cell)
+	if bx.ncell != si.shape:
+		raise ValueError('Grid of bx and si must match')
+
+	# Build the quadrature weights
+	glwts = [ quadrature.glpair(N, i) for i in xrange(N) ]
+
+	# Trace the paths one-by-one
+	results = [ ]
+	for t, r in trpairs:
+		ival = 0.
+		# Find element coordinates and convert to grid coordinates
+		tx = np.array(elements[t])
+		rx = np.array(elements[r])
+		tg = np.array(bx.cart2cell(*tx))
+		rg = np.array(bx.cart2cell(*rx))
+
+		# Find unit direction and length of path
+		dl = rx - tx
+		L = norm(dl)
+		dl /= L
+
+		# Initial wavefront normal is direction vector
+		lu = 0.
+		ln = dl
+
+		# First evaluation point is transmitter
+		x = tg
+		sv, svg = si.evaluate(*x)
+		# Scale gradient properly
+		svg = (cell * svg) / sv
+		# Find wavefront "drift"
+		ndl = np.dot(ln, dl)
+
+		for gl in glwts:
+			# Next evaluation point
+			ru = 0.5 * (gl.x() + 1.)
+			# New wavefront normal (renormalized) and "drift"
+			ln = ln + (ru - lu) * L * svg / ndl
+			ln /= norm(ln)
+			ndl = np.dot(ln, dl)
+			# New evaluation point and function evaluation
+			x = (1. - ru) * tg + ru * rg
+			sv, svg = si.evaluate(*x)
+			svg = (cell * svg) / sv
+			# Update total integral
+			ival += 0.5 * gl.weight * ndl * sv
+			lu = ru
+		results.append((L * ival, dl, ln))
+	return results
