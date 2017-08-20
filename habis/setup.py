@@ -3,8 +3,16 @@
 
 def configuration(parent_package='', top_path=None):
 	from numpy.distutils.misc_util import Configuration
+	from Cython.Build import cythonize
+	from pycwp import cytools
+	import os
 
 	config = Configuration('habis', parent_package, top_path)
+
+	cyfiles = [os.path.join(d, '*.pyx') for d in config.package_dir.itervalues()]
+
+	for ext in cythonize(cyfiles):
+		config.ext_modules.append(ext)
 
 	return config
 
