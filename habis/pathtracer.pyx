@@ -202,7 +202,8 @@ cdef class PathIntegrator(Integrable):
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
-	def pathint(self, points, double tol, h=1.0, bint grad=False):
+	def pathint(self, points, double tol, h=1.0,
+			bint grad=False, unsigned int gkord=0):
 		'''
 		Given control points specified as rows of an N-by-3 array of
 		grid coordinates, use an adaptive Simpson's rule to integrate
@@ -231,6 +232,12 @@ cdef class PathIntegrator(Integrable):
 		convention, igrad[0] and igrad[N - 1] are identically zero. If
 		the input array points was a 1-D flattened version of points,
 		the output igrad will be similarly flattened in C order.
+
+		If gkord is nonzero, adaptive Gauss-Kronrod quadrature of order
+		gkord will be used to compute path integrals. Otherwise, if
+		gkord is 0, adaptive Simpson quadrature (which re-uses function
+		evaluations at sub-interval endpoints and may be more
+		efficient) will be used.
 
 		If the second dimension of points does not have length three,
 		or if any control point falls outside the interpolation grid,
@@ -296,18 +303,21 @@ cdef class PathIntegrator(Integrable):
 		ctx.a = packpt(pts[0,0], pts[0,1], pts[0,2])
 		# The integrand ignores ctx.b when u is 0
 		ctx.b = ctx.a
-		# Evaluate the integrand at the left endpoint
-		if not self.integrand(ends, 0., <void *>(&ctx)):
+		# Evaluate the integrand at the left endpoint if needed
+		if not (gkord or self.integrand(ends, 0., <void *>(&ctx))):
 			raise ValueError('Cannot evaluate integrand at point %s' % (pt2tup(ctx.a),))
 
 		for i in range(1, npts):
 			# Initialize the right point
 			ctx.b = packpt(pts[i,0], pts[i,1], pts[i,2])
-			if not self.integrand(&(ends[nval]), 1., <void *>&(ctx)):
+			# Evalute integrand at left endpoint if needed
+			if not (gkord or self.integrand(&(ends[nval]), 1., <void *>&(ctx))):
 				raise ValueError('Cannot evaluate integrand at point %s' % (pt2tup(ctx.b),))
 			# Calculate integrals over the segment
-			if not self.simpson(results, nval, tol, <void *>(&ctx), ends):
-				raise ValueError('Cannot evaluate integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
+			if not (gkord or self.simpson(results, nval, tol, <void *>(&ctx), ends)):
+				raise ValueError('Cannot evaluate Simpson integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
+			elif gkord and not self.gausskron(results, nval, gkord, tol, <void *>(&ctx)):
+				raise ValueError('Cannot evaluate Gauss-Kronrod integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
 
 			# Scale coordinate axes
 			bah = axpy(-1.0, ctx.b, ctx.a)
@@ -396,6 +406,7 @@ cdef class PathIntegrator(Integrable):
 		else:
 			if not self.data._evaluate(&fv, <point *>NULL, p): return False
 			results[0] = fv
+
 		return True
 
 
