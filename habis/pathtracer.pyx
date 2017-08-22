@@ -27,7 +27,14 @@ from libc.stdlib cimport rand, RAND_MAX, malloc, free
 
 from pycwp.cytools.ptutils cimport *
 from pycwp.cytools.interpolator cimport Interpolator3D
-from pycwp.cytools.quadrature cimport Integrable
+from pycwp.cytools.quadrature cimport Integrable, IntegrableStatus
+
+ctypedef enum WNErrCode:
+	OK=0,
+	NORMAL_SEARCH_FAILED,
+	FUNCTION_VANISHES,
+	NORMAL_VANISHES,
+	CACHE_NORMAL_FAILED
 
 cdef long findrnrm(double *nrms, unsigned long n, double u) nogil:
 	'''
@@ -103,6 +110,7 @@ ctypedef struct PathIntContext:
 ctypedef struct WaveNormIntContext:
 	point a, b, h
 	int nmax, n, cycles, bad_resets
+	WNErrCode custom_retcode
 	double *normals
 
 class TraceError(Exception): pass
@@ -115,6 +123,22 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	'''
 	cdef readonly Interpolator3D data
 
+	@classmethod
+	def errmsg(cls, IntegrableStatus code, WNErrCode subcode):
+		'''
+		Override Integrable.errmsg to process custom codes.
+		'''
+		if code != IntegrableStatus.CUSTOM_RETURN:
+			return super(WavefrontNormalIntegrator, cls).errmsg(code)
+
+		return {
+				NORMAL_SEARCH_FAILED: 'Invalid index in binary search',
+				FUNCTION_VANISHES: 'Integrand vanishes at evaluation point',
+				NORMAL_VANISHES: 'Wavefront normal vanishes at evaluation point',
+				CACHE_NORMAL_FAILED: 'Unable to cache wavefront normal',
+			}.get(subcode, 'Unknown error')
+
+
 	def __init__(self, Interpolator3D data):
 		'''
 		Create a new WavefrontNormalIntegrator to evaluate integrals
@@ -125,7 +149,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	@cython.boundscheck(False)
 	@cython.wraparound(False)
 	@cython.cdivision(True)
-	cdef bint integrand(self, double *results, double u, void *ctx) nogil:
+	cdef IntegrableStatus integrand(self, double *results, double u, void *ctx) nogil:
 		'''
 		Override Integrable.integrand to evaluate the value of the
 		interpolated function self.data at a fractional point u along
@@ -144,7 +168,8 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			long uidx
 
 		# A context is necessary for integration
-		if wctx == <WaveNormIntContext *>NULL: return False
+		if wctx == <WaveNormIntContext *>NULL:
+			return IntegrableStatus.INTEGRAND_MISSING_CONTEXT
 
 		# Compute direction vector (scale grid coordinates to real)
 		ba = axpy(-1, wctx.a, wctx.b)
@@ -154,9 +179,9 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		if almosteq(L, 0.0):
 			# For a zero-length interval, just evaluate at the start
 			if not self.data._evaluate(&fv, <point *>NULL, wctx.a):
-				return False
+				return IntegrableStatus.INTEGRAND_EVALUATION_FAILED
 			results[0] = results[1] = fv
-			return True
+			return IntegrableStatus.OK
 
 		iscal(1 / L, &ba)
 
@@ -174,14 +199,19 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			rnp = &(wctx.normals[4 * uidx])
 			refu = rnp[0]
 			refnrm = packpt(rnp[1], rnp[2], rnp[3])
-		else: return False
+		else:
+			wctx.custom_retcode = NORMAL_SEARCH_FAILED
+			return IntegrableStatus.CUSTOM_RETURN
 
 		# Evaluate the integrand at the pont of interest
 		p = lintp(u, wctx.a, wctx.b)
-		if not self.data._evaluate(&fv, &gf, p): return False
+		if not self.data._evaluate(&fv, &gf, p):
+			return IntegrableStatus.INTEGRAND_EVALUATION_FAILED
 
 		# Scale gradient properly for wavefront normal tracking
-		if almosteq(fv, 0.0): return False
+		if almosteq(fv, 0.0):
+			wctx.custom_retcode = FUNCTION_VANISHES
+			return IntegrableStatus.CUSTOM_RETURN
 		iptmpy(wctx.h, &gf)
 		iscal(1 / fv, &gf)
 
@@ -190,7 +220,8 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		nrm = axpy(L * (u - refu) / dot(ba, refnrm), gf, refnrm)
 		rn = ptnrm(nrm)
 		if almosteq(rn, 0.0):
-			return False
+			wctx.custom_retcode = NORMAL_VANISHES
+			return IntegrableStatus.CUSTOM_RETURN
 		iscal(1 / rn, &nrm)
 
 		# Scale integrand by compensating factor
@@ -204,13 +235,15 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			uidx = wctx.n = shiftnrm(wctx.normals, wctx.n)
 			wctx.cycles += 1
 			# Something went wrong; zero-length cache?
-			if uidx >= wctx.nmax: return False
+			if uidx >= wctx.nmax:
+				wctx.custom_retcode = CACHE_NORMAL_FAILED
+				return IntegrableStatus.CUSTOM_RETURN
 		rnp = &(wctx.normals[4 * uidx])
 		rnp[0] = u
 		pt2arr(&(rnp[1]), nrm)
 		wctx.n = uidx + 1
 
-		return True
+		return IntegrableStatus.OK
 
 
 	@cython.wraparound(False)
@@ -254,7 +287,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			double ivals[2]
 			double L
 			point bah
-			bint rcode
+			IntegrableStatus rcode
 
 		# Initialize the integration context
 		tup2pt(&(ctx.a), a)
@@ -277,6 +310,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		# Storage for normal tracking
 		ctx.nmax = ncache
 		ctx.n = ctx.cycles = ctx.bad_resets = 0
+		ctx.custom_retcode = OK
 		if ctx.nmax > 0:
 			ctx.normals = <double *>malloc(4 * ctx.nmax * sizeof(double))
 			if ctx.normals == <double *>NULL:
@@ -287,13 +321,14 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		rcode = self.gausskron(ivals, 2, gkord, tol, <void *>(&ctx))
 		free(ctx.normals)
 
+		if rcode != IntegrableStatus.OK:
+			errmsg = self.errmsg(rcode, ctx.custom_retcode)
+			raise ValueError('Integration failed with error "%s"' % (errmsg,))
+
 		if ctx.bad_resets:
 			import warnings
 			warnings.warn('Waveform tracking unexpectedly reset '
 					'%d times; increase ncache to mitigate' % (ctx.bad_resets,))
-
-		if not rcode:
-			raise ValueError('Cannot evaluate Gauss-Kronrod integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
 
 		# Scale coordinate axes
 		bah = axpy(-1.0, ctx.b, ctx.a)
@@ -630,7 +665,7 @@ cdef class PathIntegrator(Integrable):
 	@cython.boundscheck(False)
 	@cython.wraparound(False)
 	@cython.cdivision(True)
-	cdef bint integrand(self, double *results, double u, void *ctx) nogil:
+	cdef IntegrableStatus integrand(self, double *results, double u, void *ctx) nogil:
 		'''
 		Override Integrable.integrand to evaluate the value of the
 		interpolated function self.data at a point along the segment
@@ -648,22 +683,25 @@ cdef class PathIntegrator(Integrable):
 			double fv
 
 		# Cannot integrate without context!
-		if sctx == <PathIntContext *>NULL: return False
+		if sctx == <PathIntContext *>NULL:
+			return IntegrableStatus.INTEGRAND_MISSING_CONTEXT
 
 		# Find the evaluation point
 		p = lintp(u, sctx.a, sctx.b)
 
 		if sctx.dograd:
-			if not self.data._evaluate(&fv, &gf, p): return False
+			if not self.data._evaluate(&fv, &gf, p):
+				return IntegrableStatus.INTEGRAND_EVALUATION_FAILED
 			mu = 1 - u
 			results[0] = fv
 			pt2arr(&(results[1]), scal(1 - u, gf))
 			pt2arr(&(results[4]), scal(u, gf))
 		else:
-			if not self.data._evaluate(&fv, <point *>NULL, p): return False
+			if not self.data._evaluate(&fv, <point *>NULL, p):
+				return IntegrableStatus.INTEGRAND_EVALUATION_FAILED
 			results[0] = fv
 
-		return True
+		return IntegrableStatus.OK
 
 
 class PathTracer(object):
