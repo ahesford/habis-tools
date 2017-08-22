@@ -31,10 +31,10 @@ from pycwp.cytools.quadrature cimport Integrable, IntegrableStatus
 
 ctypedef enum WNErrCode:
 	OK=0,
-	NORMAL_SEARCH_FAILED,
+	BINARY_SEARCH_FAILED,
 	FUNCTION_VANISHES,
 	NORMAL_VANISHES,
-	CACHE_NORMAL_FAILED
+	UNABLE_TO_CACHE
 
 cdef long findrnrm(double *nrms, unsigned long n, double u) nogil:
 	'''
@@ -132,10 +132,10 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			return super(WavefrontNormalIntegrator, cls).errmsg(code)
 
 		return {
-				NORMAL_SEARCH_FAILED: 'Invalid index in binary search',
-				FUNCTION_VANISHES: 'Integrand vanishes at evaluation point',
-				NORMAL_VANISHES: 'Wavefront normal vanishes at evaluation point',
-				CACHE_NORMAL_FAILED: 'Unable to cache wavefront normal',
+				WNErrCode.BINARY_SEARCH_FAILED: 'Invalid index in binary search',
+				WNErrCode.FUNCTION_VANISHES: 'Function vanishes at evaluation point',
+				WNErrCode.NORMAL_VANISHES: 'Wavefront normal vanishes at evaluation point',
+				WNErrCode.UNABLE_TO_CACHE: 'Cannot add entry to cache',
 			}.get(subcode, 'Unknown error')
 
 
@@ -200,7 +200,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			refu = rnp[0]
 			refnrm = packpt(rnp[1], rnp[2], rnp[3])
 		else:
-			wctx.custom_retcode = NORMAL_SEARCH_FAILED
+			wctx.custom_retcode = WNErrCode.BINARY_SEARCH_FAILED
 			return IntegrableStatus.CUSTOM_RETURN
 
 		# Evaluate the integrand at the pont of interest
@@ -210,7 +210,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 
 		# Scale gradient properly for wavefront normal tracking
 		if almosteq(fv, 0.0):
-			wctx.custom_retcode = FUNCTION_VANISHES
+			wctx.custom_retcode = WNErrCode.FUNCTION_VANISHES
 			return IntegrableStatus.CUSTOM_RETURN
 		iptmpy(wctx.h, &gf)
 		iscal(1 / fv, &gf)
@@ -220,7 +220,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		nrm = axpy(L * (u - refu) / dot(ba, refnrm), gf, refnrm)
 		rn = ptnrm(nrm)
 		if almosteq(rn, 0.0):
-			wctx.custom_retcode = NORMAL_VANISHES
+			wctx.custom_retcode = WNErrCode.NORMAL_VANISHES
 			return IntegrableStatus.CUSTOM_RETURN
 		iscal(1 / rn, &nrm)
 
@@ -236,7 +236,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			wctx.cycles += 1
 			# Something went wrong; zero-length cache?
 			if uidx >= wctx.nmax:
-				wctx.custom_retcode = CACHE_NORMAL_FAILED
+				wctx.custom_retcode = WNErrCode.UNABLE_TO_CACHE
 				return IntegrableStatus.CUSTOM_RETURN
 		rnp = &(wctx.normals[4 * uidx])
 		rnp[0] = u
@@ -310,7 +310,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		# Storage for normal tracking
 		ctx.nmax = ncache
 		ctx.n = ctx.cycles = ctx.bad_resets = 0
-		ctx.custom_retcode = OK
+		ctx.custom_retcode = WNErrCode.OK
 		if ctx.nmax > 0:
 			ctx.normals = <double *>malloc(4 * ctx.nmax * sizeof(double))
 			if ctx.normals == <double *>NULL:
