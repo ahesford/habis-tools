@@ -121,7 +121,9 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		# A context is necessary for integration
 		if wctx == <WaveNormIntContext *>NULL: return False
 
+		# Compute direction vector (scale grid coordinates to real)
 		ba = axpy(-1, wctx.a, wctx.b)
+		iptmpy(wctx.h, &ba)
 		L = ptnrm(ba)
 
 		if almosteq(L, 0.0):
@@ -201,7 +203,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		efficient) will be used.
 
 		The return value is a tuple (I1, I2), where I1 is the
-		compensated integral, and I2 is the uncompensated straight-ray
+		compensated integral and I2 is the uncompensated straight-ray
 		integral.
 		'''
 		cdef:
