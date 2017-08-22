@@ -65,6 +65,31 @@ cdef long findrnrm(double *nrms, unsigned long n, double u) nogil:
 	return first - 1
 
 
+cdef long shiftnrm(double *nrms, unsigned long n) nogil:
+	'''
+	For an array of (4 * n) doubles nrms, shift the right half of the array
+	to the left so that
+
+		nrms[4*I:4*(I+1)] = nrms[4*(I+n/2+(n%2)):4*(I+1+n/2+(n%2)]
+
+	for I in [0, n/2).
+
+	The value n/2 is returned.
+	'''
+	if n < 2: return 0
+
+	cdef long off, i, n2, i4, is4
+
+	n2 = n / 2
+
+	# Find the offset and copy the range, remembering 4 values per index
+	off = 4 * (n2 + (n % 2))
+	for i in range(4 * n2):
+		nrms[i] = nrms[i + off]
+
+	return n2
+
+
 cdef inline double randf() nogil:
 	'''
 	Return a sample of a uniform random variable in the range [0, 1].
@@ -77,7 +102,7 @@ ctypedef struct PathIntContext:
 
 ctypedef struct WaveNormIntContext:
 	point a, b, h
-	int nmax, n
+	int nmax, n, cycles, bad_resets
 	double *normals
 
 class TraceError(Exception): pass
@@ -137,7 +162,10 @@ cdef class WavefrontNormalIntegrator(Integrable):
 
 		# Find the reference for wavefront normal tracking
 		uidx = findrnrm(wctx.normals, wctx.n, u)
-		if uidx < 0:
+		if uidx == -1:
+			if wctx.cycles:
+				# This reset is undesirable
+				wctx.bad_resets += 1
 			# Reset reference to start of path
 			refu = 0.
 			refnrm = ba
@@ -171,7 +199,12 @@ cdef class WavefrontNormalIntegrator(Integrable):
 
 		# Add the new normal to the cache
 		uidx += 1
-		if uidx >= wctx.nmax: return False
+		if uidx >= wctx.nmax:
+			# Cache too large, shift second half
+			uidx = wctx.n = shiftnrm(wctx.normals, wctx.n)
+			wctx.cycles += 1
+			# Something went wrong; zero-length cache?
+			if uidx >= wctx.nmax: return False
 		rnp = &(wctx.normals[4 * uidx])
 		rnp[0] = u
 		pt2arr(&(rnp[1]), nrm)
@@ -183,7 +216,8 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
-	def pathint(self, a, b, double tol, h=1.0, unsigned int gkord=7):
+	def pathint(self, a, b, double tol, h=1.0,
+			unsigned int gkord=7, unsigned int ncache=512):
 		'''
 		Given a 3-D path from point a to point b, in grid coordinates,
 		use an adaptive Gauss-Kronrod quadrature of order gkord to
@@ -196,11 +230,20 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		h is a sequence of three floats, its values define the scaling
 		in x, y and z, respectively.
 
-		If gkord is nonzero, adaptive Gauss-Kronrod quadrature of order
-		gkord will be used to compute path integrals. Otherwise, if
-		gkord is 0, adaptive Simpson quadrature (which re-uses function
-		evaluations at sub-interval endpoints and may be more
-		efficient) will be used.
+		To evaluate the compensation term in the integrand, estimates
+		of the wavefront normal are continually updated with a
+		correction that arises from the most recent (best) estimate
+		at the nearest evaluation point that precedes the evaluation
+		point currently under consideration. This cache requires a
+		cache, with a size configurable by ncache. When the cache
+		fills, normals for early evaluation points (those nearest to
+		point a) will be discarded to make room for later points. When
+		a current evaluation point comes before all evaluation points
+		in the cache, the "best" estimate is "reset" by reverting to
+		the wavefront normal (which is coincident with the straight-ray
+		path) at point a. If this reset occurs after early cache values
+		have been discarded, accuracy may suffer and a warning will be
+		printed. Increase the size of ncache to mitigate this issue.
 
 		The return value is a tuple (I1, I2), where I1 is the
 		compensated integral and I2 is the uncompensated straight-ray
@@ -232,15 +275,22 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			ctx.h.x, ctx.h.y, ctx.h.z = float(h[0]), float(h[1]), float(h[2])
 
 		# Storage for normal tracking
-		ctx.nmax = 8192
-		ctx.n = 0
-		ctx.normals = <double *>malloc(4 * ctx.nmax * sizeof(double))
-		if ctx.normals == <double *>NULL:
-			raise MemoryError('Cannot allocate storage for normal tracking')
+		ctx.nmax = ncache
+		ctx.n = ctx.cycles = ctx.bad_resets = 0
+		if ctx.nmax > 0:
+			ctx.normals = <double *>malloc(4 * ctx.nmax * sizeof(double))
+			if ctx.normals == <double *>NULL:
+				raise MemoryError('Cannot allocate storage for normal tracking')
+		else: ctx.normals = <double *>NULL
 
 		# Integrate and free normal storage
 		rcode = self.gausskron(ivals, 2, gkord, tol, <void *>(&ctx))
 		free(ctx.normals)
+
+		if ctx.bad_resets:
+			import warnings
+			warnings.warn('Waveform tracking unexpectedly reset '
+					'%d times; increase ncache to mitigate' % (ctx.bad_resets,))
 
 		if not rcode:
 			raise ValueError('Cannot evaluate Gauss-Kronrod integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
