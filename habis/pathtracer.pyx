@@ -23,11 +23,47 @@ from pycwp.cytools.boxer import Box3D
 
 from .habiconf import HabisConfigParser, HabisConfigError
 
-from libc.stdlib cimport rand, RAND_MAX
+from libc.stdlib cimport rand, RAND_MAX, malloc, free
 
 from pycwp.cytools.ptutils cimport *
 from pycwp.cytools.interpolator cimport Interpolator3D
 from pycwp.cytools.quadrature cimport Integrable
+
+cdef long findrnrm(double *nrms, unsigned long n, double u) nogil:
+	'''
+	Find the index I of the nearest refrence normal, where normals are
+	stored sequentially in the length-(4 * n) array as a sequence
+
+		nrms[4*I:4*(I+1)] = [un, nx, ny, nz],
+
+	such that nrms[4*I] is the largest value un that does not exceed u. The
+	array nrms should be sorted in increasing order by the values un.
+
+	If n <= 0 or nrms[0] > u, -1 is returned. Otherwise, a value in the
+	range [0, n) will be returned.
+	'''
+	if n < 1: return -1
+
+	cdef long first, last, middle, idx
+
+	first = 0
+	last = n - 1
+
+	# Check the last value first for convenience
+	if nrms[4 * last] < u: return last
+
+	# Perform a binary search
+	middle = (first + last) / 2
+	while first <= last:
+		idx = 4 * middle
+		if nrms[idx] < u:
+			first = middle + 1
+		else: last = middle - 1
+		middle = (first + last) / 2
+
+	# First should point to the first value not less than u
+	return first - 1
+
 
 cdef inline double randf() nogil:
 	'''
@@ -36,11 +72,184 @@ cdef inline double randf() nogil:
 	return <double>rand() / <double>RAND_MAX
 
 ctypedef struct PathIntContext:
-	point a
-	point b
+	point a, b
 	bint dograd
 
+ctypedef struct WaveNormIntContext:
+	point a, b, h
+	int nmax, n
+	double *normals
+
 class TraceError(Exception): pass
+
+cdef class WavefrontNormalIntegrator(Integrable):
+	'''
+	A class that holds a reference to an Interpolator3D instance and can
+	integrate over straight-ray paths through the grid represented by the
+	instance, compensating the integral by tracking the wavefront normal.
+	'''
+	cdef readonly Interpolator3D data
+
+	def __init__(self, Interpolator3D data):
+		'''
+		Create a new WavefrontNormalIntegrator to evaluate integrals
+		through the interpolated function represented by data.
+		'''
+		self.data = data
+
+	@cython.boundscheck(False)
+	@cython.wraparound(False)
+	@cython.cdivision(True)
+	cdef bint integrand(self, double *results, double u, void *ctx) nogil:
+		'''
+		Override Integrable.integrand to evaluate the value of the
+		interpolated function self.data at a fractional point u along
+		the segment from ctx.a to ctx.b (with ctx as a
+		WaveNormIntContext struct), with and without a correction based
+		on the angle between the estimated wavefront normal and the
+		straight-ray path.
+
+		The output array results must have length 2.
+		'''
+		cdef:
+			WaveNormIntContext *wctx = <WaveNormIntContext *>ctx
+			point p, gf, nrm, refnrm, ba
+			double fv, refu, L, rn
+			double *rnp
+			long uidx
+
+		# A context is necessary for integration
+		if wctx == <WaveNormIntContext *>NULL: return False
+
+		ba = axpy(-1, wctx.a, wctx.b)
+		L = ptnrm(ba)
+
+		if almosteq(L, 0.0):
+			# For a zero-length interval, just evaluate at the start
+			if not self.data._evaluate(&fv, <point *>NULL, wctx.a):
+				return False
+			results[0] = results[1] = fv
+			return True
+
+		iscal(1 / L, &ba)
+
+		# Find the reference for wavefront normal tracking
+		uidx = findrnrm(wctx.normals, wctx.n, u)
+		if uidx < 0:
+			# Reset reference to start of path
+			refu = 0.
+			refnrm = ba
+		elif uidx < wctx.nmax:
+			# Use cached value as reference
+			rnp = &(wctx.normals[4 * uidx])
+			refu = rnp[0]
+			refnrm = packpt(rnp[1], rnp[2], rnp[3])
+		else: return False
+
+		# Evaluate the integrand at the pont of interest
+		p = lintp(u, wctx.a, wctx.b)
+		if not self.data._evaluate(&fv, &gf, p): return False
+
+		# Scale gradient properly for wavefront normal tracking
+		if almosteq(fv, 0.0): return False
+		iptmpy(wctx.h, &gf)
+		iscal(1 / fv, &gf)
+
+		# Update the wavefront normal
+		# TODO: Should this be gf at refu instead of u?
+		nrm = axpy(L * (u - refu) / dot(ba, refnrm), gf, refnrm)
+		rn = ptnrm(nrm)
+		if almosteq(rn, 0.0):
+			return False
+		iscal(1 / rn, &nrm)
+
+		# Scale integrand by compensating factor
+		results[0] = fv * dot(nrm, ba)
+		results[1] = fv
+
+		# Add the new normal to the cache
+		uidx += 1
+		if uidx >= wctx.nmax: return False
+		rnp = &(wctx.normals[4 * uidx])
+		rnp[0] = u
+		pt2arr(&(rnp[1]), nrm)
+		wctx.n = uidx + 1
+
+		return True
+
+
+	@cython.wraparound(False)
+	@cython.boundscheck(False)
+	@cython.cdivision(True)
+	def pathint(self, a, b, double tol, h=1.0, unsigned int gkord=7):
+		'''
+		Given a 3-D path from point a to point b, in grid coordinates,
+		use an adaptive Gauss-Kronrod quadrature of order gkord to
+		integrate the image associated with self.data along the path,
+		with a correction based on tracking of wavefront normals.
+
+		The argument h may be a scalar float or a 3-D sequence of
+		floats that defines the grid spacing in world Cartesian
+		coordinates. If h is scalar, it is interpreted as [h, h, h]. If
+		h is a sequence of three floats, its values define the scaling
+		in x, y and z, respectively.
+
+		If gkord is nonzero, adaptive Gauss-Kronrod quadrature of order
+		gkord will be used to compute path integrals. Otherwise, if
+		gkord is 0, adaptive Simpson quadrature (which re-uses function
+		evaluations at sub-interval endpoints and may be more
+		efficient) will be used.
+
+		The return value is a tuple (I1, I2), where I1 is the
+		compensated integral, and I2 is the uncompensated straight-ray
+		integral.
+		'''
+		cdef:
+			WaveNormIntContext ctx
+			double ivals[2]
+			double L
+			point bah
+			bint rcode
+
+		# Initialize the integration context
+		tup2pt(&(ctx.a), a)
+		tup2pt(&(ctx.b), b)
+
+		if gkord < 2:
+			raise ValueError('Gauss-Kronrod order must be at least 2')
+
+		try:
+			nh = len(h)
+		except TypeError:
+			# A single scalar applies to all axes
+			ctx.h.x = ctx.h.y = ctx.h.z = float(h)
+		else:
+			# Axes scales are defined independently
+			if nh != 3:
+				raise ValueError('Argument "h" must be a scalar or 3-sequence')
+			ctx.h.x, ctx.h.y, ctx.h.z = float(h[0]), float(h[1]), float(h[2])
+
+		# Storage for normal tracking
+		ctx.nmax = 8192
+		ctx.n = 0
+		ctx.normals = <double *>malloc(4 * ctx.nmax * sizeof(double))
+		if ctx.normals == <double *>NULL:
+			raise MemoryError('Cannot allocate storage for normal tracking')
+
+		# Integrate and free normal storage
+		rcode = self.gausskron(ivals, 2, gkord, tol, <void *>(&ctx))
+		free(ctx.normals)
+
+		if not rcode:
+			raise ValueError('Cannot evaluate Gauss-Kronrod integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
+
+		# Scale coordinate axes
+		bah = axpy(-1.0, ctx.b, ctx.a)
+		iptmpy(ctx.h, &bah)
+		L = ptnrm(bah)
+
+		# Scale integrals properly
+		return ivals[0] * L, ivals[1] * L
 
 
 cdef class PathIntegrator(Integrable):
@@ -206,18 +415,13 @@ cdef class PathIntegrator(Integrable):
 			bint grad=False, unsigned int gkord=0):
 		'''
 		Given control points specified as rows of an N-by-3 array of
-		grid coordinates, use an adaptive Simpson's rule to integrate
-		the image associated with self.data along the piecewise linear
-		path between the points.
+		grid coordinates, use an adaptive quadrature to integrate the
+		image associated with self.data along the piecewise linear path
+		between the points.
 
 		As a convenience, points may also be a 1-D array of length 3N
 		that represents the two-dimensional array of points flattened
 		in C order.
-
-		Each segment of the path will be recursively subdivided until
-		integration converges to within tol or the recursion depth
-		exceeds a limit that ensures that step sizes do not fall
-		below machine precision.
 
 		The argument h may be a scalar float or a 3-D sequence of
 		floats that defines the grid spacing in world Cartesian
