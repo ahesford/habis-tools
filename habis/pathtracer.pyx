@@ -19,13 +19,14 @@ from numpy.linalg import norm
 
 from itertools import izip
 
-from pycwp.cytools.boxer import Box3D
-
 from .habiconf import HabisConfigParser, HabisConfigError
 
 from libc.stdlib cimport rand, RAND_MAX, malloc, free
 
+from pycwp.cytools.boxer import Box3D
+
 from pycwp.cytools.ptutils cimport *
+from pycwp.cytools.boxer cimport Box3D
 from pycwp.cytools.interpolator cimport Interpolator3D
 from pycwp.cytools.quadrature cimport Integrable, IntegrableStatus
 
@@ -109,7 +110,7 @@ ctypedef struct PathIntContext:
 
 ctypedef struct WaveNormIntContext:
 	point a, b, h
-	int nmax, n, cycles, bad_resets
+	long nmax, n, cycles, bad_resets
 	WNErrCode custom_retcode
 	double *normals
 
@@ -249,11 +250,11 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
-	def pathint(self, a, b, double tol, h=1.0,
-			unsigned int gkord=7, unsigned int ncache=512):
+	def pathint(self, a, b, double atol, double rtol,
+			h=1.0, unsigned int ncache=512):
 		'''
 		Given a 3-D path from point a to point b, in grid coordinates,
-		use an adaptive Gauss-Kronrod quadrature of order gkord to
+		use an adaptive Gauss-Kronrod quadrature of order 15 to
 		integrate the image associated with self.data along the path,
 		with a correction based on tracking of wavefront normals.
 
@@ -293,9 +294,6 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		tup2pt(&(ctx.a), a)
 		tup2pt(&(ctx.b), b)
 
-		if gkord < 2:
-			raise ValueError('Gauss-Kronrod order must be at least 2')
-
 		try:
 			nh = len(h)
 		except TypeError:
@@ -318,7 +316,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		else: ctx.normals = <double *>NULL
 
 		# Integrate and free normal storage
-		rcode = self.gausskron(ivals, 2, gkord, tol, <void *>(&ctx))
+		rcode = self.gausskron(ivals, 2, atol, rtol, 0., 1., <void *>(&ctx))
 		free(ctx.normals)
 
 		if rcode != IntegrableStatus.OK:
@@ -355,7 +353,8 @@ cdef class PathIntegrator(Integrable):
 
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
-	def minpath(self, start, end, unsigned long nmax, double itol, double ptol,
+	def minpath(self, start, end, unsigned long nmax,
+			double atol, double rtol, double ptol,
 			h=1.0, double perturb=0.0, unsigned long nstart=1,
 			bint warn_on_fail=True, bint raise_on_fail=False, **kwargs):
 		'''
@@ -366,7 +365,7 @@ cdef class PathIntegrator(Integrable):
 		The path will be iteratively divided into at most N segments,
 		where N = 2**M * nstart for the smallest integer M that is not
 		less than nmax. With each iteration, an optimal path is sought
-		by minimizing the object self.pathint(path, itol, h) with
+		by minimizing the object self.pathint(path, atol, rtol, h) with
 		respect to all points along the path apart from the fixed
 		points start and end. The resulting optimal path is subdivided
 		for the next iteration by inserting points that coincide with
@@ -431,7 +430,7 @@ cdef class PathIntegrator(Integrable):
 
 		# Compute the starting cost (and current best)
 		pbest = points
-		bf = lf = self.pathint(points, itol, h, False)
+		bf = lf = self.pathint(points, atol, rtol, h, False)
 
 		# Double perturbation length for a two-sided interval
 		if perturb > 0: perturb *= 2
@@ -470,8 +469,8 @@ cdef class PathIntegrator(Integrable):
 			points = npoints
 
 			# Optimize the interpolated path
-			xopt, nf, info = bfgs(self.pathint, points,
-					fprime=None, args=(itol, h, True), **kwargs)
+			xopt, nf, info = bfgs(self.pathint, points, fprime=None,
+						args=(atol, rtol, h, True), **kwargs)
 			points = xopt.reshape((n + 1, 3), order='C')
 
 			if info['warnflag']:
@@ -498,8 +497,8 @@ cdef class PathIntegrator(Integrable):
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
-	def pathint(self, points, double tol, h=1.0,
-			bint grad=False, unsigned int gkord=0):
+	def pathint(self, points, double atol, double rtol,
+			h=1.0, bint grad=False, bint gk=False):
 		'''
 		Given control points specified as rows of an N-by-3 array of
 		grid coordinates, use an adaptive quadrature to integrate the
@@ -524,11 +523,10 @@ cdef class PathIntegrator(Integrable):
 		the input array points was a 1-D flattened version of points,
 		the output igrad will be similarly flattened in C order.
 
-		If gkord is nonzero, adaptive Gauss-Kronrod quadrature of order
-		gkord will be used to compute path integrals. Otherwise, if
-		gkord is 0, adaptive Simpson quadrature (which re-uses function
-		evaluations at sub-interval endpoints and may be more
-		efficient) will be used.
+		If gk is True, adaptive Gauss-Kronrod quadrature will be used
+		to compute path integrals. Otherwise, adaptive Simpson
+		quadrature (which re-uses function evaluations at sub-interval
+		endpoints and may be more efficient) will be used.
 
 		If the second dimension of points does not have length three,
 		or if any control point falls outside the interpolation grid,
@@ -561,6 +559,8 @@ cdef class PathIntegrator(Integrable):
 			unsigned int nval
 			PathIntContext ctx
 			point bah
+
+			IntegrableStatus rcode
 
 			double L
 
@@ -595,20 +595,31 @@ cdef class PathIntegrator(Integrable):
 		# The integrand ignores ctx.b when u is 0
 		ctx.b = ctx.a
 		# Evaluate the integrand at the left endpoint if needed
-		if not (gkord or self.integrand(ends, 0., <void *>(&ctx))):
-			raise ValueError('Cannot evaluate integrand at point %s' % (pt2tup(ctx.a),))
+		if not gk:
+			rcode = self.integrand(ends, 0., <void *>(&ctx))
+			if rcode != IntegrableStatus.OK:
+				errmsg = self.errmsg(rcode)
+				raise ValueError('Integrand evaluation failed with message "%s"' % (errmsg,))
 
 		for i in range(1, npts):
 			# Initialize the right point
 			ctx.b = packpt(pts[i,0], pts[i,1], pts[i,2])
-			# Evalute integrand at left endpoint if needed
-			if not (gkord or self.integrand(&(ends[nval]), 1., <void *>&(ctx))):
-				raise ValueError('Cannot evaluate integrand at point %s' % (pt2tup(ctx.b),))
 			# Calculate integrals over the segment
-			if not (gkord or self.simpson(results, nval, tol, <void *>(&ctx), ends)):
-				raise ValueError('Cannot evaluate Simpson integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
-			elif gkord and not self.gausskron(results, nval, gkord, tol, <void *>(&ctx)):
-				raise ValueError('Cannot evaluate Gauss-Kronrod integral from %s -> %s' % (pt2tup(ctx.a), pt2tup(ctx.b)))
+			if not gk:
+				# Evalute integrand at left endpoint
+				rcode = self.integrand(&(ends[nval]), 1., <void *>&(ctx))
+				if rcode != IntegrableStatus.OK:
+					errmsg = self.errmsg(rcode)
+					raise ValueError('Integrand evaluation failed with message "%s"' % (errmsg,))
+				rcode = self.simpson(results, nval, atol, rtol, <void *>(&ctx), ends)
+				if rcode != IntegrableStatus.OK:
+					errmsg = self.errmsg(rcode)
+					raise ValueError('Simpson integration failed with message "%s"' % (errmsg,))
+			else:
+				rcode = self.gausskron(results, nval, atol, rtol, 0., 1., <void *>(&ctx))
+				if rcode != IntegrableStatus.OK:
+					errmsg = self.errmsg(rcode)
+					raise ValueError('Gauss-Kronrod integration failed with message "%s"' % (errmsg,))
 
 			# Scale coordinate axes
 			bah = axpy(-1.0, ctx.b, ctx.a)
@@ -757,7 +768,9 @@ class PathTracer(object):
 		try: ptol = config.get(psec, 'ptol', mapper=float, default=1e-3)
 		except Exception as e: _throw('Invalid optional ptol', e)
 
-		try: itol = config.get(psec, 'itol', mapper=float, default=1e-5)
+		try:
+			itol = config.getlist(psec, 'itol',
+					mapper=float, default=1e-5, checkmap=False)
 		except Exception as e: _throw('Invalid optional itol', e)
 
 		try: segmax = config.get(psec, 'segmax', mapper=int, default=256)
@@ -790,7 +803,11 @@ class PathTracer(object):
 
 		# Copy adaptive parameters
 		self.ptol = float(ptol)
-		self.itol = float(itol)
+		# Treat integration tolerance as a list, if possible
+		try: self.itol = [ float(iv) for iv in itol ]
+		except TypeError: self.itol = [ float(itol), 0. ]
+		if len(self.itol) != 2:
+			raise ValueError('Parameter "itol" must be scalar or length-2 sequence')
 		self.nmax = int(segmax)
 
 		# Copy the optimization arguments
@@ -804,8 +821,9 @@ class PathTracer(object):
 		world coordinates src and a receiver with world coordinates
 		rcv, trace an optimum path from src to rcv using
 
-		  PathIntegrator(si).minpath(gs, gr, self.nmax, self.itol,
-		  		self.ptol, self.box.cell, **self.optargs),
+		  PathIntegrator(si).minpath(gs, gr, self.nmax,
+				self.itol[0], self.itol[1], self.ptol, 
+				self.box.cell, **self.optargs),
 
 		where gs and gr are grid coordinates of src and rcv,
 		respectively, according to self.box.cart2cell.
@@ -839,8 +857,8 @@ class PathTracer(object):
 		grcv = box.cart2cell(*rcv)
 
 		# Use preconfigured options to evaluate minimum path
-		popt, pint = integrator.minpath(gsrc, grcv,
-				self.nmax, self.itol, self.ptol,
+		popt, pint = integrator.minpath(gsrc, grcv, self.nmax,
+				self.itol[0], self.itol[1], self.ptol,
 				box.cell, raise_on_fail=True, **self.optargs)
 
 		# If only the integral is desired, just return it
@@ -889,40 +907,58 @@ class PathTracer(object):
 		return { k: fsum(v) for k, v in plens.iteritems() }, pint
 
 
-def srcompensate(trpairs, elements, bx, si, N):
+@cython.cdivision(True)
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def srcompensate(trpairs, elements, Box3D bx, Interpolator3D si, long N):
 	'''
 	For a given list of (t, r) pairs trpairs that describe transmit-receive
 	indices into elements, a coordinate grid defined by the Box3D bx, an
 	interpolated slowness image si (as an Interpolator3D instance) defined
 	on the grid, and a desired quadrature order N, return a list of tuples
-	(I, dl, rn) for each entry in trpairs, where I is the compensated
+	(Ic, Is, dl, rn, errc, errs) for each entry in trpairs, where Ic is the
+	compensated straight-ray arrival time, Is is the uncompensated
 	straight-ray arrival time, dl is the unit direction of the straight-ray
-	path from elements[t] to elements[r], and rn is the final wavefront
-	normal at the receiver.
+	path from elements[t] to elements[r], rn is the final wavefront normal
+	at the receiver and err and errs are, respectively, error estimates for
+	the integrals Ic and Is.
 	'''
+	cdef:
+		long i, Ne
+		double sv, lu, ru, ndl, kwt, gwt, kval, gval, ksval, gsval, nln, L
+		point svg, tx, rx, tg, rg, dl, ln, x
+		double[:,:] weights
+
 	# Verify grid
-	cell = np.array(bx.cell)
 	if bx.ncell != si.shape:
 		raise ValueError('Grid of bx and si must match')
 
-	# Build the quadrature weights
-	from pycwp.cytools.quadrature import glpair
-	glwts = [ glpair(N, i) for i in xrange(N) ]
+	# Build the quadrature weights, converting intervals
+	from pycwp.cytools.quadrature import Integrable
+	gkwts = [(0.5 * (1. - nd), 0.5 * kw, 0.5 * gw)
+			for nd, kw, gw in Integrable.gkweights(N, 1e-8)]
+	gkwts.extend((1. - nd, kw, gw) for nd, kw, gw in reversed(gkwts[:N]))
+
+	weights = np.asarray(gkwts, dtype=np.float64)
+	Ne = weights.shape[0]
 
 	# Trace the paths one-by-one
 	results = [ ]
 	for t, r in trpairs:
-		ival = 0.
+		kval, gval, ksval, gsval = 0., 0., 0., 0.
+
 		# Find element coordinates and convert to grid coordinates
-		tx = np.array(elements[t])
-		rx = np.array(elements[r])
-		tg = np.array(bx.cart2cell(*tx))
-		rg = np.array(bx.cart2cell(*rx))
+		tup2pt(&tx, elements[t])
+		tup2pt(&rx, elements[r])
+		tg = bx._cart2cell(tx.x, tx.y, tx.z)
+		rg = bx._cart2cell(rx.x, rx.y, rx.z)
 
 		# Find unit direction and length of path
-		dl = rx - tx
-		L = norm(dl)
-		dl /= L
+		dl = axpy(-1., tx, rx)
+		L = ptnrm(dl)
+		if almosteq(L, 0.0):
+			raise ValueError('Path (%d, %d) is degenerate' % (t, r))
+		iscal(1 / L, &dl)
 
 		# Initial wavefront normal is direction vector
 		lu = 0.
@@ -930,25 +966,44 @@ def srcompensate(trpairs, elements, bx, si, N):
 
 		# First evaluation point is transmitter
 		x = tg
-		sv, svg = si.evaluate(*x)
+		if not si._evaluate(&sv, &svg, x):
+			raise ValueError('Cannot evaluate integrand at %s' % (pt2tup(x),))
+		if almosteq(sv, 0.0):
+			raise ValueError('Integrand vanishes at %s' % (pt2tup(x),))
 		# Scale gradient properly
-		svg = (cell * svg) / sv
+		iptmpy(bx._cell, &svg)
+		iscal(1 / sv, &svg)
 		# Find wavefront "drift"
-		ndl = np.dot(ln, dl)
+		ndl = dot(ln, dl)
 
-		for gl in glwts:
+		for i in range(Ne):
+			if almosteq(ndl, 0.0):
+				raise ValueError('Wavefront normal is orthogonal to path at %s' % (pt2tup(x),))
 			# Next evaluation point
-			ru = 0.5 * (gl.x() + 1.)
+			ru = weights[i,0]
+			kwt = weights[i,1]
+			gwt = weights[i,2]
 			# New wavefront normal (renormalized) and "drift"
-			ln = ln + (ru - lu) * L * svg / ndl
-			ln /= norm(ln)
-			ndl = np.dot(ln, dl)
+			iaxpy((ru - lu) * L / ndl, svg, &ln)
+			nln = ptnrm(ln)
+			if almosteq(nln, 0.0):
+				raise ValueError('Wavefront normal vanishes at %s' % (pt2tup(x),))
+			iscal(1 / nln, &ln)
+			ndl = dot(ln, dl)
 			# New evaluation point and function evaluation
-			x = (1. - ru) * tg + ru * rg
-			sv, svg = si.evaluate(*x)
-			svg = (cell * svg) / sv
-			# Update total integral
-			ival += 0.5 * gl.weight * ndl * sv
+			x = lintp(ru, tg, rg)
+			if not si._evaluate(&sv, &svg, x):
+				raise ValueError('Cannot evaluate integrand at %s' % (pt2tup(x),))
+			if almosteq(sv, 0.0):
+				raise ValueError('Integrand vanishes at %s' % (pt2tup(x),))
+			iptmpy(bx._cell, &svg)
+			iscal(1 / sv, &svg)
+			# Update total integrals
+			kval += kwt * ndl * sv
+			ksval += kwt * sv
+			gval += gwt * ndl * sv
+			gsval += gwt * sv
 			lu = ru
-		results.append((L * ival, dl, ln))
+		results.append((L * kval, L * ksval, pt2tup(dl), 
+			pt2tup(ln), L * abs(gval - kval), L * abs(gsval - ksval)))
 	return results
