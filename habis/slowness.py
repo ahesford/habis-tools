@@ -53,14 +53,26 @@ class Slowness(object):
 		return np.prod(self.shape)
 
 
-	def perturb(self, x):
+	def perturb(self, x, persist=False):
 		'''
 		Perturb the reference slowness by adding x, which must either
 		be a scalar or have shape compatible with self.shape. The input
 		x will be reshaped in row-major order to match the voxel grid.
+
+		If persist is True, the underlying slowness will be updated, so
+		that the sequence of calls
+
+			self.perturb(x, persist=True)
+			self.perturb(0)
+
+		will yield the same results.
 		'''
 		# Expand perturbation onto voxel grid, then add reference
 		out = self.unflatten(x) + self._s
+
+		# Save perturbation as new reference
+		if persist: self._s = np.array(out)
+
 		return out
 
 
@@ -264,13 +276,15 @@ class PiecewiseSlowness(Slowness):
 		return self._voxmap.shape[1]
 
 
-	def perturb(self, x):
+	def perturb(self, x, persist=False):
 		'''
 		Perturb the reference slowness by adding x, then expanding the
 		slowness values onto the grid according to the predefined voxel
 		map.
 		'''
-		return self.unflatten(self._s + x)
+		ux = self._s + x
+		if persist: self._s = ux
+		return self.unflatten(ux)
 
 
 	def clip(self, x, smin, smax):

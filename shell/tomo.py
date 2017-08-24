@@ -27,12 +27,11 @@ from itertools import izip
 from mpi4py import MPI
 
 from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
-from pycwp.cytools.interpolator import TraceError
 from pycwp.cytools.regularize import epr, totvar, tikhonov
 from pycwp.iterative import lsmr
 from pycwp.cytools.boxer import Segment3D
 
-from habis.pathtracer import PathTracer
+from habis.pathtracer import PathTracer, WavefrontNormalIntegrator, TraceError
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadmatlist as ldmats
@@ -116,6 +115,8 @@ class StraightRayTracer(TomographyTask):
 		indices = [ ]
 		data = [ ]
 		rhs = [ ]
+		trpairs = [ ]
+
 		for (t, r), v in sorted(self.atimes.iteritems()):
 			# March straight through the grid
 			seg = Segment3D(self.elements[t], self.elements[r])
@@ -135,10 +136,41 @@ class StraightRayTracer(TomographyTask):
 					indices.append(np.ravel_multi_index(cidx, ncell))
 			indptr.append(len(indices))
 			rhs.append(v)
+			trpairs.append((t, r))
 
 		self.pathmat = csr_matrix((data, indices, indptr),
 				shape=(len(rhs), np.prod(ncell)), dtype=np.float64)
 		self.rhs = np.array(rhs, dtype=np.float64)
+		self.trpairs = trpairs
+
+	def timeadjust(self, si, **kwargs):
+		'''
+		Adjust the arrival times in self.rhs with a corrective factor
+		that tracks wavefront normal directions using the method of
+		habis.pathtracer.WavefrontNormalIntegrator.
+
+		The argument si should be an Interpolator3D instance that
+		represents a slowness model used to adjust the times.
+
+		The keyword arguments kwargs are passed to the method
+		WavefrontNormalIntegrator.pathint to control the corrective
+		terms. The keyword "h" is forbidden.
+		'''
+		# Build the integrator
+		integrator = WavefrontNormalIntegrator(si)
+
+		# Compute the corrective factor for each (t, r) pair
+		cell = self.box.cell
+		adjustments = [ ]
+		for (t, r) in self.trpairs:
+			tx = bx.cart2cell(*self.elements[t])
+			rx = bx.cart2cell(*self.elements[r])
+			tc, ts = integrator.pathint(tx, rx, h=cell, **kwargs)
+			# Make sure corrected times are reasonable
+			tc = min(max(tc, self.atimes[t,r]), ts)
+			adjustments.append(tc - ts)
+
+		self.rhs -= adjustments
 
 	def lsmr(self, s, **kwargs):
 		'''
@@ -161,7 +193,13 @@ class StraightRayTracer(TomographyTask):
 		'coleq' keyword argument will not be provided to
 		pycwp.iterative.lsmr.
 
-		The return value will be the final, perturbed solution.
+		The return value will be the final, perturbed solution. If a
+		special kerwork argument, 'noexpand', is True, the solution
+		will be returned in a flattened representation suitable for
+		calls to s.update(); otherwise, the solution will be returned
+		as an unflattened array returned by a call to s.perturb(). The
+		'noexpand' argument will not be provided to
+		pycwp.iterative.lsmr.
 		'''
 		if not self.isRoot:
 			# Make sure non-root tasks are always silent
@@ -171,6 +209,7 @@ class StraightRayTracer(TomographyTask):
 			raise TypeError('Argument "calc_var" is forbidden')
 
 		coleq = kwargs.pop('coleq', False)
+		noexpand = kwargs.pop('noexpand', False)
 
 		ncell = self.box.ncell
 
@@ -219,7 +258,9 @@ class StraightRayTracer(TomographyTask):
 			print 'LSMR terminated after %d iterations for reason %d' % (results[2], results[1])
 
 		# Correct column scaling in perturbation solution
-		return s.perturb(results[0] / colscale)
+		rval = results[0] / colscale
+		if noexpand: return rval
+		else: return s.perturb(rval)
 
 
 class BentRayTracer(TomographyTask):
@@ -717,14 +758,44 @@ if __name__ == "__main__":
 					slowdef, linear, MPI.COMM_WORLD)
 
 		# Compute random updates to the image
-		ns = cshare.sgd(slw, mfilter=mfilter, **bropts)
+		ns = cshare.sgd(slw, mfilter=mfilter,
+				partial_output=partial_output, **bropts)
 	else:
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes,
 				tracer.box, fresnel, MPI.COMM_WORLD)
+
+		# Pull configuration for optional arrival-time compensation
+		adjopts = sropts.pop('adjustments', { })
+		partial_output = sropts.pop('partial_output', None)
+		rounds = adjopts.pop('rounds', 0)
+
+		if rounds and not rank:
+			print 'Will use %d rounds of arrival-time adjustments' % (rounds,)
+
 		# Pass configured options to the solver
-		ns = cshare.lsmr(slw, **sropts)
-		if mfilter: ns = median_filter(ns, size=mfilter)
+		ns = cshare.lsmr(slw, noexpand=True, **sropts)
+
+		for i in xrange(rounds):
+			# Update the solution with persistence
+			ns = slw.perturb(ns, persist=True)
+
+			# Build an interpolator for image
+			if mfilter: ns = median_filter(ns, size=mfilter)
+			if linear: si = LinearInterpolator3D(ns)
+			else: si = HermiteInterpolator3D(ns)
+			si.default = si.evaluate(0,0,0,False)
+
+			# Save the image, if desired
+			if partial_output:
+				fname = partial_output.format(iter=i)
+				np.save(fname, ns.astype(np.float32))
+
+			# Adjust times and solve again
+			cshare.timeadjust(si, **adjopts)
+			ns = cshare.lsmr(slw, noexpand=True, **sropts)
+
+		if mfilter: ns = median_filter(slw.perturb(ns), size=mfilter)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
