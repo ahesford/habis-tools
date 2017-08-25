@@ -12,6 +12,7 @@ import sys, os
 import numpy as np
 from numpy.linalg import norm
 
+import scipy.ndimage
 from scipy.ndimage import median_filter
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import LinearOperator, norm as snorm
@@ -26,7 +27,7 @@ from itertools import izip
 
 from mpi4py import MPI
 
-from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
+from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D, CubicInterpolator3D
 from pycwp.cytools.regularize import epr, totvar, tikhonov
 from pycwp.iterative import lsmr
 from pycwp.cytools.boxer import Segment3D
@@ -92,7 +93,8 @@ class StraightRayTracer(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform straight-ray path tracing.
 	'''
-	def __init__(self, elements, atimes, box, fresnel=None, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, box, fresnel=None,
+			slowdef=None, linear=True, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker for straight-ray tomography on the element
 		pairs present in atimes. The imaging grid is represented by the
@@ -102,6 +104,11 @@ class StraightRayTracer(TomographyTask):
 		value. In this case, rays are represented as ellipsoids that
 		embody the first Fresnel zone for a principal wavelength of
 		fresnel (in units that match the units of box.cell).
+
+		For time compensation (if applied), slowness will be
+		interpolated with LinearInterpolato3D if linear is True
+		(CubicInterpolator3D otherwise). The interpolator will inherit
+		a default (out-of-bounds) slowness slowdef.
 		'''
 		# Initialize the data and communicator
 		super(StraightRayTracer, self).__init__(elements, atimes, comm)
@@ -109,6 +116,11 @@ class StraightRayTracer(TomographyTask):
 		# Grab a reference to the box
 		self.box = box
 		ncell = self.box.ncell
+
+		# Identify the right interpolator for multi-round imaging
+		self.interpolator = (LinearInterpolator3D if linear
+						else CubicInterpolator3D)
+		self.slowdef = slowdef
 
 		# Build the path-length matrix and RHS vector
 		indptr = [ 0 ]
@@ -161,60 +173,102 @@ class StraightRayTracer(TomographyTask):
 
 		# Compute the corrective factor for each (t, r) pair
 		cell = self.box.cell
-		adjustments = [ ]
+		rhs = [ ]
 		for (t, r) in self.trpairs:
+			vt = self.atimes[t,r]
 			tx = bx.cart2cell(*self.elements[t])
 			rx = bx.cart2cell(*self.elements[r])
-			tc, ts = integrator.pathint(tx, rx, h=cell, **kwargs)
-			# Make sure corrected times are reasonable
-			tc = min(max(tc, self.atimes[t,r]), ts)
-			adjustments.append(tc - ts)
+			try:
+				# Try to find the compensated straight-ray time
+				tc, ts = integrator.pathint(tx, rx, h=cell, **kwargs)
+			except ValueError:
+				# On failure, just use the measured time
+				rhs.append(vt)
+			else:
+				# Otherwise, compensate measured times (within reason)
+				tc = min(max(tc, vt), ts)
+				rhs.append(ts + vt - tc)
 
-		self.rhs -= adjustments
+		self.rhs = np.array(rhs, dtype=np.float64)
 
-	def lsmr(self, s, **kwargs):
+	@staticmethod
+	def save(template, s, epoch, mfilter):
 		'''
-		Iteratively compute, using LSMR, a slowness image that
-		satisfies the straight-ray arrival-time equations implicit in
-		this StraightRayTracer instance. The solution is represented as
-		a perturbation to the slowness s, an instance of
+		Store, in a file whose name is produced by invoking
+
+			template.format(epoch=epoch),
+
+		the slowness s as a 3-D Numpy array. If mfilter is True, it
+		should be a value passed as the "size" argument to
+		scipy.ndimage.median_filter that will smooth the slowness
+		before output.
+		'''
+		fname = template.format(epoch=epoch)
+
+		if mfilter: s = median_filter(s, size=mfilter)
+		np.save(fname, s.astype(np.float32))
+
+	def lsmr(self, s, epochs=1, coleq=False, pathopts={},
+		tfilter=None, mfilter=None, partial_output=None, lsmropts={}):
+		'''
+		For each of epochs rounds, compute, using LSMR, a slowness
+		image that satisfies the straight-ray arrival-time equations
+		implicit in this StraightRayTracer instance. The solution is
+		represented as a perturbation to the slowness s, an instance of
 		habis.slowness.Slowness or its descendants, defined on the grid
 		self.box.
 
+		If coleq is True, the columns of each path-length operator will
+		be scaled so that they all have unity norm.
+
 		The LSMR implementation uses pycwp.iterative.lsmr to support
 		arrival times distributed across multiple MPI tasks in
-		self.comm. The keyword arguments kwargs will be passed to
+		self.comm. The keyword arguments lsmropts will be passed to
 		lsmr to customize the solution process. Forbidden keyword
 		arguments are "A", "b", "unorm" and "vnorm".
 
-		If a special keyword argument, 'coleq', is True, the columns of
-		the path-length operator will be scaled to that they all have
-		unity norm. The value of 'coleq' is False by default. The
-		'coleq' keyword argument will not be provided to
-		pycwp.iterative.lsmr.
+		Between subsequent epochs, the arrival times will be updated
+		according to self.timeadjust(si, **pathopts) to incorporate
+		straight-ray compensations. The argument si is an
+		Interpolator3D representation of s (linear if self.linear is
+		True, cubic otherwise).
 
-		The return value will be the final, perturbed solution. If a
-		special kerwork argument, 'noexpand', is True, the solution
-		will be returned in a flattened representation suitable for
-		calls to s.update(); otherwise, the solution will be returned
-		as an unflattened array returned by a call to s.perturb(). The
-		'noexpand' argument will not be provided to
-		pycwp.iterative.lsmr.
+		If tfilter is not None, it should be a tuple of the form
+
+			( name, size ),
+
+		where name is a string used to select an image filter as
+		scipy.ndimage.<name>_filter and size is the second argument to
+		the filter (the image to filter is the first argument). The
+		chosen filter will be applied to the slowness image
+		when producing the interpolator used by self.timeadjust. The
+		filter will not influence the evolution of images between
+		epochs. If tfilter is None, no filtering is attempted.
+
+		After each epoch, if partial_output is True, a partial solution
+		will be saved by calling
+
+			self.lsmr(partial_output, s, epoch, mfilter).
+
+		The return value will be the final, perturbed solution. If
+		mfilter is True, the solution will be processed with
+		scipy.ndimage.median_filter
 		'''
 		if not self.isRoot:
 			# Make sure non-root tasks are always silent
-			kwargs['show'] = False
+			lsmropts['show'] = False
 
-		if 'calc_var' in kwargs:
+		if 'calc_var' in lsmropts:
 			raise TypeError('Argument "calc_var" is forbidden')
-
-		coleq = kwargs.pop('coleq', False)
-		noexpand = kwargs.pop('noexpand', False)
 
 		ncell = self.box.ncell
 
-		# RHS is arrival times minus unperturbed solution
-		rhs = self.rhs - self.pathmat.dot(s.perturb(0).ravel('C'))
+		if tfilter:
+			tfname = tfilter[0].lower() + '_filter'
+			try: timefilt = getattr(scipy.ndimage, tfname)
+			except AttributeError: timefilt = None
+			tfwidth = tfilter[1]
+		else: timefile, tfwidth = None, None
 
 		# Composite slowness transform and path-length operator as CSR
 		pathmat = self.pathmat.dot(s.tosparse()).tocsr()
@@ -231,8 +285,7 @@ class StraightRayTracer(TomographyTask):
 
 			# Normalize the columns
 			pathmat.data /= np.take(colscale, pathmat.indices)
-		else:
-			colscale = 1.0
+		else: colscale = 1.0
 
 		# Transpose operation requires communications
 		def amvp(u):
@@ -243,6 +296,8 @@ class StraightRayTracer(TomographyTask):
 			# Accumulate contributions from all ranks
 			self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
 			return v
+
+		# Build the linear operator representing the path matrix
 		A = LinearOperator(shape=pathmat.shape,
 				matvec=pathmat.dot, rmatvec=amvp, dtype=pathmat.dtype)
 
@@ -253,14 +308,42 @@ class StraightRayTracer(TomographyTask):
 			un = norm(u)**2
 			return np.sqrt(self.comm.allreduce(un, op=MPI.SUM))
 
-		results = lsmr(A, rhs, unorm=unorm, vnorm=norm, **kwargs)
-		if self.isRoot:
-			print 'LSMR terminated after %d iterations for reason %d' % (results[2], results[1])
+		epoch = 0
+		sol = 0
+		while True:
+			# RHS is arrival times minus unperturbed solution
+			rhs = self.rhs - self.pathmat.dot(s.perturb(sol).ravel('C'))
 
-		# Correct column scaling in perturbation solution
-		rval = results[0] / colscale
-		if noexpand: return rval
-		else: return s.perturb(rval)
+			results = lsmr(A, rhs, unorm=unorm, vnorm=norm, **lsmropts)
+
+			if self.isRoot:
+				print ('LSMR (epoch %d) terminated '
+					'after %d iterations for reason '
+					'%d' % (epoch, results[2], results[1]))
+
+			# Update the solution
+			sol = sol + results[0] / colscale
+
+			ns = s.perturb(sol)
+
+			if partial_output:
+				self.save(partial_output, ns, epoch, mfilter)
+
+			if epoch < epochs:
+				# Filter and interpolate image for time compensation
+				if timefilt and tfwidth > 0:
+					ns = timefilt(ns, tfwidth)
+				nsi = self.interpolator(ns)
+				nsi.default = slowdef
+
+				# Adjust RHS times with straight-ray compensation
+				cshare.timeadjust(nsi, **pathopts)
+
+				epoch += 1
+			else: break
+
+		if mfilter: ns = median_filter(ns, size=mfilter)
+		return ns
 
 
 class BentRayTracer(TomographyTask):
@@ -717,6 +800,9 @@ if __name__ == "__main__":
 	try: fresnel = config.get(tsec, 'fresnel', mapper=float, default=None)
 	except Exception as e: _throw('Invalid optional fresnel', e)
 
+	try: partial_output = config.get(tsec, 'partial_output', default=None)
+	except Exception as e: _throw('Invalid optional partial_output', e)
+
 	try:
 		# Pull a range of valid sound speeds for clipping
 		vclip = config.getlist(tsec, 'vclip', mapper=float, default=None)
@@ -754,48 +840,19 @@ if __name__ == "__main__":
 
 	if not sropts:
 		# Build the cost calculator
-		cshare = BentRayTracer(elements, atimes, tracer, fresnel,
-					slowdef, linear, MPI.COMM_WORLD)
+		cshare = BentRayTracer(elements, atimes, tracer,
+				fresnel, slowdef, linear, MPI.COMM_WORLD)
 
 		# Compute random updates to the image
 		ns = cshare.sgd(slw, mfilter=mfilter,
 				partial_output=partial_output, **bropts)
 	else:
 		# Build the straight-ray tracer
-		cshare = StraightRayTracer(elements, atimes,
-				tracer.box, fresnel, MPI.COMM_WORLD)
-
-		# Pull configuration for optional arrival-time compensation
-		adjopts = sropts.pop('adjustments', { })
-		partial_output = sropts.pop('partial_output', None)
-		rounds = adjopts.pop('rounds', 0)
-
-		if rounds and not rank:
-			print 'Will use %d rounds of arrival-time adjustments' % (rounds,)
-
-		# Pass configured options to the solver
-		ns = cshare.lsmr(slw, noexpand=True, **sropts)
-
-		for i in xrange(rounds):
-			# Update the solution with persistence
-			ns = slw.perturb(ns, persist=True)
-
-			# Build an interpolator for image
-			if mfilter: ns = median_filter(ns, size=mfilter)
-			if linear: si = LinearInterpolator3D(ns)
-			else: si = HermiteInterpolator3D(ns)
-			si.default = si.evaluate(0,0,0,False)
-
-			# Save the image, if desired
-			if partial_output:
-				fname = partial_output.format(iter=i)
-				np.save(fname, ns.astype(np.float32))
-
-			# Adjust times and solve again
-			cshare.timeadjust(si, **adjopts)
-			ns = cshare.lsmr(slw, noexpand=True, **sropts)
-
-		if mfilter: ns = median_filter(slw.perturb(ns), size=mfilter)
+		cshare = StraightRayTracer(elements, atimes, tracer.box,
+				fresnel, slowdef, linear, MPI.COMM_WORLD)
+		# Find the solution
+		ns = cshare.lsmr(slw, mfilter=mfilter,
+				partial_output=partial_output, **sropts)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
