@@ -351,13 +351,19 @@ class BentRayTracer(TomographyTask):
 	A subclass of TomographyTask to perform bent-ray path tracing.
 	'''
 	def __init__(self, elements, atimes, tracer, fresnel=None,
-			slowdef=None, linear=True, comm=MPI.COMM_WORLD):
+			slowdef=None, linear=True, comm=MPI.COMM_WORLD, hitmaps=False):
 		'''
 		Create a worker to do path tracing on the element pairs present
 		in atimes. Slowness will be interpolated with
 		LinearInterpolator3D if linear is True (HermiteInterpolator3D
 		otherwise). The interpolator will inherit a default
 		(out-of-bounds) slowness slowdef.
+
+		If hitmaps is True, every call to self.evaluate will save a
+		copy of the per-voxel hit count and hit density maps in the
+		property self.hitmaps. Otherwise, the "hitmaps" property will
+		not exist. See the documentation for self.evaluate for more
+		information.
 		'''
 		# Initialize the data and communicator
 		super(BentRayTracer, self).__init__(elements, atimes, comm)
@@ -371,6 +377,9 @@ class BentRayTracer(TomographyTask):
 		self.slowdef = slowdef
 		self.interpolator = (LinearInterpolator3D if linear
 					else HermiteInterpolator3D)
+
+		# Save most recent hit map, if desired
+		self.save_hitmaps = bool(hitmaps)
 
 	def evaluate(self, s, nm):
 		'''
@@ -400,6 +409,11 @@ class BentRayTracer(TomographyTask):
 
 		For path tracing in self.tracer.trace, the slowness s will be
 		interpolated as si = self.interpolator(s).
+
+		If self.save_hitmaps is True, self.hitmaps will be updated with
+		the hit count and density in a Numpy array of s.shape + (2,),
+		where the counts are stored in [:,:,:,0] and the density is
+		stored in [:,:,:,1].
 		'''
 		rank, size = self.comm.rank, self.comm.size
 
@@ -422,6 +436,9 @@ class BentRayTracer(TomographyTask):
 
 		nrows, nskip = 0L, 0L
 
+		if self.save_hitmaps:
+			hitmaps = np.zeros(si.shape + (2,), dtype=np.float64)
+
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
 			src, rcv = self.elements[t], self.elements[r]
@@ -440,11 +457,21 @@ class BentRayTracer(TomographyTask):
 			# Add gradient contribution
 			for c, l in plens.iteritems(): gf[c] += l * err
 
+			if self.save_hitmaps:
+				# Update the hit maps
+				for c, l in plens.iteritems():
+					hitmaps[c + (0,)] += 1.
+					hitmaps[c + (1,)] += l
+
 		# Accumulate the cost functional and row count
 		f = self.comm.allreduce(0.5 * fsum(f), op=MPI.SUM)
 		nrows = self.comm.allreduce(nrows, op=MPI.SUM)
 		# Use the lower-level routine for the in-place gradient accumulation
 		self.comm.Allreduce(MPI.IN_PLACE, gf, op=MPI.SUM)
+
+		if self.save_hitmaps:
+			self.comm.Allreduce(MPI.IN_PLACE, hitmaps, op=MPI.SUM)
+			self.hitmaps = hitmaps
 
 		return f, nrows, gf
 
@@ -769,6 +796,9 @@ if __name__ == "__main__":
 		elements = ldmats(efiles, nkeys=1)
 	except Exception as e: _throw('Configuration must specify elements', e)
 
+	try: hitmaps = config.getlist(tsec, 'hitmaps', default=None)
+	except Exception as e: _throw('Invalid optional hitmaps', e)
+
 	# Load default background slowness
 	try: slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
 	except Exception as e: _throw('Invalid optional slowdef', e)
@@ -838,22 +868,51 @@ if __name__ == "__main__":
 		if mask is not None: slw = MaskedSlowness(s, mask)
 		else: slw = Slowness(s)
 
+	# Collect the total number of arrival-time measurements
+	timecount = MPI.COMM_WORLD.reduce(len(atimes), op=MPI.SUM)
+	if not rank:
+		print 'Using a total of %d arrival-time measurements' % (timecount,)
+
 	if not sropts:
 		# Build the cost calculator
-		cshare = BentRayTracer(elements, atimes, tracer,
-				fresnel, slowdef, linear, MPI.COMM_WORLD)
+		cshare = BentRayTracer(elements, atimes, tracer, fresnel,
+					slowdef, linear, MPI.COMM_WORLD, hitmaps)
 
 		# Compute random updates to the image
 		ns = cshare.sgd(slw, mfilter=mfilter,
 				partial_output=partial_output, **bropts)
+
+		# Grab the hitmaps, if they were saved
+		try: hmaps = cshare.hitmaps
+		except AttributeError: hmaps = None
 	else:
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes, tracer.box,
 				fresnel, slowdef, linear, MPI.COMM_WORLD)
+
+		if hitmaps:
+			# Save the hitmaps
+			hmaps = np.zeros(cshare.box.ncell + (2,), dtype=np.float64)
+
+			for k, v in cshare.pathmat.todok().iteritems():
+				l,m,n = np.unravel_index(k[1], cshare.box.ncell)
+				hmaps[l,m,n,0] += 1.
+				hmaps[l,m,n,1] += v
+
+			MPI.COMM_WORLD.Allreduce(MPI.IN_PLACE, hmaps, op=MPI.SUM)
+		else: hmaps = None
+
 		# Find the solution
 		ns = cshare.lsmr(slw, mfilter=mfilter,
 				partial_output=partial_output, **sropts)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))
+
+		if hmaps is not None:
+			print 'Will save hit maps'
+			np.save(hitmaps[0], hmaps[:,:,:,0])
+			try: np.save(hitmaps[1], hmaps[:,:,:,1])
+			except IndexError: pass
+
 		print 'Finished'
