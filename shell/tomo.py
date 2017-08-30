@@ -17,6 +17,8 @@ from scipy.ndimage import median_filter
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import LinearOperator, norm as snorm
 
+from skimage.restoration import denoise_tv_chambolle
+
 from math import fsum
 
 from random import sample
@@ -208,7 +210,7 @@ class StraightRayTracer(TomographyTask):
 		if mfilter: s = median_filter(s, size=mfilter)
 		np.save(fname, s.astype(np.float32))
 
-	def lsmr(self, s, epochs=1, coleq=False, pathopts={},
+	def lsmr(self, s, epochs=1, coleq=False, pathopts={}, chambolle=None,
 		tfilter=None, mfilter=None, partial_output=None, lsmropts={}):
 		'''
 		For each of epochs rounds, compute, using LSMR, a slowness
@@ -244,6 +246,11 @@ class StraightRayTracer(TomographyTask):
 		when producing the interpolator used by self.timeadjust. The
 		filter will not influence the evolution of images between
 		epochs. If tfilter is None, no filtering is attempted.
+
+		If chambolle is not None, it should be the "weight" parameter
+		to the function skimage.restoration.denoise_tv_chambolle. In
+		this case, the denoising filter will be applied to the slowness
+		image after each epoch.
 
 		After each epoch, if partial_output is True, a partial solution
 		will be saved by calling
@@ -321,8 +328,14 @@ class StraightRayTracer(TomographyTask):
 					'after %d iterations for reason '
 					'%d' % (epoch, results[2], results[1]))
 
+			ds = results[0] / colscale
+
+			if chambolle:
+				ds = denoise_tv_chambolle(s.unflatten(ds), chambolle)
+				ds = s.flatten(ds)
+
 			# Update the solution
-			sol = sol + results[0] / colscale
+			sol = sol + ds
 
 			ns = s.perturb(sol)
 
