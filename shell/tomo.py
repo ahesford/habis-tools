@@ -176,6 +176,7 @@ class StraightRayTracer(TomographyTask):
 		# Compute the corrective factor for each (t, r) pair
 		cell = self.box.cell
 		rhs = [ ]
+		errsq = [ ]
 		for (t, r) in self.trpairs:
 			vt = self.atimes[t,r]
 			tx = bx.cart2cell(*self.elements[t])
@@ -189,9 +190,13 @@ class StraightRayTracer(TomographyTask):
 			else:
 				# Otherwise, compensate measured times (within reason)
 				tc = min(max(tc, vt), ts)
-				rhs.append(ts + vt - tc)
+				err = tc - vt
+				errsq.append(err**2)
+				rhs.append(ts - err)
 
 		self.rhs = np.array(rhs, dtype=np.float64)
+
+		return fsum(errsq), len(errsq)
 
 	@staticmethod
 	def save(template, s, epoch, mfilter):
@@ -323,11 +328,6 @@ class StraightRayTracer(TomographyTask):
 
 			results = lsmr(A, rhs, unorm=unorm, vnorm=norm, **lsmropts)
 
-			if self.isRoot:
-				print ('LSMR (epoch %d) terminated '
-					'after %d iterations for reason '
-					'%d' % (epoch, results[2], results[1]))
-
 			ds = results[0] / colscale
 
 			if chambolle:
@@ -342,7 +342,7 @@ class StraightRayTracer(TomographyTask):
 			if partial_output:
 				self.save(partial_output, ns, epoch, mfilter)
 
-			if epoch < epochs:
+			if epochs:
 				# Filter and interpolate image for time compensation
 				if timefilt and tfwidth > 0:
 					ns = timefilt(ns, tfwidth)
@@ -350,10 +350,21 @@ class StraightRayTracer(TomographyTask):
 				nsi.default = slowdef
 
 				# Adjust RHS times with straight-ray compensation
-				cshare.timeadjust(nsi, **pathopts)
+				terr, tn = self.timeadjust(nsi, **pathopts)
+				# Find RMS arrival-time error for compensated model
+				terr = self.comm.allreduce(terr, op=MPI.SUM)
+				tn = self.comm.allreduce(tn, op=MPI.SUM)
+				terr = np.sqrt(terr / tn)
+			else:
+				# Without compensation, error is LSMR residual
+				tn = self.comm.allreduce(len(self.rhs), op=MPI.SUM)
+				terr = results[3] / np.sqrt(tn)
 
-				epoch += 1
-			else: break
+			if self.isRoot:
+				print 'Epoch %d, RMS error %0.6g' % (epoch, terr)
+
+			epoch += 1
+			if epoch > epochs: break
 
 		if mfilter: ns = median_filter(ns, size=mfilter)
 		return ns
