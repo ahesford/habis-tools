@@ -4,7 +4,7 @@ of parameters.
 '''
 
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, coo_matrix
 
 from itertools import izip
 
@@ -226,48 +226,59 @@ class MaskedSlowness(Slowness):
 class PiecewiseSlowness(Slowness):
 	'''
 	A class representing a piecewise-constant slowness on a 3-D grid, where
-	each parameter represents a particular slowness for a predetermined set
-	of voxels.
+	each parameter represents an additive perturbation to a particular
+	slowness for a predetermined set of voxels.
 	'''
 	def __init__(self, voxmap, s):
 		'''
-		Initialize a PiecewiseSlowness instance where the voxel (i,j,k)
-		in a 3-D grid has a slowness s[voxmap[i,j,k]].
+		Initialize a PiecewiseSlowness instance. The map voxmap should
+		map keys to 3-D array of shape (L, M, N) such that, if
+
+			keys = sorted(voxmap.keys()),
+
+		a slowness image for a perturbation x is given by
+
+			slowness = s + sum(voxmap[keys[i]] * x[i]
+						for i in range(len(x))).
+
+		One special key, 'unconstrained', will behave differently. Each
+		nonzero voxel in voxmap['unconstrained'] will effectively get
+		its own key, allowing each nonzero pixel in the 'unconstrained'
+		voxmap to take a distinct value. The 'unconstrained' key is
+		case sensitive.
 		'''
-		voxmap = np.asarray(voxmap)
-		if not np.issubdtype(voxmap.dtype, np.integer):
-			raise TypeError('Argument voxmap must have an integral type')
-		if not voxmap.ndim == 3:
-			raise ValueError('Argument voxmap must be a 3-D array')
+		# Build a sparse matrix representation from the voxmap
+		self._shape = None
+		data, rows, cols = [], [], []
+		M, N = 0, 0
+		# Note that voxmap may not be a proper dictionary (e.g., NpzFile)
+		for k in sorted(k for k in voxmap.keys()):
+			v = np.asarray(voxmap[k]).astype(np.float64)
+			if not self._shape:
+				self._shape = v.shape
+				M = np.product(self._shape)
+			elif self._shape != v.shape:
+				raise ValueError('Shapes of all entries of voxmap must agree')
+			v = v.ravel('C')
+			ri = np.nonzero(v)[0]
+			data.extend(v[ri])
+			rows.extend(ri)
+			if k == 'unconstrained':
+				# Unconstrained parameters get their own columns
+				cols.extend(xrange(N, N + len(ri)))
+				N += len(ri)
+			else:
+				# Constrained parameters fall in the same column
+				cols.extend([N]*len(ri))
+				N += 1
 
-		# Copy the unflatted shape of the slowness
-		self._shape = voxmap.shape
-
-		# Find the unique type codes and column indices for voxel values
-		typ, cols = np.unique(voxmap.ravel('C'), return_inverse=True)
-
-		M = np.prod(voxmap.shape)
-		N = len(typ)
-
-		# Ensure nonnegative values
-		if typ[0] < 0: raise ValueError('Values in voxmap must be nonnegative')
-
+		# Confirm that the background has the right form
 		self._s = np.array(s, dtype=np.float64)
-		if not self._s.shape:
-			# Special case: reference slowness is a scalar
-			self._s = np.array([s] * N, dtype=np.float64)
-		elif self._s.ndim != 1:
-			raise ValueError('Slowness array must be 1-D')
+		if self._s.shape and self._s.shape != self._shape:
+			raise ValueError('Background slowness s must be scalar or match voxmap shapes')
 
-		if len(self._s) != N:
-			raise ValueError('Number of slowness values must be %d' % (N,))
-
-		# In linear operator, rows are sequential
-		rows = np.arange(M)
-		# Entries of operator are all unity
-		data = np.ones((M,), dtype=np.float64)
-		# Build the sparse map
-		self._voxmap = csr_matrix((data, (rows, cols)), shape=(M,N))
+		# Convert the representation to CSR for efficiency
+		self._voxmap = coo_matrix((data, (rows, cols)), shape=(M, N)).tocsr()
 
 
 	@property
@@ -276,30 +287,12 @@ class PiecewiseSlowness(Slowness):
 		return self._voxmap.shape[1]
 
 
-	def perturb(self, x, persist=False):
-		'''
-		Perturb the reference slowness by adding x, then expanding the
-		slowness values onto the grid according to the predefined voxel
-		map.
-		'''
-		ux = self._s + x
-		if persist: self._s = ux
-		return self.unflatten(ux)
-
-
 	def clip(self, x, smin, smax):
 		'''
 		Clip the perturbation x so that self.perturb(x) clips to the
 		range [smin, smax].
 		'''
-		out = np.array(x)
-		if not out.shape:
-			out = np.empty((self.nnz,), dtype=out.dtype)
-			out[:] = x
-		out += self._s
-		np.clip(out, smin, smax, out)
-		out -= self._s
-		return out
+		raise NotImplementedError('Clipping is ill-defined for %s' % (self.__class__.__name__))
 
 
 	def flatten(self, s):
@@ -308,7 +301,6 @@ class PiecewiseSlowness(Slowness):
 		constant slowness values. The slowness s will be raveled in
 		C-order, so its shape must be compatible with self.shape.
 		'''
-		nnz = self.nnz
 		return self._voxmap.T.dot(np.ravel(s, 'C'))
 
 

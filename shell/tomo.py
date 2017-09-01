@@ -807,7 +807,6 @@ if __name__ == "__main__":
 	try:
 		# Load a slowness mask, if one is specified
 		mask = config.get(tsec, 'slowmask', default=None)
-		if mask: mask = np.load(mask).astype(int if piecewise else bool)
 	except Exception as e: _throw('Invalid optional slowmask', e)
 
 	# Read required final output
@@ -880,16 +879,20 @@ if __name__ == "__main__":
 	except Exception as e: _throw('Configuration must specify valid timefile', e)
 
 	if piecewise:
-		if mask is None: raise ValueError('Slowness mask is required in piecewise mode')
+		if mask is None:
+			raise ValueError('Slowness mask is required in piecewise mode')
+		mask = np.load(mask)
 		slw = PiecewiseSlowness(mask, s)
-		if not rank: print 'Assuming piecewise model with values', slw._s
+		if not rank: print 'Using piecewise slowness model'
 	else:
 		# Convert the scalar slowness or file name into a matrix
 		try: s = float(s)
 		except (ValueError, TypeError): s = np.load(s).astype(np.float64)
 		else: s = s * np.ones(bx.ncell, dtype=np.float64)
 
-		if mask is not None: slw = MaskedSlowness(s, mask)
+		if mask is not None:
+			mask = np.load(mask).astype(bool)
+			slw = MaskedSlowness(s, mask)
 		else: slw = Slowness(s)
 
 	# Collect the total number of arrival-time measurements
