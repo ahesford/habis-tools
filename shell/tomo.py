@@ -195,8 +195,7 @@ class StraightRayTracer(TomographyTask):
 				# On failure, just use the measured time
 				rhs.append(vt)
 			else:
-				if vt <= tc <= ts:
-					ivals[t,r] = (tc, ts)
+				ivals[t,r] = (tc, ts)
 				# Compensate measured times (within reason)
 				tc = min(max(tc, vt), ts)
 				rhs.append(ts - (tc - vt))
@@ -285,11 +284,12 @@ class StraightRayTracer(TomographyTask):
 		If save_times is not None, it should be a string template which
 		will be formatted as
 
-		  rname = save_times.format(rank=self.comm.rank, epoch=epoch)
+		  rname = save_times.format(epoch=epoch)
 
 		After each epoch, an array of compensated and uncompensated
-		straight-ray path integrals will be stored in the NPY file with
-		name rname.
+		straight-ray path integrals will be stored in a keymat file
+		with name rname. All times will be coalesced onto the root rank
+		for output.
 		'''
 		if not self.isRoot:
 			# Make sure non-root tasks are always silent
@@ -390,15 +390,19 @@ class StraightRayTracer(TomographyTask):
 				terr = self.comm.allreduce(terr, op=MPI.SUM)
 				terr = np.sqrt(terr / tn)
 				if save_times:
-					rname = save_times.format(rank=self.comm.rank, epoch=epoch)
-					savez_keymat(rname, tv)
+					tv = self.comm.gather(tv)
+					if self.isRoot:
+						rname = save_times.format(epoch=epoch)
+						tv = dict(kp for v in tv
+								for kp in v.iteritems())
+						savez_keymat(rname, tv)
 			else:
 				# Without compensation, error is LSMR residual
 				tn = self.comm.allreduce(len(self.rhs), op=MPI.SUM)
 				terr = results[3] / np.sqrt(tn)
 
 			if self.isRoot:
-				print 'Epoch %d, RMS error %0.6g' % (epoch, terr)
+				print 'Epoch %d RMS error %0.6g %d paths' % (epoch, terr, tn)
 
 			epoch += 1
 			if epoch > epochs: break
