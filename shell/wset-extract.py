@@ -91,7 +91,7 @@ def trextract(infiles, trmap, random=None, outspec=None):
 	wsets = [WaveformSet.fromfile(f) for f in infiles]
 
 	for wset, f in izip(wsets, infiles):
-		obase = outspec or (os.path.splitext(f)[0] + '.Tx{0:05d}.Rx{0:05d}.wset')
+		obase = outspec or (os.path.splitext(f)[0] + '.Tx{0:05d}.Rx{1:05d}.wset')
 		print 'Extracting Tx,Rx pairs from file', f, 'to output spec', obase
 
 		# Determine a local portion of the trlist
