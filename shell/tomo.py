@@ -353,7 +353,8 @@ class StraightRayTracer(TomographyTask):
 			un = norm(u)**2
 			return np.sqrt(self.comm.allreduce(un, op=MPI.SUM))
 
-		epoch, sol = 0, 0
+		msgfmt = 'Epoch %d RMSE %0.6g dsol %0.6g dct %0.6g dst %0.6g paths %d'
+		epoch, sol, ltimes = 0, 0, { }
 		while True:
 			# RHS is arrival times minus unperturbed solution
 			rhs = self.rhs - self.pathmat.dot(s.perturb(sol).ravel('C'))
@@ -366,9 +367,11 @@ class StraightRayTracer(TomographyTask):
 				ds = denoise_tv_chambolle(s.unflatten(ds), chambolle)
 				ds = s.flatten(ds)
 
+			# Compute relative change in solution
+			dsnrm = norm(ds) / norm(sol + ds)
+
 			# Update the solution
 			sol = sol + ds
-
 			ns = s.perturb(sol)
 
 			if partial_output:
@@ -389,6 +392,22 @@ class StraightRayTracer(TomographyTask):
 				tn = self.comm.allreduce(len(tv), op=MPI.SUM)
 				terr = self.comm.allreduce(terr, op=MPI.SUM)
 				terr = np.sqrt(terr / tn)
+
+				# Compute norms of model times and time changes
+				tdiffs = [ ]
+				for k in set(tv).intersection(ltimes):
+					a, b = tv[k]
+					c, d = ltimes[k]
+					tdiffs.append([(a-c)**2, (b-d)**2, a**2, b**2])
+				# Reduce square norms across all ranks
+				if tdiffs: tdiffs = np.sum(tdiffs, axis=0)
+				else: tdiffs = np.array([0.]*4, dtype=np.float64)
+				self.comm.Allreduce(MPI.IN_PLACE, tdiffs, op=MPI.SUM)
+				# Set placeholder values if there is no value
+				if tdiffs[2] == 0: tdiffs[0] = tdiffs[2] = 1.
+				if tdiffs[3] == 0: tdiffs[1] = tdiffs[3] = 1.
+				ltimes = tv
+
 				if save_times:
 					tv = self.comm.gather(tv)
 					if self.isRoot:
@@ -400,9 +419,12 @@ class StraightRayTracer(TomographyTask):
 				# Without compensation, error is LSMR residual
 				tn = self.comm.allreduce(len(self.rhs), op=MPI.SUM)
 				terr = results[3] / np.sqrt(tn)
+				tdiffs = [1.] * 4
 
 			if self.isRoot:
-				print 'Epoch %d RMS error %0.6g %d paths' % (epoch, terr, tn)
+				ctnrm = np.sqrt(tdiffs[0] / tdiffs[2])
+				stnrm = np.sqrt(tdiffs[1] / tdiffs[3])
+				print msgfmt % (epoch, terr, dsnrm, ctnrm, stnrm, tn)
 
 			epoch += 1
 			if epoch > epochs: break
