@@ -25,7 +25,7 @@ from random import sample
 
 from time import time
 
-from itertools import izip
+from itertools import izip, count, repeat
 
 from mpi4py import MPI
 
@@ -241,6 +241,13 @@ class StraightRayTracer(TomographyTask):
 		lsmr to customize the solution process. Forbidden keyword
 		arguments are "A", "b", "unorm" and "vnorm".
 
+		If lsmropts contains a 'maxiter' keyword, it can be a single
+		integer or a list of integers. If the value is a list, it
+		provides the maximum number of LSMR iterations for each epoch
+		in sequence. If the total number of epochs exceeds the number
+		of values in the list, the final value will be repeated as
+		necessary.
+
 		Between subsequent epochs, the arrival times will be updated
 		according to self.timeadjust(si, **pathopts) to incorporate
 		straight-ray compensations. The argument si is an
@@ -259,7 +266,9 @@ class StraightRayTracer(TomographyTask):
 		If chambolle is not None, it should be the "weight" parameter
 		to the function skimage.restoration.denoise_tv_chambolle. In
 		this case, the denoising filter will be applied to the slowness
-		image after each epoch.
+		image after each epoch. Alternatively, chambolle can be a list
+		of weights, in which case it behaves like the 'maxiter'
+		argument of lsmropts.
 
 		After each epoch, if partial_output is True, a partial solution
 		will be saved by calling
@@ -353,18 +362,31 @@ class StraightRayTracer(TomographyTask):
 			un = norm(u)**2
 			return np.sqrt(self.comm.allreduce(un, op=MPI.SUM))
 
+		# Process maxiter argument to allow per-epoch specification
+		maxiter = lsmropts.pop('maxiter', None)
+		try: maxiter = list(maxiter)
+		except TypeError: itercounts = repeat(maxiter)
+		else: itercounts = (maxiter[min(i, len(maxiter)-1)] for i in count())
+
+		try: chambolle = list(chambolle)
+		except TypeError: chamwts = repeat(chambolle)
+		else: chamwts = (chambolle[min(i, len(chambolle)-1)] for i in count())
+
 		msgfmt = 'Epoch %d RMSE %0.6g dsol %0.6g dct %0.6g dst %0.6g paths %d'
 		epoch, sol, ltimes = 0, 0, { }
 		while True:
 			# RHS is arrival times minus unperturbed solution
 			rhs = self.rhs - self.pathmat.dot(s.perturb(sol).ravel('C'))
 
-			results = lsmr(A, rhs, unorm=unorm, vnorm=norm, **lsmropts)
+			# Use the right maxiter value for this epoch
+			results = lsmr(A, rhs, unorm=unorm, vnorm=norm,
+					maxiter=itercounts.next(), **lsmropts)
 
 			ds = results[0] / colscale
 
-			if chambolle:
-				ds = denoise_tv_chambolle(s.unflatten(ds), chambolle)
+			cmwt = chamwts.next()
+			if cmwt:
+				ds = denoise_tv_chambolle(s.unflatten(ds), cmwt)
 				ds = s.flatten(ds)
 
 			# Compute relative change in solution
