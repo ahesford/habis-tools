@@ -213,7 +213,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		if almosteq(fv, 0.0):
 			wctx.custom_retcode = WNErrCode.FUNCTION_VANISHES
 			return IntegrableStatus.CUSTOM_RETURN
-		iptmpy(wctx.h, &gf)
+		iptdiv(wctx.h, &gf)
 		iscal(1 / fv, &gf)
 
 		# Update the wavefront normal
@@ -971,7 +971,7 @@ def srcompensate(trpairs, elements, Box3D bx, Interpolator3D si, long N):
 		if almosteq(sv, 0.0):
 			raise ValueError('Integrand vanishes at %s' % (pt2tup(x),))
 		# Scale gradient properly
-		iptmpy(bx._cell, &svg)
+		iptdiv(bx._cell, &svg)
 		iscal(1 / sv, &svg)
 		# Find wavefront "drift"
 		ndl = dot(ln, dl)
@@ -996,7 +996,7 @@ def srcompensate(trpairs, elements, Box3D bx, Interpolator3D si, long N):
 				raise ValueError('Cannot evaluate integrand at %s' % (pt2tup(x),))
 			if almosteq(sv, 0.0):
 				raise ValueError('Integrand vanishes at %s' % (pt2tup(x),))
-			iptmpy(bx._cell, &svg)
+			iptdiv(bx._cell, &svg)
 			iscal(1 / sv, &svg)
 			# Update total integrals
 			kval += kwt * ndl * sv
