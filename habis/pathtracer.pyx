@@ -17,8 +17,6 @@ import math
 from math import fsum
 from numpy.linalg import norm
 
-from itertools import izip
-
 from .habiconf import HabisConfigParser, HabisConfigError
 
 from libc.stdlib cimport rand, RAND_MAX, malloc, free
@@ -872,7 +870,7 @@ class PathTracer(object):
 			plens = box.fresnel(points, fresnel)
 
 			# Compute the total length of the path
-			tlen = fsum(norm(r - l) for r, l in izip(points, points[1:]))
+			tlen = fsum(norm(r - l) for r, l in zip(points, points[1:]))
 
 			# Convert Fresnel-zone weights to integral contributions
 			wtot = fsum(plens.itervalues())
@@ -890,7 +888,7 @@ class PathTracer(object):
 		if points.shape[0] < 3: marches = [marches]
 		# Accumulate the length of each path in each cell
 		plens = { }
-		for (st, ed), march in izip(izip(points, points[1:]), marches):
+		for (st, ed), march in zip(zip(points, points[1:]), marches):
 			# Compute whol length of this path segment
 			dl = norm(ed - st)
 			for cell, (tmin, tmax) in march.iteritems():

@@ -160,11 +160,11 @@ class CommandWrapper(object):
 	def _execute(cls, cmd, *args, **kwargs):
 		'''
 		Convenience function launch the given command with
-		subprocess32.Popen, passing *args to the process and **kwargs
+		subprocess.Popen, passing *args to the process and **kwargs
 		to Popen.communicate(), and returning stdout, stderr, and the
 		returncode as encoded by self.encodeResult()
 		'''
-		from subprocess32 import Popen, PIPE, TimeoutExpired
+		from subprocess import Popen, PIPE, TimeoutExpired
 
 		if not cmd:
 			raise ValueError('Wrapper command must be defined')
@@ -185,7 +185,7 @@ class CommandWrapper(object):
 		'''
 		Invoke the command associated with the wrapper, with additional
 		arguments populated by self.args. Keyword arguments are passed
-		to subprocess32.Popen.communicate() to control interaction with
+		to subprocess.Popen.communicate() to control interaction with
 		the child process during its lifetime.
 
 		Returns an output dictionary, encoded with encodeResult(), that

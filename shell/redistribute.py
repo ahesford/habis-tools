@@ -37,7 +37,7 @@ def xfer(srcfile, dstfile, host):
 	If the transfer is not local, transfer srcfile to <host>:<dstfile> with
 	scp. Returns True unless a subprocess.CalledProcessError is raised.
 	'''
-	from subprocess32 import check_call
+	from subprocess import check_call
 
 	if host:
 		check_call(['scp', srcfile, host + ':' + dstfile])
