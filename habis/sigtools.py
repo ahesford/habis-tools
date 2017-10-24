@@ -70,7 +70,7 @@ class Window(tuple):
 		end = kwargs.pop('end', None)
 
 		if len(kwargs) > 0:
-			raise TypeError('Unrecognized keyword %s' % (next(kwargs.keys()),))
+			raise TypeError('Unrecognized keyword %s' % (next(iter(kwargs.keys())),))
 
 		if len(args) > 0:
 			if start is not None:
@@ -1163,7 +1163,7 @@ class Waveform(object):
 		useheight = kwargs.pop('useheight', False)
 
 		if len(kwargs):
-			raise TypeError("Unrecognized keyword '%s'" % next((kwargs.keys()),))
+			raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
 
 		if prommode not in ('absolute', 'noisedb', 'relative'):
 			raise ValueError("Keyword argument 'prommode' must be one of 'absolute', 'noisedb' or 'relative'")

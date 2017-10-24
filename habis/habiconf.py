@@ -294,7 +294,7 @@ class HabisConfigParser(object):
 			except KeyError: pass
 
 		if len(kwargs):
-			raise TypeError('Unrecognized keyword %s' % next(kwargs.keys()))
+			raise TypeError('Unrecognized keyword %s' % (next(iter(kwargs.keys())),))
 
 		return optargs
 

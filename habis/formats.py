@@ -108,7 +108,7 @@ def loadkeymat(f, scalar=None, dtype=None, nkeys=None):
 		return loadtxt_keymat(f, **kwargs)
 
 	if nkeys is not None and len(mapping):
-		key = next(mapping.keys())
+		key = next(iter(mapping.keys()))
 
 		try: nk = len(key)
 		except TypeError: nk = 1
@@ -652,7 +652,7 @@ class RxChannelHeader(tuple):
 		keys = ['idx', 'pos', 'win', 'txgrp']
 		props = dict((key, kwargs.pop(key, getattr(self, key))) for key in keys)
 		if len(kwargs):
-			raise TypeError("Unrecognized keyword '%s'" % (next(kwargs.keys()),))
+			raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
 		return type(self)(**props)
 
 
@@ -747,7 +747,7 @@ class WaveformSet(object):
 		defzero = kwargs.pop('defzero', False)
 
 		if len(kwargs):
-			raise TypeError('Unrecognized keyword %s' % (next(kwargs.keys()),))
+			raise TypeError('Unrecognized keyword %s' % (next(iter(kwargs.keys())),))
 
 		# Map the nsamp and f2c for each file to a global range
 		lsamp = 0

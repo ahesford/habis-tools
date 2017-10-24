@@ -101,7 +101,7 @@ def alignedsum(signals, osamp, scale=True):
 	sigiter = iter(signals)
 
 	# Copy the first signal to start the sum
-	wsum = sigiter.next().copy()
+	wsum = next(sigiter).copy()
 	# Convert to float32 and scale if desired
 	wsum.dtype = np.float32()
 	if scale: wsum /= np.max(wsum.envelope())

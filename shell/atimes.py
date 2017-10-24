@@ -359,7 +359,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	queue = kwargs.pop('queue', None)
 
 	if len(kwargs):
-		raise TypeError("Unrecognized keyword argument '%s'" %  (next(kwargs.keys()),))
+		raise TypeError("Unrecognized keyword argument '%s'" %  (next(iter(kwargs.keys())),))
 
 	# Compute the strided results
 	result = { }

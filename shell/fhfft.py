@@ -240,7 +240,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	tgcmap = kwargs.pop('tgcmap', None)
 
 	if len(kwargs):
-		raise TypeError("Unrecognized keyword '%s'" % (next(kwargs.keys()),))
+		raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
 
 	# Open the input and create a corresponding output
 	wset = WaveformSet.fromfile(infile)

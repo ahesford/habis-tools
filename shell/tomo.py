@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/opt/python-2.7.9/bin/python
 
 # Copyright (c) 2017 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
@@ -128,10 +128,10 @@ class StraightRayTracer(TomographyTask):
 		indptr = [ 0 ]
 		indices = [ ]
 		data = [ ]
-		rhs = [ ]
-		trpairs = [ ]
+		self.trpairs = [ ]
+		self.rhs = { }
 
-		for (t, r), v in sorted(self.atimes.items()):
+		for i, ((t, r), v) in enumerate(sorted(self.atimes.items())):
 			# March straight through the grid
 			seg = Segment3D(self.elements[t], self.elements[r])
 			# Compute the total segment length
@@ -149,13 +149,12 @@ class StraightRayTracer(TomographyTask):
 					data.append(seg.length * ll / htot)
 					indices.append(np.ravel_multi_index(cidx, ncell))
 			indptr.append(len(indices))
-			rhs.append(v)
-			trpairs.append((t, r))
+			self.rhs[i] = v
+			self.trpairs.append((t, r))
 
+		mshape = len(self.trpairs), np.prod(ncell)
 		self.pathmat = csr_matrix((data, indices, indptr),
-				shape=(len(rhs), np.prod(ncell)), dtype=np.float64)
-		self.rhs = np.array(rhs, dtype=np.float64)
-		self.trpairs = trpairs
+						shape=mshape, dtype=np.float64)
 
 	def timeadjust(self, si, **kwargs):
 		'''
@@ -182,26 +181,25 @@ class StraightRayTracer(TomographyTask):
 
 		# Compute the corrective factor for each (t, r) pair
 		cell = self.box.cell
-		rhs = [ ]
+		self.rhs = { }
 		ivals = { }
-		for (t, r) in self.trpairs:
+		for i, (t, r) in enumerate(self.trpairs):
 			vt = self.atimes[t,r]
 			tx = bx.cart2cell(*self.elements[t])
 			rx = bx.cart2cell(*self.elements[r])
+
 			try:
 				# Try to find the compensated straight-ray time
 				tc, ts = integrator.pathint(tx, rx, h=cell, **kwargs)
-			except ValueError:
-				# On failure, just use the measured time
-				rhs.append(vt)
-			else:
-				ivals[t,r] = (tc, ts)
-				# Compensate measured times (within reason)
-				tc = min(max(tc, vt), ts)
-				rhs.append(ts - (tc - vt))
+				# Check the time for sanity
+				if tc > ts or tc < vt - 0.5:
+					raise ValueError('Compensated time out of range')
+			except ValueError: continue
 
-		# Update the RHS with the compensated times
-		self.rhs = np.array(rhs, dtype=np.float64)
+			# Record the times and compensate the RHS
+			ivals[t,r] = (tc, ts)
+			self.rhs[i] = ts - max(0, (tc - vt))
+
 		return ivals
 
 	@staticmethod
@@ -327,34 +325,6 @@ class StraightRayTracer(TomographyTask):
 					col=pcoo.col, trpairs=self.trpairs)
 			del pcoo, pname
 
-		if coleq:
-			# Compute norms of columns of global matrix
-			colscale = snorm(pathmat, axis=0)**2
-			self.comm.Allreduce(MPI.IN_PLACE, colscale, op=MPI.SUM)
-			np.sqrt(colscale, colscale)
-
-			# Clip normalization factors to avoid blow-up
-			mxnrm = np.max(colscale)
-			np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
-
-			# Normalize the columns
-			pathmat.data /= np.take(colscale, pathmat.indices)
-		else: colscale = 1.0
-
-		# Transpose operation requires communications
-		def amvp(u):
-			# Synchronize
-			self.comm.Barrier()
-			# Multiple by transposed local share, then flatten
-			v = pathmat.T.dot(u)
-			# Accumulate contributions from all ranks
-			self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
-			return v
-
-		# Build the linear operator representing the path matrix
-		A = LinearOperator(shape=pathmat.shape,
-				matvec=pathmat.dot, rmatvec=amvp, dtype=pathmat.dtype)
-
 		def unorm(u):
 			# Synchronize
 			self.comm.Barrier()
@@ -375,14 +345,53 @@ class StraightRayTracer(TomographyTask):
 		msgfmt = 'Epoch %d RMSE %0.6g dsol %0.6g dct %0.6g dst %0.6g paths %d'
 		epoch, sol, ltimes = 0, 0, { }
 		while True:
+			# Separate the RHS into row keys and values
+			rkeys, rhs = zip(*self.rhs.items())
+			rhs = np.array(rhs)
+
+			lpmat = pathmat[rkeys,:]
+
+			if coleq:
+				# Compute norms of columns of global matrix
+				colscale = snorm(lpmat, axis=0)**2
+				self.comm.Allreduce(MPI.IN_PLACE, colscale, op=MPI.SUM)
+				np.sqrt(colscale, colscale)
+
+				# Clip normalization factors to avoid blow-up
+				mxnrm = np.max(colscale)
+				np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
+			else: colscale = None
+
+			# Include column scaling in the matrix-vector product
+			def mvp(x):
+				if colscale is not None: x = x / colscale
+				v = lpmat.dot(x)
+				return v
+
+			# Transpose operation requires communications
+			def amvp(u):
+				# Synchronize
+				self.comm.Barrier()
+				# Multiple by transposed local share, then flatten
+				v = lpmat.T.dot(u)
+				if colscale is not None: v /= colscale
+				# Accumulate contributions from all ranks
+				self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
+				return v
+
+			# Build the linear operator representing the path matrix
+			A = LinearOperator(shape=lpmat.shape, matvec=mvp,
+						rmatvec=amvp, dtype=lpmat.dtype)
+
 			# RHS is arrival times minus unperturbed solution
-			rhs = self.rhs - self.pathmat.dot(s.perturb(sol).ravel('C'))
+			rhs -= self.pathmat[rkeys,:].dot(s.perturb(sol).ravel('C'))
 
 			# Use the right maxiter value for this epoch
 			results = lsmr(A, rhs, unorm=unorm, vnorm=norm,
 					maxiter=next(itercounts), **lsmropts)
 
-			ds = results[0] / colscale
+			ds = results[0]
+			if colscale is not None: ds /= colscale
 
 			cmwt = next(chamwts)
 			if cmwt:
