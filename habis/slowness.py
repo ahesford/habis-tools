@@ -6,7 +6,7 @@ of parameters.
 import numpy as np
 from scipy.sparse import csr_matrix, coo_matrix
 
-from itertools import izip
+
 
 class Slowness(object):
 	'''
@@ -265,7 +265,7 @@ class PiecewiseSlowness(Slowness):
 			rows.extend(ri)
 			if k == 'unconstrained':
 				# Unconstrained parameters get their own columns
-				cols.extend(xrange(N, N + len(ri)))
+				cols.extend(range(N, N + len(ri)))
 				N += len(ri)
 			else:
 				# Constrained parameters fall in the same column

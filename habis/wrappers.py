@@ -15,7 +15,7 @@ def _strtup(a):
 	unique.
 	'''
 	try: it = iter(a)
-	except TypeError: it = xrange(a)
+	except TypeError: it = range(a)
 	tup = tuple(str(av) for av in it)
 	if len(set(tup)) != len(tup):
 		raise ValueError('Values in sequence must be unique')
@@ -41,11 +41,11 @@ class CommandWrapper(object):
 		contextWait must be a Boolean (the default value is True). This
 		is stored
 		'''
-		if not isinstance(command, basestring):
+		if not isinstance(command, str):
 			raise ValueError('Command must be a string')
 
 		self.context = kwargs.pop('context', None)
-		if not (self.context is None or isinstance(self.context, basestring)):
+		if not (self.context is None or isinstance(self.context, str)):
 			raise ValueError('Provided context must be None or a string')
 
 		self.contextWait = bool(kwargs.pop('contextWait', True))
@@ -326,7 +326,7 @@ class BlockCommandWrapper(CommandWrapper):
 		If duplicate block indices are encountered when building the
 		map, a KeyError will be raised. (This should never happen.)
 		'''
-		from Queue import Queue, Empty
+		from queue import Queue, Empty
 		from threading import Thread
 
 		# Compute the local share and size

@@ -64,25 +64,19 @@ class HabisRemoteCommand(object):
 		'''
 		from shlex import split as shsplit
 
-		if not isinstance(cmd, basestring):
+		if not isinstance(cmd, str):
 			raise ValueError('Command must be a string')
 
 		self.cmd = cmd
 		self.fatalError = fatalError
 
 		# Copy the kwargmap dictionaries
-		try: kwitems = kwargmap.iteritems()
-		except AttributeError: kwitems = kwargmap.items()
-		self.kwargmap = { k: dict(v) for k, v in kwitems }
+		self.kwargmap = kwargmap.copy()
 
 		# Copy the argmap tuples or strings
 		self.argmap = {}
-		try:
-			pwitems = argmap.iteritems()
-		except AttributeError:
-			pwitems = argmap.items()
-		for key, args in pwitems:
-			if isinstance(args, basestring):
+		for key, args in argmap.items():
+			if isinstance(args, str):
 				args = shsplit(args)
 			self.argmap[key] = tuple(args)
 
@@ -197,7 +191,7 @@ class HabisResponseAccumulator(object):
 		'''
 		Returns the first nonzero return code, or else 0.
 		'''
-		for response in self.responses.itervalues():
+		for response in self.responses.values():
 			retcode = response['returncode']
 			if retcode != 0: return retcode
 
@@ -215,7 +209,7 @@ class HabisResponseAccumulator(object):
 		output = ''
 		key = 'stdout' if not stderr else 'stderr'
 
-		for hostid, response in sorted(self.responses.iteritems()):
+		for hostid, response in sorted(self.responses.items()):
 			try: text = response[key].rstrip()
 			except KeyError: text = ''
 
@@ -224,7 +218,7 @@ class HabisResponseAccumulator(object):
 
 			# Pretty-print result key as a header
 			try:
-				if isinstance(hostid, basestring):
+				if isinstance(hostid, str):
 					raise ValueError('Fall-through')
 				host, block = hostid
 			except (TypeError, ValueError): host = str(hostid)
@@ -428,7 +422,7 @@ class HabisRemoteConductorGroup(object):
 		try: (lambda **r: r)(**cvars)
 		except TypeError:
 			# Split a single string into a sequence
-			if isinstance(cvars, basestring):
+			if isinstance(cvars, str):
 				from shlex import split
 				cvars = split(cvars)
 
@@ -569,7 +563,7 @@ class HabisRemoteConductorGroup(object):
 				keyed[k] = CommandWrapper.decodeResult(v)
 		else:
 			for h, r in zip(hosts, results):
-				for k, v in r.iteritems():
+				for k, v in r.items():
 					nk = (h, k)
 					if nk in keyed:
 						raise KeyError('Duplicate key %s' % (k,))
@@ -590,7 +584,7 @@ class HabisRemoteConductorGroup(object):
 		according to CommandWrapper.encodeResult.
 		'''
 		calls = []
-		for (addr, port), cond in self.conductors.iteritems():
+		for (addr, port), cond in self.conductors.items():
 			# Try to get the args and kwargs for this server
 			args, kwargs = hacmd.argsForKey(addr)
 			d = cond.callRemote('execute', hacmd.cmd, *args, **kwargs)
@@ -749,7 +743,7 @@ class HabisConductor(pb.Root):
 		if not contexts: return set()
 
 		# Split string context specifies
-		if isinstance(contexts, basestring):
+		if isinstance(contexts, str):
 			from shlex import split
 			contexts = split(contexts)
 
@@ -760,7 +754,7 @@ class HabisConductor(pb.Root):
 		if '__all__' in contexts:
 			if len(contexts) > 1:
 				raise HabisConductorError("Context '__all__' must be specified alone")
-			contexts = set(self._contextLocks.iterkeys())
+			contexts = set(self._contextLocks.keys())
 
 		return contexts
 
@@ -993,7 +987,7 @@ class HabisLineRepeater(LineReceiver):
 				result = self._encodeLastResult()
 			except (yaml.YAMLError, ImportError) as e:
 				self.sendError('Cannot encode last command result')
-				print 'ERROR: unable to encode command results', e
+				print('ERROR: unable to encode command results', e)
 			else:
 				# Write the length of the result string
 				nresult = len(result)

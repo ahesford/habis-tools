@@ -9,7 +9,7 @@ def configuration(parent_package='', top_path=None):
 
 	config = Configuration('habis', parent_package, top_path)
 
-	cyfiles = [os.path.join(d, '*.pyx') for d in config.package_dir.itervalues()]
+	cyfiles = [os.path.join(d, '*.pyx') for d in config.package_dir.values()]
 
 	for ext in cythonize(cyfiles):
 		config.ext_modules.append(ext)

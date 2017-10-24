@@ -70,7 +70,7 @@ class Window(tuple):
 		end = kwargs.pop('end', None)
 
 		if len(kwargs) > 0:
-			raise TypeError('Unrecognized keyword argument %s' % kwargs.iteritems().next())
+			raise TypeError('Unrecognized keyword %s' % (next(kwargs.keys()),))
 
 		if len(args) > 0:
 			if start is not None:
@@ -1079,7 +1079,7 @@ class Waveform(object):
 		peaks = signal.findpeaks(envelope)
 		# Map peak and col indices to global window
 		return [ { k: (v and (v[0] + st, v[1]) or None)
-			   for k, v in pk.iteritems() } for pk in peaks ]
+			   for k, v in pk.items() } for pk in peaks ]
 
 
 	def signsquare(self):
@@ -1163,7 +1163,7 @@ class Waveform(object):
 		useheight = kwargs.pop('useheight', False)
 
 		if len(kwargs):
-			raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
+			raise TypeError("Unrecognized keyword '%s'" % next((kwargs.keys()),))
 
 		if prommode not in ('absolute', 'noisedb', 'relative'):
 			raise ValueError("Keyword argument 'prommode' must be one of 'absolute', 'noisedb' or 'relative'")
