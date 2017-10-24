@@ -71,7 +71,7 @@ if __name__ == '__main__':
 	args = args[1:]
 
 	# Build the blocklist and grab the local share
-	share = len(blocklist) / size
+	share = len(blocklist) // size
 	rem = len(blocklist) % size
 	start = rank * share + min(rank, rem)
 	if rank < rem: share += 1

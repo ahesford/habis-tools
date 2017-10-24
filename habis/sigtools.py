@@ -689,7 +689,7 @@ class Waveform(object):
 					data[ostart:oend] *= tail[istart:iend]
 				except TypeError: return
 
-			ltail = len(tails) / 2
+			ltail = len(tails) // 2
 			# Apply the left and right tails in succession
 			lwin = (window.start, ltail)
 			tailer(data, dwin, tails[:ltail], lwin)
@@ -731,12 +731,12 @@ class Waveform(object):
 		'''
 		if real is None: real = self.isReal
 		if n is None:
-			n = self.nsamp if not real else (int(self.nsamp // 2) + 1)
+			n = self.nsamp if not real else (self.nsamp // 2 + 1)
 
 		# Build the spectral indices
 		kidx = np.arange(n)
 		# Correct negative indices in a C2C transform
-		if not real: kidx[int((n + 1) / 2):] -= n
+		if not real: kidx[int(n + 1) // 2:] -= n
 
 		return kidx
 
@@ -803,7 +803,7 @@ class Waveform(object):
 		else:
 			nex = n * l2
 			isig = np.zeros((nex,), dtype=ssig.dtype)
-			kmax, kmin = int((l2 + 1) / 2), -int(l2 / 2)
+			kmax, kmin = int((l2 + 1) // 2), -int(l2 // 2)
 			isig[:kmax] = ssig[:kmax]
 			isig[kmin:] = ssig[kmin:]
 			csig = fft.ifft(isig, nex)[:n*l]
@@ -876,7 +876,7 @@ class Waveform(object):
 		# Build the shift operator
 		sh = np.exp(-2j * math.pi * d * kidx / n)
 		# Correct the Nyquist frequency term for conjugate symmetry
-		if n % 2 == 0: sh[n / 2] = np.real(sh[n / 2])
+		if n % 2 == 0: sh[n // 2] = np.real(sh[n // 2])
 
 		if dtype is None: dtype = self.dtype
 		ssig = ifftfunc(fsig * sh, n).astype(dtype)
@@ -932,7 +932,7 @@ class Waveform(object):
 		*POSITIVE* DFT frequency bin indices. If end is None, all
 		positive frequencies are used.
 		'''
-		if end is None: end = int(self.nsamp / 2) + 1
+		if end is None: end = int(self.nsamp // 2) + 1
 		# Compute positive DFT frequencies
 		freqs = -2.0 * math.pi * np.arange(start, end) / self.nsamp
 		# Compute the unwrapped phase angle in the band of interest
@@ -1003,7 +1003,7 @@ class Waveform(object):
 			# Padding must be done in middle
 			cpsig = np.zeros((nint, ), dtype=cfsig.dtype)
 			# Find the bounds of the positive and negative frequencies
-			kmax, kmin = int((npad + 1) / 2), -int(npad / 2)
+			kmax, kmin = int((npad + 1) // 2), -int(npad // 2)
 			# Copy frequencies to padded array and take IDFT
 			cpsig[:kmax] = cfsig[:kmax]
 			cpsig[kmin:] = cfsig[kmin:]
@@ -1287,8 +1287,8 @@ class Waveform(object):
 		if r2c:
 			fmax = len(fsig) + 1
 		else:
-			fmax =  int(n + 1) / 2
-			fmin = -int(n / 2)
+			fmax =  (n + 1) // 2
+			fmin = -(n // 2)
 
 		# Apply the positive frequency window
 		fsig[:start] = 0
@@ -1301,7 +1301,7 @@ class Waveform(object):
 
 		# Apply the tails
 		if len(tails) > 0:
-			ltails = len(tails) / 2
+			ltails = len(tails) // 2
 			fsig[start:start+ltails] *= tails[:ltails]
 			fsig[end-ltails:end] *= tails[-ltails:]
 

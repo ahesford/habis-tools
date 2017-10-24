@@ -56,7 +56,7 @@ if __name__ == '__main__':
 	MPI.COMM_WORLD.Barrier()
 
 	# Determine the group shares for each MPI rank
-	share, rem = ngroups / mpisize, ngroups % mpisize
+	share, rem = ngroups // mpisize, ngroups % mpisize
 	# Each entry takes the form (start, share)
 	grpshares = [(i * share + min(i, rem), share + int(i < rem)) for i in range(mpisize)]
 

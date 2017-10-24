@@ -331,7 +331,7 @@ class BlockCommandWrapper(CommandWrapper):
 
 		# Compute the local share and size
 		nblocks = len(self.blocks)
-		share = nblocks / self.nchunks
+		share = nblocks // self.nchunks
 		rem = nblocks % self.nchunks
 		start = self.chunk * share + min(self.chunk, rem)
 		share += int(self.chunk < rem)

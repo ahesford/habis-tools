@@ -440,7 +440,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 			# Bandpass filter the spectral samples
 			if len(tails) > 0:
-				ltails = len(tails) / 2
+				ltails = len(tails) // 2
 				c[:,fswin.start:fswin.start+ltails] *= tails[np.newaxis,:ltails]
 				c[:,fswin.end-ltails:fswin.end] *= tails[np.newaxis,-ltails:]
 

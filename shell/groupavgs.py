@@ -57,11 +57,11 @@ def groupavg(infile, rxchans, grouplen, osamp, queue=None):
 	# Use only local receive channels, but all transmit channels
 	rxgroups = defaultdict(list)
 	for rx in rxchans:
-		rxgroups[int(rx / grouplen)].append(rx)
+		rxgroups[int(rx // grouplen)].append(rx)
 
 	txgroups = defaultdict(list)
 	for tx in wset.txidx:
-		txgroups[int(tx / grouplen)].append(tx)
+		txgroups[int(tx // grouplen)].append(tx)
 
 	# Build a dictionary of average responses
 	avgs = {}
@@ -149,7 +149,7 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0, window=No
 			# Assign a meaningful process name
 			procname = process.procname(i)
 			# Block the receive channels
-			share, rem = len(rxidx) / nproc, len(rxidx) % nproc
+			share, rem = len(rxidx) // nproc, len(rxidx) % nproc
 			start = i * share + min(i, rem)
 			share = share + int(i < rem)
 			args = (infile, rxidx[start:start+share], grouplen, osamp, queue)

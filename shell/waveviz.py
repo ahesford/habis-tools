@@ -271,7 +271,7 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	# Ensure at least 10 x ticks exist
 	ax[0].set_xlim(0, img.shape[0])
 	if len(ax[0].get_xticks()) < 10:
-		ax[0].set_xticks(list(range(0, img.shape[0] + 1, int(img.shape[0] / 10))))
+		ax[0].set_xticks(list(range(0, img.shape[0] + 1, img.shape[0] // 10)))
 
 	# Save the image
 	fig.savefig(output, bbox_inches='tight')

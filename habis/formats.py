@@ -1085,7 +1085,7 @@ class WaveformSet(object):
 			if count > 0:
 				# Default group size, if unspecified, is 10240 / count
 				if size == 0:
-					size = 10240 / count
+					size = 10240 // count
 					if size * count != 10240:
 						raise ValueError('Cannot infer group size for %d groups' % count)
 

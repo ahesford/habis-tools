@@ -124,7 +124,7 @@ if __name__ == '__main__':
 
 	# Figure out the start and share of each destination host
 	nhosts = len(hostlist)
-	share, rem = grpcounts[groupacc] / nhosts, grpcounts[groupacc] % nhosts
+	share, rem = grpcounts[groupacc] // nhosts, grpcounts[groupacc] % nhosts
 	dstshares = [(i * share + min(i, rem), share + int(i < rem)) for i in range(nhosts)]
 	# Map group indices to hosts
 	def grouptohost(i):

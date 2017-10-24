@@ -205,7 +205,7 @@ def backprojectionEngine(config):
 
 	# Find the local share of arrival-time keys
 	nkeys = len(prlist)
-	share, srem = nkeys / mpisize, nkeys % mpisize
+	share, srem = nkeys // mpisize, nkeys % mpisize
 	start = mpirank * share + min(mpirank, srem)
 	if mpirank < srem: share += 1
 

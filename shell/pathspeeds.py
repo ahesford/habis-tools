@@ -116,7 +116,7 @@ def tracerEngine(config):
 		centers = np.loadtxt(centerFormat.format(grp))
 		# Compute the start and share of the local center chunk
 		ncenters = len(centers)
-		share, srem = ncenters / mpisize, ncenters % mpisize
+		share, srem = ncenters // mpisize, ncenters % mpisize
 		start = mpirank * share + min(mpirank, srem)
 		if mpirank < srem: share += 1
 

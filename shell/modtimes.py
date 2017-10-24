@@ -81,7 +81,7 @@ if __name__ == '__main__':
 
 	# Determine the local share of transmit-receive pairs
 	npairs = len(trpairs)
-	share, srem = npairs / size, npairs % size
+	share, srem = npairs // size, npairs % size
 	start = rank * share + min(rank, srem)
 	if rank < srem: share += 1
 
