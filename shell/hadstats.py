@@ -3,15 +3,15 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import numpy as np, os, sys, getopt, cPickle
+import numpy as np, os, sys, getopt, pickle
 
 from numpy import fft, linalg as la
 
-from itertools import izip
+
 
 from scipy.signal import hilbert
 
-import multiprocessing, Queue
+import multiprocessing, queue
 
 from pycwp import process, stats
 
@@ -22,7 +22,7 @@ from habis.sigtools import Waveform, Window
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s <configuration>' % binfile
+	print('USAGE: %s <configuration>' % binfile, file=sys.stderr)
 	if fatal: sys.exit(fatal)
 
 
@@ -64,7 +64,7 @@ def mphadtest(nproc, *args, **kwargs):
 		while responses < nproc:
 			try:
 				locres = queue.get(timeout=0.1)
-			except Queue.Empty:
+			except queue.Empty:
 				pass
 			else:
 				responses += 1
@@ -166,7 +166,7 @@ def hadtest(decfile, stxfile, **kwargs):
 		except KeyError: atmap = { }
 
 	if len(kwargs):
-		raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
+		raise TypeError("Unrecognized keyword argument '%s'" % (next(kwargs.keys()),))
 
 	# Open the inputs and ensure that both are compatible
 	decset = WaveformSet.fromfile(decfile)
@@ -194,7 +194,7 @@ def hadtest(decfile, stxfile, **kwargs):
 			[(n + 'pwr', '<f4') for n in ['e', 'dp', 'dn', 'sp', 'sn']])
 	chanrecs = np.zeros((len(decset.rxidx[start::stride]), len(txlist)), dtype=rectype)
 
-	for chanrow, rxc in izip(chanrecs, decset.rxidx[start::stride]):
+	for chanrow, rxc in zip(chanrecs, decset.rxidx[start::stride]):
 		# Grab the records for the receive channel
 		dechdr, decdat = decset.getrecord(rxc, txlist)
 		stxhdr, stxdat = stxset.getrecord(rxc, txlist)
@@ -214,7 +214,7 @@ def hadtest(decfile, stxfile, **kwargs):
 		# Grab the overlapping portion of the window
 		cwin = Window(max(dwin.start, swin.start), end=min(dwin.end, swin.end))
 
-		for chanrec, decrow, stxrow, txc in izip(chanrow, decdat, stxdat, txlist):
+		for chanrec, decrow, stxrow, txc in zip(chanrow, decdat, stxdat, txlist):
 			# Convert each record row to a Waveform
 			decwave = Waveform(dwin.end, decrow, dwin.start)
 			stxwave = Waveform(swin.end, stxrow, swin.start)
@@ -268,7 +268,7 @@ if __name__ == '__main__':
 
 	try: config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0], fatal=True)
 
 	# Configuration sections
@@ -338,12 +338,12 @@ if __name__ == '__main__':
 			raise HabisNoOptionError('Skip reference specification')
 		kwargs['ref'] = config.get('measurement', 'reference')
 	except HabisNoOptionError:
-		print 'Delays will be estimated by direct cross-correlation'
+		print('Delays will be estimated by direct cross-correlation')
 	except Exception as e:
 		err = 'Invalid specification of optional reference'
 		raise HabisConfigError.fromException(err, e)
 	else:
-		print 'Delays will be estimated by cross-correlation with reference', kwargs['ref']
+		print('Delays will be estimated by cross-correlation with reference', kwargs['ref'])
 
 	try:
 		kwargs['peaks'] = config.get(hsec, 'peaks')
@@ -355,6 +355,6 @@ if __name__ == '__main__':
 
 
 	for decfile, stxfile, outfile in zip(decfiles, stxfiles, outfiles):
-		print 'Comparing data files (%s, %s) -> %s' % (decfile, stxfile, outfile)
+		print('Comparing data files (%s, %s) -> %s' % (decfile, stxfile, outfile))
 		results = mphadtest(nproc, decfile, stxfile, **kwargs)
-		cPickle.dump(results, open(outfile, 'wb'), protocol=2)
+		pickle.dump(results, open(outfile, 'wb'), protocol=2)

@@ -6,7 +6,7 @@ from math import sqrt
 
 from scipy.signal import hilbert
 
-from itertools import izip
+
 
 from collections import defaultdict
 
@@ -16,7 +16,7 @@ from habis.formats import loadmatlist, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
-	print >> sys.stderr, 'USAGE: %s [-b bitrate] [-e] [-m] [-l] [-w s,e] [-a glob[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname
+	print('USAGE: %s [-b bitrate] [-e] [-m] [-l] [-w s,e] [-a glob[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname, file=sys.stderr)
 	sys.exit(fatal)
 
 
@@ -55,8 +55,8 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	import matplotlib.animation as ani
 
 	# Ensure all data sets are equally sized
-	nsets = max(len(v) for v in waves.itervalues())
-	if any(len(v) != nsets for v in waves.itervalues()):
+	nsets = max(len(v) for v in waves.values())
+	if any(len(v) != nsets for v in waves.values()):
 		raise ValueError('All waveform lists must be equally sized')
 
 	# Prepare the axes for a 1080p frame
@@ -80,13 +80,13 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 
 	if dwin is None:
 		# With no data window, show the entire data range
-		dstart = min(w.datawin.start for v in waves.itervalues() for w in v)
-		dend = max(w.datawin.end for v in waves.itervalues() for w in v)
+		dstart = min(w.datawin.start for v in waves.values() for w in v)
+		dend = max(w.datawin.end for v in waves.values() for w in v)
 		dwin = Window(dstart, end=dend)
 	else:
 		if atimes is not None:
 			# The window is relative to the arrival-time range
-			cpairs = set(waves.iterkeys()).intersection(atimes.iterkeys())
+			cpairs = set(waves.keys()).intersection(iter(atimes.keys()))
 			dstart = min(atimes[pair][0] for pair in cpairs)
 			dend = max(atimes[pair][0] for pair in cpairs)
 			dwin = Window(max(0, int(dstart + dwin[0])), end=int(dend + dwin[1]))
@@ -94,17 +94,17 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 			dwin = Window(dwin[0], end=dwin[1])
 
 	# Clip the waveforms to the common data window
-	waves = { k: [ w.window(dwin) for w in v ] for k, v in waves.iteritems() }
+	waves = { k: [ w.window(dwin) for w in v ] for k, v in waves.items() }
 
 	# Set the amplitude limits
-	pkamps = [ w.envelope().extremum()[0] for v in waves.itervalues() for w in v ]
+	pkamps = [ w.envelope().extremum()[0] for v in waves.values() for w in v ]
 	if cthresh is None: vmax = np.max(pkamps)
 	else: vmax = np.mean(pkamps) + cthresh * np.std(pkamps)
 
 	# Build the common time axis
 	taxis = np.arange(dwin.start, dwin.end)
 
-	print 'Display frame is [%d, %d, %g, %g]' % (dwin.start, dwin.end, -vmax, vmax)
+	print('Display frame is [%d, %d, %g, %g]' % (dwin.start, dwin.end, -vmax, vmax))
 
 	# Create the frames and write the video
 	with writer.saving(fig, output, fig.get_dpi()):
@@ -116,9 +116,9 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 		ax.set_ylabel('Amplitude', fontsize=14)
 		ax.grid(True)
 
-		for i, (pair, wlist) in enumerate(sorted(waves.iteritems())):
+		for i, (pair, wlist) in enumerate(sorted(waves.items())):
 			# Update the line data
-			for l, w in izip(lines, wlist):
+			for l, w in zip(lines, wlist):
 				l.set_data(taxis, w.getsignal(dwin))
 
 			# Plot an arrival time, if possible
@@ -134,7 +134,7 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 
 			# Capture the frame
 			writer.grab_frame()
-			if not i % 50: print 'Stored frame %s' % (pair,)
+			if not i % 50: print('Stored frame %s' % (pair,))
 
 
 def plotwaves(output, waves, atimes=None, mtime=None,
@@ -175,7 +175,7 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	from matplotlib import cm
 
 	# Split the mapping in indexed order
-	widx, waves = zip(*sorted(waves.iteritems()))
+	widx, waves = zip(*sorted(waves.items()))
 
 	# Pull the relevant arrival times for a subplot
 	if atimes is not None:
@@ -271,7 +271,7 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	# Ensure at least 10 x ticks exist
 	ax[0].set_xlim(0, img.shape[0])
 	if len(ax[0].get_xticks()) < 10:
-		ax[0].set_xticks(range(0, img.shape[0] + 1, int(img.shape[0] / 10)))
+		ax[0].set_xticks(list(range(0, img.shape[0] + 1, int(img.shape[0] / 10))))
 
 	# Save the image
 	fig.savefig(output, bbox_inches='tight')
@@ -308,14 +308,14 @@ def getatimes(atarg, freq=1, scalar=True):
 		acols = [int(av, base=10) for av in atcomps[-1].split(',')]
 		atname = ':'.join(atcomps[:-1])
 		atmap = loadmatlist(atname, scalar=False, nkeys=2, forcematch=True)
-		print 'Loading columns %s from arrival-time file %s' % (acols, atname)
+		print('Loading columns %s from arrival-time file %s' % (acols, atname))
 
 	if scalar:
 		if len(acols) != 1:
 			raise ValueError('Scalar arrival-time map requires a single column specification')
 		acols = acols[0]
 
-	return { k: freq * v[acols] for k, v in atmap.iteritems() }
+	return { k: freq * v[acols] for k, v in atmap.items() }
 
 
 def shiftgrps(wavegrps, atimes):
@@ -330,7 +330,7 @@ def shiftgrps(wavegrps, atimes):
 
 	The shifting is done in place, but wavegrps is also returned.
 	'''
-	for (t,r) in wavegrps.iterkeys():
+	for (t,r) in wavegrps.keys():
 		# Pull the waveform list
 		waves = wavegrps[t,r]
 
@@ -344,7 +344,7 @@ def shiftgrps(wavegrps, atimes):
 		# Build the new list of shifted waves
 		wavegrps[t,r] = [ waves[0] ]
 		wavegrps[t,r].extend(wf.shift(atlist[0] - atv)
-					for wv, atv in izip(waves[1:], atlist[1:]))
+					for wv, atv in zip(waves[1:], atlist[1:]))
 
 	return wavegrps
 
@@ -361,13 +361,13 @@ def eqwavegrps(wavegrps):
 	'''
 	# Find the peak amplitudes for each group
 	pkamps = { k: max(wf.envelope().extremum()[0] for wf in v) 
-			for k, v in wavegrps.iteritems() }
+			for k, v in wavegrps.items() }
 
 	# Find low-amplitude threshold
-	minamp = max(pkamps.itervalues()) * sqrt(sys.float_info.epsilon)
+	minamp = max(pkamps.values()) * sqrt(sys.float_info.epsilon)
 
 	# Equalize the waveforms in each group, if desired
-	for k, pamp in pkamps.iteritems():
+	for k, pamp in pkamps.items():
 		if pamp < minamp: continue
 		for v in wavegrps[k]: v /= pamp
 
@@ -397,7 +397,7 @@ def getwavegrps(infiles, nsamp=None):
 			raise IOError('Input %s must contain a single waveform' % (infile,))
 
 		rx = wset.rxidx[0]
-		tx = wset.txidx.next()
+		tx = next(wset.txidx)
 
 		wf = wset.getwaveform(rx, tx)
 		if nsamp: wf.nsamp = nsamp
@@ -408,8 +408,8 @@ def getwavegrps(infiles, nsamp=None):
 		wavegrps[tx,rx].append(nwf)
 
 	# Filter the list to exclude short lists
-	maxlen = max(len(w) for w in wavegrps.itervalues())
-	return { k: v for k, v in wavegrps.iteritems() if len(v) == maxlen }
+	maxlen = max(len(w) for w in wavegrps.values())
+	return { k: v for k, v in wavegrps.items() if len(v) == maxlen }
 
 
 def getwave(infile, nsamp=None, equalize=False):
@@ -435,7 +435,7 @@ def getwave(infile, nsamp=None, equalize=False):
 		raise IOError('Input %s must contain a single waveform' % (infile,))
 
 	rx = wset.rxidx[0]
-	tx = wset.txidx.next()
+	tx = next(wset.txidx)
 
 	wf = wset.getwaveform(rx, tx)
 	if nsamp: wf.nsamp = nsamp
@@ -492,7 +492,7 @@ if __name__ == '__main__':
 			usage(fatal=True)
 
 	if len(args) < 2:
-		print >> sys.stderr, 'ERROR: required arguments missing'
+		print('ERROR: required arguments missing', file=sys.stderr)
 		usage(fatal=True)
 
 	# Pull the output name and load the input files
@@ -505,18 +505,18 @@ if __name__ == '__main__':
 	elif imgext == '.pdf':
 		vidmode = False
 	else:
-		print >> sys.stderr, 'ERROR: <imgname> must have extension mp4 or pdf'
+		print('ERROR: <imgname> must have extension mp4 or pdf', file=sys.stderr)
 		usage(fatal=True)
 
 	if atimes is not None:
 		# Load arrival times and convert to samples
 		atimes = getatimes(atimes, freq, not vidmode)
-		print 'Parsed arrival times'
+		print('Parsed arrival times')
 
 	try:
 		infiles = matchfiles(args)
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(fatal=True)
 
 	if vidmode:
@@ -525,12 +525,12 @@ if __name__ == '__main__':
 		# Shift waveforms if arrival times are provided
 		if atimes:
 			wavegrps = shiftgrps(wavegrps, atimes)
-			print 'Shifted waveform groups'
+			print('Shifted waveform groups')
 		# Equalize waveforms as desired
 		if equalize:
 			wavegrps = eqwavegrps(wavegrps)
-			print 'Equalized waveform groups'
-		print 'Storing waveform video to file', imgname
+			print('Equalized waveform groups')
+		print('Storing waveform video to file', imgname)
 		plotframes(imgname, wavegrps, atimes, dwin, cthresh, bitrate)
 	else:
 		# Load the waveforms
@@ -546,7 +546,7 @@ if __name__ == '__main__':
 			# Shift all waveforms with an arrival time to the mean
 			for k in celts:
 				waves[k] = waves[k].shift(mtime - atimes[k])
-			print 'Shifted waveforms'
+			print('Shifted waveforms')
 			if dwin is not None:
 				# The window specification is relative to the mean time
 				dwin = Window(max(0, mtime + dwin[0]), end=mtime + dwin[1])
@@ -555,9 +555,9 @@ if __name__ == '__main__':
 			dwin = Window(dwin[0], end=dwin[1], nonneg=True)
 
 		if hidewf and atimes:
-			print 'Suppressing unaligned waveforms'
-			for k, v in waves.iteritems():
+			print('Suppressing unaligned waveforms')
+			for k, v in waves.items():
 				if k not in atimes: v *= 0
 
-		print 'Storing waveform image to file', imgname
+		print('Storing waveform image to file', imgname)
 		plotwaves(imgname, waves, atimes, mtime, dwin, log, cthresh)

@@ -6,7 +6,7 @@ from math import sqrt
 
 from scipy.signal import hilbert
 
-from itertools import izip
+
 
 from collections import defaultdict
 
@@ -18,7 +18,7 @@ from habis.formats import loadmatlist, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
-	print >> sys.stderr, 'USAGE: %s <lx,ly,lz> <hx,hy,hz> <nx,ny,nz> <input> <output>' % (progname,)
+	print('USAGE: %s <lx,ly,lz> <hx,hy,hz> <nx,ny,nz> <input> <output>' % (progname,), file=sys.stderr)
 	sys.exit(fatal)
 
 
@@ -40,7 +40,7 @@ def buildtree(tris, grid):
 
 	# Populate and prune the tree
 	def inbox(box, leaf): return tris[leaf].overlaps(box)
-	otree.addleaves(xrange(len(tris)), inbox, True)
+	otree.addleaves(range(len(tris)), inbox, True)
 	otree.prune()
 	return otree
 
@@ -63,8 +63,8 @@ def depthmap(otree, tris, grid):
 	# Build the depth map
 	depth = ncell[2] * np.ones(ncell[:2], dtype=np.int64)
 
-	for i in xrange(ncell[0]):
-		for j in xrange(ncell[1]):
+	for i in range(ncell[0]):
+		for j in range(ncell[1]):
 			# Pull the column for searching
 			col = cgrid.getCell(i, j, 0)
 			# Search for triangles that overlap with this column
@@ -75,7 +75,7 @@ def depthmap(otree, tris, grid):
 			for leaf in leaves:
 				tri = tris[leaf]
 				# No need to check past the current low value
-				for k in xrange(depth[i,j]):
+				for k in range(depth[i,j]):
 					if tri.overlaps(grid.getCell(i, j, k)):
 						# Stop checking once first hit found
 						depth[i,j] = k
@@ -100,17 +100,17 @@ if __name__ == '__main__':
 	tris = [Triangle3D([nodes[v] for v in t]) for t in triangles]
 	grid = Box3D(lo, hi, ncell)
 
-	print 'Will prepare a mask for grid', grid.lo, grid.hi, grid.ncell
+	print('Will prepare a mask for grid', grid.lo, grid.hi, grid.ncell)
 
 	# Build the tree
 	otree = buildtree(tris, grid)
-	print 'Finished building Octree'
+	print('Finished building Octree')
 
 	# Build the depth map
 	depth = depthmap(otree, tris, grid)
-	print 'Finished building depth map'
+	print('Finished building depth map')
 
-	print 'Saving mask to file', sys.argv[5]
+	print('Saving mask to file', sys.argv[5])
 	# Build the mask from the depth map
 	mask = np.arange(grid.ncell[2])[np.newaxis,np.newaxis,:] >= depth[:,:,np.newaxis]
 	np.save(sys.argv[5], mask)

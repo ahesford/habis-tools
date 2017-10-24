@@ -4,11 +4,11 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import sys, itertools, numpy as np
-import multiprocessing, Queue
+import multiprocessing, queue
 
 from numpy import ma
 
-from itertools import izip
+
 
 from collections import OrderedDict, defaultdict
 
@@ -22,7 +22,7 @@ from habis.sigtools import Waveform
 
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def finddelays(nproc=1, *args, **kwargs):
@@ -77,7 +77,7 @@ def finddelays(nproc=1, *args, **kwargs):
 		responses = 0
 		while responses < nproc:
 			try: results = queue.get(timeout=0.1)
-			except Queue.Empty: pass
+			except queue.Empty: pass
 			else:
 				delays.update(results)
 				responses += 1
@@ -258,13 +258,13 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	# Interpret the element map
 	elmap = kwargs.pop('elmap', 'backscatter')
-	if isinstance(elmap, basestring): elmap = [elmap]
+	if isinstance(elmap, str): elmap = [elmap]
 
 	if not hasattr(elmap, 'items'):
 		# Merge a collection of maps
 		dmap = defaultdict(list)
 		for en, elm in enumerate(elmap):
-			if isinstance(elm, basestring):
+			if isinstance(elm, str):
 				elm = elm.strip().lower()
 				if elm == 'backscatter':
 					elm = { i: [i] for i in data.rxidx }
@@ -273,7 +273,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 				else:
 					raise ValueError("Invalid magic element map specified '%s'" % elm)
 
-			try: keys = elm.iterkeys()
+			try: keys = elm.keys()
 			except TypeError: raise TypeError('Invalid element map (index %d)' % en)
 
 			for k in keys:
@@ -286,7 +286,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		elmap = dict(dmap)
 		del dmap
 
-	try: keys = elmap.iterkeys()
+	try: keys = elmap.keys()
 	except TypeError: raise TypeError('Invalid element map')
 
 	# Flatten and sort the element map into a sorted list for striding
@@ -359,7 +359,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	queue = kwargs.pop('queue', None)
 
 	if len(kwargs):
-		raise TypeError("Unrecognized keyword argument '%s'" %  kwargs.iterkeys().next())
+		raise TypeError("Unrecognized keyword argument '%s'" %  (next(kwargs.keys()),))
 
 	# Compute the strided results
 	result = { }
@@ -451,7 +451,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 		result[(tid, rid)] = dl + data.f2c
 
 	if negcorr and numneg:
-		print '%d waveforms matched with negative cross-correlations' % (numneg,)
+		print('%d waveforms matched with negative cross-correlations' % (numneg,))
 
 	try: queue.put(result)
 	except AttributeError: pass
@@ -537,7 +537,7 @@ def atimesEngine(config):
 		elmap = config.get(asec, 'elmap', default='magic:backscatter')
 
 		# Wrap a single value as a 1-element list
-		if isinstance(elmap, basestring): elmap = [elmap]
+		if isinstance(elmap, str): elmap = [elmap]
 
 		# A map should not be further touched, but a list needs loading
 		# A simple string is either a magic key or a key matrix
@@ -556,7 +556,7 @@ def atimesEngine(config):
 		kwargs['groupmap'] = config.get(asec, 'groupmap')
 
 		# Treat a string groupmap as a file name
-		if isinstance(kwargs['groupmap'], basestring):
+		if isinstance(kwargs['groupmap'], str):
 			kwargs['groupmap'] = loadkeymat(kwargs['groupmap'], dtype=int)
 	except HabisNoOptionError:
 		pass
@@ -624,12 +624,12 @@ def atimesEngine(config):
 		guesses = loadmatlist(guesses, nkeys=2, scalar=False)
 	except IOError as e:
 		guesses = None
-		print >> sys.stderr, 'WARNING - Ignoring nearmap:', e
+		print('WARNING - Ignoring nearmap:', e, file=sys.stderr)
 	except (KeyError, TypeError, AttributeError):
 		guesses = None
 	else:
 		# Adjust delay time scales
-		guesses = { k: (v - t0) / dt for k, v in guesses.iteritems() }
+		guesses = { k: (v - t0) / dt for k, v in guesses.items() }
 
 	# Adjust the delay time scales for the neardefault, if provided
 	try: v = kwargs['peaks']['neardefault']
@@ -642,7 +642,7 @@ def atimesEngine(config):
 		winmap = loadmatlist(winmap, nkeys=2, scalar=False)
 	except IOError as e:
 		winmap = None
-		print >> sys.stderr, 'WARNING - Ignoring window map:', e
+		print('WARNING - Ignoring window map:', e, file=sys.stderr)
 	except (KeyError, TypeError, AttributeError):
 		winmap = None
 	else:
@@ -652,10 +652,10 @@ def atimesEngine(config):
 	times = OrderedDict()
 
 	# Process each target in turn
-	for i, (target, datafiles) in enumerate(targetfiles.iteritems()):
+	for i, (target, datafiles) in enumerate(targetfiles.items()):
 		if guesses:
 			# Pull the column of the nearmap for this target
-			nearmap = { k: v[i] for k, v in guesses.iteritems() }
+			nearmap = { k: v[i] for k, v in guesses.items() }
 			kwargs['peaks']['nearmap'] = nearmap
 
 		if cachedelay:
@@ -665,20 +665,20 @@ def atimesEngine(config):
 
 		times[target] = dict()
 
-		print 'Finding delays for target %s (%d data files)' % (target, len(datafiles))
+		print('Finding delays for target %s (%d data files)' % (target, len(datafiles)))
 
-		for (dfile, dlayfile) in izip(datafiles, delayfiles):
+		for (dfile, dlayfile) in zip(datafiles, delayfiles):
 			kwargs['cachefile'] = dlayfile
 
 			delays = finddelays(nproc, dfile, reffile, osamp, **kwargs)
 
 			# Note the receive channels in this data file
-			lrx = set(k[1] for k in delays.iterkeys())
+			lrx = set(k[1] for k in delays.keys())
 
 			# Convert delays to arrival times
-			delays = { k: v * dt + t0 for k, v in delays.iteritems() }
+			delays = { k: v * dt + t0 for k, v in delays.items() }
 
-			if any(dv < 0 for dv in delays.itervalues()):
+			if any(dv < 0 for dv in delays.values()):
 				raise ValueError('Non-physical, negative delays exist')
 
 			if maskoutliers:
@@ -697,15 +697,15 @@ def atimesEngine(config):
 			times[target].update(optimes)
 
 	# Build the combined times list
-	for tmap in times.itervalues():
-		try: rxset.intersection_update(tmap.iterkeys())
-		except NameError: rxset = set(tmap.iterkeys())
+	for tmap in times.values():
+		try: rxset.intersection_update(tmap.keys())
+		except NameError: rxset = set(tmap.keys())
 
 	if not len(rxset):
 		raise ValueError('Different targets have no common receive-channel indices')
 
 	# Cast to Python float to avoid numpy dependencies in pickled output
-	ctimes = { i: [float(t[i]) for t in times.itervalues()] for i in sorted(rxset) }
+	ctimes = { i: [float(t[i]) for t in times.values()] for i in sorted(rxset) }
 
 	# Save the output as a pickled map
 	savez_keymat(outfile, ctimes)
@@ -719,11 +719,11 @@ if __name__ == '__main__':
 	# Read the configuration file
 	try: config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 
 	# Call the calculation engine
 	try: atimesEngine(config)
 	except Exception as e:
-		print >> sys.stderr, "Unable to complete arrival-time estimation;", e
+		print("Unable to complete arrival-time estimation;", e, file=sys.stderr)

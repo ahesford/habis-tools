@@ -4,7 +4,7 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import sys, itertools, math, numpy as np
-import multiprocessing, Queue
+import multiprocessing, queue
 
 from scipy.stats import linregress
 
@@ -17,7 +17,7 @@ from habis.sigtools import Waveform
 
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def groupavg(infile, rxchans, grouplen, osamp, queue=None):
@@ -66,7 +66,7 @@ def groupavg(infile, rxchans, grouplen, osamp, queue=None):
 	# Build a dictionary of average responses
 	avgs = {}
 
-	for rxgrp, rxlist in rxgroups.iteritems():
+	for rxgrp, rxlist in rxgroups.items():
 		# Try to find any transmit channels in this group
 		try: txlist = txgroups[rxgrp]
 		except KeyError: continue
@@ -162,16 +162,16 @@ def mpgroupavg(infile, grouplen, nproc, osamp, regress=None, offset=0, window=No
 			try:
 				# Collect the per-process averages, grouping by group index
 				results = queue.get(timeout=0.1)
-				for key, value in results.iteritems():
+				for key, value in results.items():
 					avglists[key].append(value)
 				responses += 1
-			except Queue.Empty: pass
+			except queue.Empty: pass
 
 		pool.wait()
 
 	# Compute the overall group averages
 	averages = {}
-	for gidx, avgs in avglists.iteritems():
+	for gidx, avgs in avglists.items():
 		ref = alignedsum(avgs, osamp, False)
 		ref /= np.max(ref.envelope())
 
@@ -242,7 +242,7 @@ def averageEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	try:
-		nproc = config.get('general', 'nproc', mapper=int
+		nproc = config.get('general', 'nproc', mapper=int,
 				failfunc=process.preferred_process_count)
 	except Exception as e:
 		err = 'Invalid specification of optional nproc in [general]'
@@ -280,15 +280,15 @@ def averageEngine(config):
 		raise HabisConfigError.fromException(err, e)
 
 	for datafile, grpformat, outfile in zip(datafiles, grpformats, outfiles):
-		print 'Computing average responses for data file', datafile
+		print('Computing average responses for data file', datafile)
 		avgs = mpgroupavg(datafile, grouplen, nproc, osamp, regress, offset, window)
 		if grpformat:
 			# Save per-group averages if desired
-			for gidx, avg in avgs.iteritems():
+			for gidx, avg in avgs.items():
 				avg.store(grpformat.format(gidx))
 		if outfile:
 			# Save whole-set averages if desired
-			avg = alignedsum(avgs.itervalues(), osamp, False)
+			avg = alignedsum(iter(avgs.values()), osamp, False)
 			avg /= np.max(avg.envelope())
 			if regress:
 				avg = avg.shift(offset-avg.zerotime(*regress))
@@ -305,7 +305,7 @@ if __name__ == '__main__':
 	# Read the configuration file
 	try: config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 

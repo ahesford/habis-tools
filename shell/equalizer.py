@@ -4,12 +4,12 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import os, sys, numpy as np
-import multiprocessing, Queue
+import multiprocessing, queue
 import operator as op
 
 from numpy import ma
 
-from itertools import izip
+
 
 from pycwp import process
 
@@ -18,7 +18,7 @@ from habis.sigtools import Waveform
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def sigwidths(datfiles, chans, thetas, dists, queue=None, **kwargs):
@@ -33,7 +33,7 @@ def sigwidths(datfiles, chans, thetas, dists, queue=None, **kwargs):
 	'''
 	sfts = sigffts(datfiles, chans, **kwargs)
 	widths = dirwidths(sfts, thetas, dists)
-	widthpairs = zip(chans, widths)
+	widthpairs = list(zip(chans, widths))
 
 	# Try to put the result on the queue
 	try: queue.put(widthpairs)
@@ -78,7 +78,7 @@ def sigffts(datfiles, chans, peakwin={}, osamp=1, nsamp=None):
 	try:
 		nearmap = peakwin.pop('nearmap')
 	except KeyError:
-		nearmap = ((None for j in xrange(nsets)) for i in xrange(nchans))
+		nearmap = ((None for j in range(nsets)) for i in range(nchans))
 
 	try:
 		# Remove the optional tailwidth from the window
@@ -102,8 +102,8 @@ def sigffts(datfiles, chans, peakwin={}, osamp=1, nsamp=None):
 	# Store indices of bad signals for masking
 	masked = []
 
-	for i, (ch, nmrow) in enumerate(izip(chans, nearmap)):
-		for j, (wset, nmidx) in enumerate(izip(wsets, nmrow)):
+	for i, (ch, nmrow) in enumerate(zip(chans, nearmap)):
+		for j, (wset, nmidx) in enumerate(zip(wsets, nmrow)):
 			sig = wset[ch,ch]
 
 			if 'window' in peakwin or nmidx is not None:
@@ -285,7 +285,7 @@ def equalizerEngine(config):
 	# Build the channel list of the default is not provided
 	nchan = distances.shape[0]
 	if channels is None:
-		channels = range(nchan)
+		channels = list(range(nchan))
 	elif len(channels) != nchan:
 		raise ValueError('Number of element coordinates must match configured channel list')
 
@@ -310,7 +310,7 @@ def equalizerEngine(config):
 			try:
 				widths.extend(queue.get(timeout=0.1))
 				responses += 1
-			except Queue.Empty: pass
+			except queue.Empty: pass
 
 		pool.wait()
 
@@ -328,7 +328,7 @@ if __name__ == '__main__':
 	try:
 		config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 

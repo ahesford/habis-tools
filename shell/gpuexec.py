@@ -13,7 +13,7 @@ from pycwp import util, process
 
 def usage(progname = 'gpuexec.py'):
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, "Usage:", binfile, "[-h] [-m] [-r] <-b blocks | -l blockfile> <gpus> <command> [args] ..."
+	print("Usage:", binfile, "[-h] [-m] [-r] <-b blocks | -l blockfile> <gpus> <command> [args] ...", file=sys.stderr)
 
 def procexec(args):
 	'''
@@ -39,7 +39,7 @@ if __name__ == '__main__':
 		elif opt[0] == '-r':
 			userank = True
 		elif opt[0] == '-b':
-			blocklist = range(int(opt[1]))
+			blocklist = list(range(int(opt[1])))
 		elif opt[0] == '-l':
 			blockfile = opt[1]
 		elif opt[0] == '-h':

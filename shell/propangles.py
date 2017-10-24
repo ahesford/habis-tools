@@ -4,18 +4,18 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import os, sys, numpy as np
-import multiprocessing, Queue
+import multiprocessing, queue
 
 from numpy import ma
 
-from itertools import izip
+
 
 from pycwp import process
 
 from habis.habiconf import HabisConfigError, HabisConfigParser
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def wavepaths(elements, reflectors, nargs={}):
@@ -45,14 +45,14 @@ def wavepaths(elements, reflectors, nargs={}):
 	directions = [reflectors[np.newaxis,:,:] - el[:,np.newaxis,:] for el in elements]
 	distances = [norm(dirs, axis=-1) for dirs in directions]
 	directions = [dirs / dists[:,:,np.newaxis] 
-			for dirs, dists in izip(directions, distances)]
+			for dirs, dists in zip(directions, distances)]
 
 	# The normal should point inward, but points outward by default
 	normals = [-lsqnormal(el, **nargs) for el in elements]
 
 	# Figure the propagation angles
 	thetas = [np.arccos(np.dot(dirs, ne))
-			for dirs, ne in izip(directions, normals)]
+			for dirs, ne in zip(directions, normals)]
 
 	return distances, thetas
 
@@ -143,7 +143,7 @@ if __name__ == '__main__':
 	try:
 		config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 

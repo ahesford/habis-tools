@@ -17,7 +17,7 @@ from pycwp import boxer
 
 def usage(progname=None, fatal=True):
 	if not progname: progname = os.path.basename(sys.argv[0])
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
@@ -41,14 +41,14 @@ def getspdpaths(atfiles, keylist, elements, vclip):
 	# Load all arrival-time maps and eliminate times not of interest
 	keyset = set((t, r) for t, r in keylist)
 	atimes = { k: v for f in atfiles
-			for k, v in ldkmat(f, nkeys=2).iteritems() if k in keyset }
+			for k, v in ldkmat(f, nkeys=2).items() if k in keyset }
 
 	# Build the local collection of segments to trace
 	segs = { (t, r): boxer.Segment3D(elements[t], elements[r])
-			for t, r in atimes.iterkeys() }
+			for t, r in atimes.keys() }
 
 	# Find average speeds, ignoring values outside of clipping range
-	spds = { k: v for k in atimes.iterkeys()
+	spds = { k: v for k in atimes.keys()
 				for v in [segs[k].length / atimes[k]]
 					if vclip[0] <= v <= vclip[1] }
 
@@ -128,7 +128,7 @@ def backprojectionEngine(config):
 		prlist = [ ]
 		for prf in prfiles:
 			prmap = ldkmat(prf, nkeys=1, scalar=False)
-			for r, tl in prmap.iteritems():
+			for r, tl in prmap.items():
 				prlist.extend((t, r) for t in set(tl)
 						if t in elements and r in elements)
 		prlist.sort()
@@ -151,7 +151,7 @@ def backprojectionEngine(config):
 	try:
 		# Read the pixel probability specification as a mapping or filename
 		pixdist = config.get(bsec, 'pixdist')
-		if isinstance(pixdist, basestring):
+		if isinstance(pixdist, str):
 			# Treat the pixdist specification as a file name
 			pixdist = np.load(pixdist)
 			# Try to find an image in the loaded object
@@ -160,7 +160,7 @@ def backprojectionEngine(config):
 				thresh = pixdist
 			else:
 				with pixdist:
-					keys = pixdist.keys()
+					keys = list(pixdist.keys())
 					# An npz file must have exactly one key,
 					# or contain a 'pixdist' array
 					if len(keys) > 1:
@@ -210,10 +210,10 @@ def backprojectionEngine(config):
 	if mpirank < srem: share += 1
 
 	if not mpirank:
-		print 'Backprojection of sound-speed values, range %s' % (vclip,)
-		print 'Image extent: %s x %s' % (box.lo, box.hi)
-		print 'Image size: %s pixels' % (box.ncell,)
-		print '%d sound-speed samples over %d processes (process share %d)' % (nkeys, mpisize, share)
+		print('Backprojection of sound-speed values, range %s' % (vclip,))
+		print('Image extent: %s x %s' % (box.lo, box.hi))
+		print('Image size: %s pixels' % (box.ncell,))
+		print('%d sound-speed samples over %d processes (process share %d)' % (nkeys, mpisize, share))
 
 	# Load all arrival-time maps and eliminate times not of interest
 	segs, spds = getspdpaths(timefiles, prlist[start:start+share], elements, vclip)
@@ -221,12 +221,12 @@ def backprojectionEngine(config):
 	img = np.zeros(box.ncell, dtype=float)
 	counts = np.zeros(box.ncell, dtype=float)
 
-	for k, aspd in spds.iteritems():
+	for k, aspd in spds.items():
 		# Walk the segment to identify intersecting pixels
 		# and probabilistically label each "interior" (0) or "exterior" (1)
 		s = segs[k]
 		pxv = [k + v + (int(rand() < thresh[k]),)
-				for k, v in box.raymarcher(s).iteritems()]
+				for k, v in box.raymarcher(s).items()]
 
 		# Compute the "interior" and "exterior" fractions of the line
 		pai, pbi = 0., 0.
@@ -276,6 +276,6 @@ if __name__ == '__main__':
 		backprojectionEngine(config)
 	except Exception as e:
 		rank = MPI.COMM_WORLD.rank
-		print 'MPI rank %d: caught exception %s' % (rank, e)
+		print('MPI rank %d: caught exception %s' % (rank, e))
 		sys.stdout.flush()
 		MPI.COMM_WORLD.Abort(1)

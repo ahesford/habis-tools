@@ -3,14 +3,14 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import os, sys, ConfigParser, numpy as np
+import os, sys, configparser, numpy as np
 from numpy.linalg import norm
 
 from habis.habiconf import HabisConfigError, HabisConfigParser
 from habis.formats import loadkeymat, savez_keymat
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def exdelayEngine(config):
@@ -48,12 +48,12 @@ def exdelayEngine(config):
 
 	# Read the element and reflector positions
 	eltspos = dict(kp for efile in eltfiles
-			for kp in loadkeymat(efile).iteritems())
+			for kp in loadkeymat(efile).items())
 	reflpos = np.loadtxt(rflfile, ndmin=2)
 	nrefl, nrdim = reflpos.shape
 
 	times = {}
-	for elt, epos in eltspos.iteritems():
+	for elt, epos in eltspos.items():
 		nedim = len(epos)
 		if not nedim <= nrdim <= nedim + 2:
 			raise ValueError('Incompatible reflector and element dimensionalities')
@@ -81,7 +81,7 @@ if __name__ == '__main__':
 	try:
 		config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 

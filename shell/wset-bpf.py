@@ -6,7 +6,7 @@
 import sys, numpy as np, os, getopt
 import multiprocessing
 
-from itertools import izip
+
 
 from pycwp import process
 from habis.habiconf import matchfiles, buildpaths, numrange
@@ -15,7 +15,7 @@ from habis.sigtools import Waveform
 
 
 def usage(progname, fatal=False):
-	print >> sys.stderr, 'USAGE: %s [-r rxlist] [-t txlist] [-z] [-p nprocs] [-n nsamp] [-o outpath] -f <start:end[:tails]> <inputs>' % progname
+	print('USAGE: %s [-r rxlist] [-t txlist] [-z] [-p nprocs] [-n nsamp] [-o outpath] -f <start:end[:tails]> <inputs>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
@@ -87,7 +87,7 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 		# Create an empty record in the output set to hold filtered waves
 		oset.setrecord(hdr)
 
-		for txc, drow in izip(txchans, data):
+		for txc, drow in zip(txchans, data):
 			# Pull the waveform for the Tx-Rx pair
 			wave = Waveform(wset.nsamp, drow, hdr.win.start)
 			# Debias before filtering to mitigate Gibbs phenomenon
@@ -170,21 +170,21 @@ if __name__ == '__main__':
 			usage(sys.argv[0], fatal=True)
 
 	if filt is None:
-		print >> sys.stderr, 'ERROR: must specify filter configuration'
+		print('ERROR: must specify filter configuration', file=sys.stderr)
 		usage(sys.argv[0], fatal=True)
 
 	# Prepare the input and output lists
 	try: infiles = matchfiles(args)
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(sys.argv[0], fatal=True)
 
 	try: outfiles = buildpaths(infiles, outpath, 'bpf.wset')
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(sys.argv[0], fatal=True)
 
 	# Process the waveforms
 	for datafile, outfile in zip(infiles, outfiles):
-		print 'Filtering data file', datafile, '->', outfile
+		print('Filtering data file', datafile, '->', outfile)
 		mpwavefilt(nprocs, datafile, filt, outfile, **kwargs)

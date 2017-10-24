@@ -8,7 +8,7 @@ from numpy.linalg import norm
 
 import time
 
-from itertools import izip
+
 
 from mpi4py import MPI
 
@@ -96,7 +96,7 @@ def gathersegments(segs, mptype, comm=None, root=0):
 
 def usage(progname=None, fatal=True):
 	if not progname: progname = os.path.basename(sys.argv[0])
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
@@ -189,26 +189,26 @@ def tracerEngine(config):
 
 	# Compute an overall bounding box and an Octree for the space
 	rootbox = boxer.Box3D(*zip(*((min(j), max(j))
-		for j in izip(*(nd for tr in triangles for nd in tr.nodes)))))
+		for j in zip(*(nd for tr in triangles for nd in tr.nodes)))))
 	otree = boxer.Octree(levels, rootbox)
 
 	if not mpirank:
-		print 'Scatterer has %d triangles, %d nodes' % (len(triangles), len(nodes))
-		print 'Limiting sound-speed values to range %s' % (vclip,)
-		print 'Creating Octree decomposition (%d levels)' % (otree.level,)
+		print('Scatterer has %d triangles, %d nodes' % (len(triangles), len(nodes)))
+		print('Limiting sound-speed values to range %s' % (vclip,))
+		print('Creating Octree decomposition (%d levels)' % (otree.level,))
 
 	# Classify triangles according to overlaps with boxes in tree
 	def inbox(b, i): return triangles[i].overlaps(b)
 	# Only build the tree for a local share of triangles
-	otree.addleaves(xrange(mpirank, len(triangles), mpisize), inbox, True)
+	otree.addleaves(range(mpirank, len(triangles), mpisize), inbox, True)
 
 	etime = time.time()
 	if not mpirank:
-		print 'Local tree build time:', maketimestr(stime, etime)
+		print('Local tree build time:', maketimestr(stime, etime))
 
 	WORLD.Barrier()
 
-	if not mpirank: print 'Combining distributed Octree'
+	if not mpirank: print('Combining distributed Octree')
 
 	stime = time.time()
 
@@ -218,21 +218,21 @@ def tracerEngine(config):
 
 	etime = time.time()
 	if not mpirank:
-		print 'Tree aggregation time:', maketimestr(stime, etime)
+		print('Tree aggregation time:', maketimestr(stime, etime))
 
 	WORLD.Barrier()
 
 	if not mpirank:
-		print 'Reading and gathering arrival times'
-		if mask_outliers: print 'Will exclude outlier arrival times'
+		print('Reading and gathering arrival times')
+		if mask_outliers: print('Will exclude outlier arrival times')
 
 	# Collect the arrival times from local shares of all local maps
 	atimes = { }
-	for tfile, (start, stride) in flocshare(timefiles, MPI.COMM_WORLD).iteritems():
+	for tfile, (start, stride) in flocshare(timefiles, MPI.COMM_WORLD).items():
 		atimes.update(getatimes(tfile, elements, targidx, True,
 					vclip, mask_outliers, start, stride))
 
-	if not mpirank: print 'Approximate local share of paths is %d' % (len(atimes),)
+	if not mpirank: print('Approximate local share of paths is %d' % (len(atimes),))
 
 	# Build the segment list for the local arrival times
 	segs = { }
@@ -256,7 +256,7 @@ def tracerEngine(config):
 	nodds = 0
 
 	# Find the portion of each path in the interior and exterior of the volume
-	for k, seg in segs.iteritems():
+	for k, seg in segs.items():
 		# Skip very small segments
 		if cutil.almosteq(seg.length, 0.0, epsilon): continue
 
@@ -272,12 +272,12 @@ def tracerEngine(config):
 			# Backscatter: nonsense if there is no surface intersection
 			if not len(isects): continue
 			# Exterior path is to first hit and back, no interior
-			exl = 2.0 * min(v[0] for v in isects.itervalues())
+			exl = 2.0 * min(v[0] for v in isects.values())
 			inl = 0.0
 		else:
 			# Through transmissions: add endpoints to define all regions
 			ilens = sorted([0., 1.0] +
-					[v[0] for v in isects.itervalues()])
+					[v[0] for v in isects.values()])
 
 			# Odd count: segment starts or ends in interior
 			if len(ilens) % 2:
@@ -285,13 +285,13 @@ def tracerEngine(config):
 				continue
 
 			# Interior regions start at odd indices, exterior on evens
-			inl = sum(v[1] - v[0] for v in izip(ilens[1::2], ilens[2::2]))
-			exl = sum(v[1] - v[0] for v in izip(ilens[0::2], ilens[1::2]))
+			inl = sum(v[1] - v[0] for v in zip(ilens[1::2], ilens[2::2]))
+			exl = sum(v[1] - v[0] for v in zip(ilens[0::2], ilens[1::2]))
 
 			# Check total length against segment length (ratio)
 			if not cutil.almosteq(inl + exl, 1.0, epsilon):
-				print ('WARNING: (t,r) segment %s inferred to '
-					'actual ratio %0.5g to 1' % (k, inl + exl))
+				print(('WARNING: (t,r) segment %s inferred to '
+					'actual ratio %0.5g to 1' % (k, inl + exl)))
 
 		# In fixed-exterior mode, ignore all-exterior segments
 		if fixbg and abs(inl) <= epsilon * abs(exl): continue
@@ -325,8 +325,8 @@ def tracerEngine(config):
 	nodds = WORLD.reduce(nodds)
 	if not mpirank:
 		if nodds:
-			print 'Skipped %d paths with an odd intersections count' % (nodds,)
-		print 'Local segment tracing time:', maketimestr(stime, etime)
+			print('Skipped %d paths with an odd intersections count' % (nodds,))
+		print('Local segment tracing time:', maketimestr(stime, etime))
 
 	WORLD.Barrier()
 
@@ -338,7 +338,7 @@ def tracerEngine(config):
 	# Only the root has any work left
 	if mpirank: return
 
-	print 'Finished tracing; attempting to determine speeds'
+	print('Finished tracing; attempting to determine speeds')
 
 	stime = time.time()
 
@@ -353,7 +353,7 @@ def tracerEngine(config):
 		x = misses['exlen']
 		vbg = np.dot(t, x) / np.dot(t, t)
 
-	print 'Exterior speed: %0.5g (%d paths)' % (vbg, len(misses))
+	print('Exterior speed: %0.5g (%d paths)' % (vbg, len(misses)))
 
 	# Offset arrival times by contribution from exterior speed
 	rhs = hits['atime'] - hits['exlen'] / vbg
@@ -364,13 +364,13 @@ def tracerEngine(config):
 	else:
 		# Multimodal matrix is diagonal
 		x = tuple((hv / rv) if abs(rv) > epsilon else 0.
-				for hv, rv in izip(hits['inlen'], rhs))
+				for hv, rv in zip(hits['inlen'], rhs))
 
 	# If Npz output will be used, always save the exterior speed
 	szargs = { 'exspd': (vbg,) }
 
 	if bimodal:
-		print 'Interior speed: %0.5g (%d paths)' % (x[0], len(hits))
+		print('Interior speed: %0.5g (%d paths)' % (x[0], len(hits)))
 		if not pathsave:
 			# Write a simple text file if paths aren't saved
 			with open(output, 'wb') as f:
@@ -384,8 +384,8 @@ def tracerEngine(config):
 	else:
 		# Print some useful stats on the recovered values
 		stats = np.mean(x), np.median(x), np.std(x), len(x)
-		print ('Interior speed: mean %0.5g, '
-				'median %0.5g, std %0.5g (%d paths)' % stats)
+		print(('Interior speed: mean %0.5g, '
+				'median %0.5g, std %0.5g (%d paths)' % stats))
 
 		# Store the tx, rx, and speed values in multipath mode
 		ist = [('tx', '<i8'), ('rx', '<i8'), ('inspd', '<f8')]
@@ -397,7 +397,7 @@ def tracerEngine(config):
 
 	etime = time.time()
 	if not mpirank:
-		print 'Speed determination time:', maketimestr(stime, etime)
+		print('Speed determination time:', maketimestr(stime, etime))
 
 
 	if pathsave:
@@ -406,7 +406,7 @@ def tracerEngine(config):
 		if len(misses): szargs['misses'] = misses
 
 	# Save the output
-	print 'Saving results'
+	print('Saving results')
 	np.savez(output, **szargs)
 
 
@@ -424,6 +424,6 @@ if __name__ == '__main__':
 		tracerEngine(config)
 	except Exception as e:
 		rank = MPI.COMM_WORLD.rank
-		print 'MPI rank %d: caught exception %s' % (rank, e)
+		print('MPI rank %d: caught exception %s' % (rank, e))
 		sys.stdout.flush()
 		MPI.COMM_WORLD.Abort(1)

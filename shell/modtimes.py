@@ -20,7 +20,7 @@ from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 
 def usage(progname=None, retcode=1):
 	if not progname: progname = os.path.basename(sys.argv[0])
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 	sys.exit(int(retcode))
 
 
@@ -94,7 +94,7 @@ if __name__ == '__main__':
 		eik = FastSweep(bx)
 		# Track the solution for the last transmission
 		lt, tmi = None, None
-		if not rank: print 'Using Eikonal solution for arrival times'
+		if not rank: print('Using Eikonal solution for arrival times')
 
 	# Calculate local share of transmit-receive times
 	atimes = { }
@@ -118,7 +118,7 @@ if __name__ == '__main__':
 
 		if not rank and i == ipow:
 			ipow <<= 1
-			print 'Rank 0: Finished path %d of %d' % (i, share)
+			print('Rank 0: Finished path %d of %d' % (i, share))
 
 	# Make sure all participants have finished
 	MPI.COMM_WORLD.Barrier()
@@ -128,5 +128,5 @@ if __name__ == '__main__':
 
 	if not rank:
 		# Collapse individual arrival-time maps
-		atimes = { (t, r): v for l in atimes for (t, r), v in l.iteritems() }
+		atimes = { (t, r): v for l in atimes for (t, r), v in l.items() }
 		savez_keymat(output, atimes)

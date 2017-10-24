@@ -6,7 +6,7 @@ from habis.habiconf import matchfiles
 
 def usage(progname=None, fatal=True):
 	progname = progname or sys.argv[0]
-	print >> sys.stderr, 'USAGE: %s <inputs>' % progname
+	print('USAGE: %s <inputs>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
@@ -16,7 +16,7 @@ if __name__ == '__main__':
 
 	try: files = matchfiles(sys.argv[1:])
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(sys.argv[0], True)
 
 	for f in files:
@@ -26,9 +26,9 @@ if __name__ == '__main__':
 		try:
 			tgc = wset.context['tgc']
 		except (KeyError, AttributeError):
-			print 'File', f, 'specifies no TGC bytes'
+			print('File', f, 'specifies no TGC bytes')
 		except Exception as e:
-			print >> sys.stderr, 'ERROR:', e
+			print('ERROR:', e, file=sys.stderr)
 		else:
-			print 'Extracting TGC parameters from file', f, 'to file', oname
+			print('Extracting TGC parameters from file', f, 'to file', oname)
 			np.savetxt(oname, tgc)

@@ -10,10 +10,10 @@ from multiprocessing import Pool
 from habis import formats
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE (forward): %s <prefix> <srcdir> <destdir> ... <destdir>' % progname
-	print >> sys.stderr, '      (reverse): %s -r <prefix> <srcdir> ... <srcdir> <destdir>' % progname
-	print >> sys.stderr, ''
-	print >> sys.stderr, '  To force forward mode when prefix is "-r", specify "--" before <prefix>'
+	print('USAGE (forward): %s <prefix> <srcdir> <destdir> ... <destdir>' % progname, file=sys.stderr)
+	print('      (reverse): %s -r <prefix> <srcdir> ... <srcdir> <destdir>' % progname, file=sys.stderr)
+	print('', file=sys.stderr)
+	print('  To force forward mode when prefix is "-r", specify "--" before <prefix>', file=sys.stderr)
 
 	sys.exit(1)
 
@@ -100,7 +100,7 @@ def batchrepfile(args):
 	# Now concatenate representations for each batch and write to the output
 	for br, dr in zip(zip(*batchreps), destdirs):
 		np.concatenate(br).tofile(os.path.join(dr, specfile))
-	print 'Split file', specfile
+	print('Split file', specfile)
 
 
 def mergerepfile(args):
@@ -119,7 +119,7 @@ def mergerepfile(args):
 	# Merge corresponding groups and write the output
 	mergereps = [mergespecrep(reps) for reps in zip(*lsreps)]
 	np.concatenate(mergereps).tofile(os.path.join(destdir, specfile))
-	print 'Merged file', specfile
+	print('Merged file', specfile)
 
 
 def findspecreps(dir, prefix='.*SpecRepsElem'):

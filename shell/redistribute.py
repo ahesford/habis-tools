@@ -66,12 +66,12 @@ def xfer(srcfile, dstfile, host):
 
 def usage(progname = 'redistribute.py'):
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, "Usage:", binfile, "[-h] [-z] [-t <nthreads>] -g <grpcounts> -n <hosts> -a <num> <srcdir>/<inprefix> <destdir>/<outprefix>"
-	print >> sys.stderr, "\t-g <grpcounts>: A comma-separated list of file groups ngrp1,ngrp2,[...]"
-	print >> sys.stderr, "\t-n <hosts>: A comma-separated list of of hosts participating in the transfer"
-	print >> sys.stderr, "\t-a <num>: Accumulate all files with the same value for group <num> on a given host"
-	print >> sys.stderr, "\t-t <nthreads>: Specify the number of threads to use for simultaneous transfers"
-	print >> sys.stderr, "\t-z: Zero-pad group indices in destination file names"
+	print("Usage:", binfile, "[-h] [-z] [-t <nthreads>] -g <grpcounts> -n <hosts> -a <num> <srcdir>/<inprefix> <destdir>/<outprefix>", file=sys.stderr)
+	print("\t-g <grpcounts>: A comma-separated list of file groups ngrp1,ngrp2,[...]", file=sys.stderr)
+	print("\t-n <hosts>: A comma-separated list of of hosts participating in the transfer", file=sys.stderr)
+	print("\t-a <num>: Accumulate all files with the same value for group <num> on a given host", file=sys.stderr)
+	print("\t-t <nthreads>: Specify the number of threads to use for simultaneous transfers", file=sys.stderr)
+	print("\t-z: Zero-pad group indices in destination file names", file=sys.stderr)
 
 
 if __name__ == '__main__':
@@ -120,7 +120,7 @@ if __name__ == '__main__':
 	# The destination directory and prefix can remain joined together
 	destform = args[1]
 
-	print 'Transfer from %s to %s' % (srcdir, os.path.dirname(destform))
+	print('Transfer from %s to %s' % (srcdir, os.path.dirname(destform)))
 
 	# Figure out the start and share of each destination host
 	nhosts = len(hostlist)
@@ -168,4 +168,4 @@ if __name__ == '__main__':
 	# Wait for all work to complete
 	for t in workthreads: t.join()
 
-	print 'Finished data exchange'
+	print('Finished data exchange')

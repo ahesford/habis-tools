@@ -4,7 +4,7 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import numpy as np, os, sys, operator as op
-from itertools import izip, repeat
+from itertools import repeat
 from mpi4py import MPI
 
 from habis import formats
@@ -21,14 +21,14 @@ if __name__ == '__main__':
 	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 	identifier = 'MPI rank %d of %d' % (mpirank, mpisize)
 
-	print '%s: transfer from %s to %s' % (identifier, srcdir, os.path.dirname(destform))
+	print('%s: transfer from %s to %s' % (identifier, srcdir, os.path.dirname(destform)))
 
 	# Grab a list of all spectral representations
 	specfiles = formats.findenumfiles(srcdir, prefix=inprefix, suffix='\.dat')
 	grpcounts = [sum(gc) for gc in zip(*[formats.countspecreps(f[0]) for f in specfiles])]
 	ngroups = len(grpcounts)
 
-	print '%s: finished local group counting' % identifier
+	print('%s: finished local group counting' % identifier)
 
 	dtype = formats.specreptype()
 
@@ -52,7 +52,7 @@ if __name__ == '__main__':
 			specreps[start:end] = rep
 			offsets[i] = end
 
-	print '%s: finished local group parsing' % identifier
+	print('%s: finished local group parsing' % identifier)
 	MPI.COMM_WORLD.Barrier()
 
 	# Determine the group shares for each MPI rank
@@ -93,7 +93,7 @@ if __name__ == '__main__':
 	# Free the MPI type
 	rectype.Free()
 
-	print '%s: finished data exchange' % identifier
+	print('%s: finished data exchange' % identifier)
 
 	# Figure the local portion of groups that were received
 	start, share = grpshares[mpirank]
@@ -102,9 +102,9 @@ if __name__ == '__main__':
 	indices = [(gidx, src) for srcs in srclists for gidx in range(share) for src in srcs]
 
 	# Sort by group, then by source index
-	specreps = sorted(izip(indices, formats.splitspecreps(rspecreps)), key=op.itemgetter(0))
+	specreps = sorted(zip(indices, formats.splitspecreps(rspecreps)), key=op.itemgetter(0))
 
-	print '%s: finished splitting and sorting representations' % identifier
+	print('%s: finished splitting and sorting representations' % identifier)
 
 	fname = lambda grp: '%s%d.dat' % (destform, grp)
 
@@ -118,4 +118,4 @@ if __name__ == '__main__':
 
 	for gf in groupfiles: gf.close()
 
-	print '%s: finished file writes' % identifier
+	print('%s: finished file writes' % identifier)
