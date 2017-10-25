@@ -663,9 +663,8 @@ class WaveformSet(object):
 	'''
 	# A bidirectional mapping between typecodes and Numpy dtype names
 	from pycwp.util import bidict
-	typecodes = bidict(I2 = 'int16', I4 = 'int32', I8 = 'int64',
-			F2 = 'float16', F4 = 'float32', F8 = 'float64',
-			C4 = 'complex64', C8 = 'complex128')
+	typecodes = bidict({b'I2': 'int16', b'I4': 'int32', b'I8': 'int64', b'F2': 'float16',
+			b'F4': 'float32', b'F8': 'float64', b'C4': 'complex64', b'C8': 'complex128'})
 
 	@classmethod
 	def fromfile(cls, f, *args, **kwargs):
@@ -964,7 +963,7 @@ class WaveformSet(object):
 
 		if not append:
 			# Encode the magic number and file version
-			hbytes = struct.pack('<4s2I', 'WAVE', major, minor)
+			hbytes = struct.pack('<4s2I', b'WAVE', major, minor)
 
 			# Encode temperature values
 			temps = self.context.get('temps', [float('nan')]*2)
@@ -1042,7 +1041,7 @@ class WaveformSet(object):
 		# Read the magic number and file version
 		magic, major, minor = funpack('<4s2I')
 
-		if magic != 'WAVE':
+		if magic != b'WAVE':
 			raise ValueError('Invalid magic number in file')
 
 		major, minor = self._verify_file_version((major, minor))

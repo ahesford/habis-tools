@@ -315,7 +315,7 @@ class StraightRayTracer(TomographyTask):
 		else: timefilt, tfwidth = None, None
 
 		# Composite slowness transform and path-length operator as CSR
-		pathmat = self.pathmat.dot(s.tosparse()).tocsr()
+		pathmat = (self.pathmat @ s.tosparse()).tocsr()
 
 		if save_pathmat:
 			# Save the path-length matrix
@@ -365,7 +365,7 @@ class StraightRayTracer(TomographyTask):
 			# Include column scaling in the matrix-vector product
 			def mvp(x):
 				if colscale is not None: x = x / colscale
-				v = lpmat.dot(x)
+				v = lpmat @ x
 				return v
 
 			# Transpose operation requires communications
@@ -373,7 +373,7 @@ class StraightRayTracer(TomographyTask):
 				# Synchronize
 				self.comm.Barrier()
 				# Multiple by transposed local share, then flatten
-				v = lpmat.T.dot(u)
+				v = lpmat.T @ u
 				if colscale is not None: v /= colscale
 				# Accumulate contributions from all ranks
 				self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
@@ -384,7 +384,7 @@ class StraightRayTracer(TomographyTask):
 						rmatvec=amvp, dtype=lpmat.dtype)
 
 			# RHS is arrival times minus unperturbed solution
-			rhs -= self.pathmat[rkeys,:].dot(s.perturb(sol).ravel('C'))
+			rhs -= self.pathmat[rkeys,:] @ s.perturb(sol).ravel('C')
 
 			# Use the right maxiter value for this epoch
 			results = lsmr(A, rhs, unorm=unorm, vnorm=norm,
@@ -787,7 +787,7 @@ class BentRayTracer(TomographyTask):
 				lg += cg
 
 				nlx = norm(lx)**2
-				xdg = abs(np.dot(lx, lg))
+				xdg = abs(lx @ lg)
 
 				if xdg < sys.float_info.epsilon * nlx:
 					# Terminate if step size blows up

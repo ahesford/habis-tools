@@ -1432,7 +1432,7 @@ def aprony(maxdeg, x0, h, y, rcond=-1):
 	# very small singular values need squashing
 	cdeg = min(int(np.sum(s > s[0] * np.finfo(s.dtype).eps)), adeg)
 	s = 1. / s[:cdeg]
-	c = np.dot(np.conj(v[:cdeg,:].T), s * np.dot(np.conj(u[:,:cdeg].T), y))
+	c = np.conj(v[:cdeg,:].T) @ (s * (np.conj(u[:,:cdeg].T) @ y))
 
 	# Characterize the error and select the most significant contributors
 	x = x0 + h * np.arange(len(y)).astype(complex)

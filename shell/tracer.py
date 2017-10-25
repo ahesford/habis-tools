@@ -351,7 +351,7 @@ def tracerEngine(config):
 		# Update the exterior speed, if desired and possible
 		t = misses['atime']
 		x = misses['exlen']
-		vbg = np.dot(t, x) / np.dot(t, t)
+		vbg = (t @ x) / (t @ t)
 
 	print('Exterior speed: %0.5g (%d paths)' % (vbg, len(misses)))
 
@@ -360,7 +360,7 @@ def tracerEngine(config):
 
 	if bimodal:
 		# Bimodal matrix is a single column
-		x = (np.dot(rhs, hits['inlen']) / np.dot(rhs, rhs), )
+		x = ((rhs @ hits['inlen']) / (rhs @ rhs), )
 	else:
 		# Multimodal matrix is diagonal
 		x = tuple((hv / rv) if abs(rv) > epsilon else 0.

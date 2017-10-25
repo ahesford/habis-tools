@@ -301,7 +301,7 @@ class PiecewiseSlowness(Slowness):
 		constant slowness values. The slowness s will be raveled in
 		C-order, so its shape must be compatible with self.shape.
 		'''
-		return self._voxmap.T.dot(np.ravel(s, 'C'))
+		return self._voxmap.T @ np.ravel(s, 'C')
 
 
 	def unflatten(self, s):
@@ -317,7 +317,7 @@ class PiecewiseSlowness(Slowness):
 			s = np.empty((self.nnz,), dtype=os.dtype)
 			s[:] = os
 
-		return self._voxmap.dot(s).reshape(self.shape, order='C')
+		return (self._voxmap @ s).reshape(self.shape, order='C')
 
 
 	def tosparse(self):

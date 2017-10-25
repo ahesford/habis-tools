@@ -4,7 +4,7 @@
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import sys, itertools, numpy as np
-import multiprocessing, queue
+import multiprocessing, queue as pyqueue
 
 from numpy import ma
 
@@ -77,7 +77,7 @@ def finddelays(nproc=1, *args, **kwargs):
 		responses = 0
 		while responses < nproc:
 			try: results = queue.get(timeout=0.1)
-			except queue.Empty: pass
+			except pyqueue.Empty: pass
 			else:
 				delays.update(results)
 				responses += 1

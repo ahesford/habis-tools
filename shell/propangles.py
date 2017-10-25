@@ -51,7 +51,7 @@ def wavepaths(elements, reflectors, nargs={}):
 	normals = [-lsqnormal(el, **nargs) for el in elements]
 
 	# Figure the propagation angles
-	thetas = [np.arccos(np.dot(dirs, ne))
+	thetas = [np.arccos(dirs @ ne)
 			for dirs, ne in zip(directions, normals)]
 
 	return distances, thetas

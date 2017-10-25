@@ -308,7 +308,7 @@ class MultiPointTrilateration(object):
 			# Create and fill output vector blockwise
 			y = np.empty((nelts, nrows), dtype=self.centers.dtype)
 			for yv, j, xv in zip(y, jacs, x):
-				yv[:] = np.dot(j, xv)
+				yv[:] = j @ xv
 			return y.ravel('C')
 
 		def mvt(y):
@@ -318,7 +318,7 @@ class MultiPointTrilateration(object):
 			x = np.empty((nelts, ndim), dtype=self.centers.dtype)
 			# Fill output vector blockwise
 			for xv, j, yv in zip(x, jacs, y):
-				xv[:] = np.dot(j.T, yv)
+				xv[:] = j.T @ yv
 			return x.ravel('C')
 
 		if self.optc:
@@ -335,7 +335,7 @@ class MultiPointTrilateration(object):
 				# Fill in the spatial part
 				xe[:nx] = smvt(y)
 				# Fill in the speed part
-				xe[nx] = np.dot(times.ravel('C'), y)
+				xe[nx] = times.ravel('C') @ y
 				return xe
 
 		if self.optr:
@@ -528,7 +528,7 @@ class PlaneTrilateration(MultiPointTrilateration):
 			x = np.reshape(x[:nelts*ndim], (nelts, ndim), order='C')
 			# Compute the coplanarity parts (weight as desired)
 			relx = planewt * (x - np.mean(x, axis=0))
-			y[bjshape[0]:] = np.dot(relx, normal)
+			y[bjshape[0]:] = relx @ normal
 			return y
 
 		def mvt(y):
@@ -538,7 +538,7 @@ class PlaneTrilateration(MultiPointTrilateration):
 			# Include coplanarity contribution (weight as desired)
 			yplan = y[bjshape[0]:,np.newaxis]
 			rely = planewt * (yplan - np.mean(yplan))
-			x[:nelts*ndim] += np.dot(rely, normal[np.newaxis,:]).ravel('C')
+			x[:nelts*ndim] += (rely @ normal[np.newaxis,:]).ravel('C')
 			return x
 
 		jac = LinearOperator(shape=jshape, matvec=mv,
@@ -580,5 +580,5 @@ class PlaneTrilateration(MultiPointTrilateration):
 		relpos = pos - np.mean(pos, axis=0)
 		normal = facet.lsqnormal(pos)
 		# Concatenate both contributions for the global cost
-		cfunc[n:] = self.planewt * np.dot(relpos, normal)
+		cfunc[n:] = self.planewt * (relpos @ normal)
 		return cfunc
