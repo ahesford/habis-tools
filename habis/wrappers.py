@@ -15,7 +15,7 @@ def _strtup(a):
 	unique.
 	'''
 	try: it = iter(a)
-	except TypeError: it = xrange(a)
+	except TypeError: it = range(a)
 	tup = tuple(str(av) for av in it)
 	if len(set(tup)) != len(tup):
 		raise ValueError('Values in sequence must be unique')
@@ -41,11 +41,11 @@ class CommandWrapper(object):
 		contextWait must be a Boolean (the default value is True). This
 		is stored
 		'''
-		if not isinstance(command, basestring):
+		if not isinstance(command, str):
 			raise ValueError('Command must be a string')
 
 		self.context = kwargs.pop('context', None)
-		if not (self.context is None or isinstance(self.context, basestring)):
+		if not (self.context is None or isinstance(self.context, str)):
 			raise ValueError('Provided context must be None or a string')
 
 		self.contextWait = bool(kwargs.pop('contextWait', True))
@@ -160,11 +160,11 @@ class CommandWrapper(object):
 	def _execute(cls, cmd, *args, **kwargs):
 		'''
 		Convenience function launch the given command with
-		subprocess32.Popen, passing *args to the process and **kwargs
+		subprocess.Popen, passing *args to the process and **kwargs
 		to Popen.communicate(), and returning stdout, stderr, and the
 		returncode as encoded by self.encodeResult()
 		'''
-		from subprocess32 import Popen, PIPE, TimeoutExpired
+		from subprocess import Popen, PIPE, TimeoutExpired
 
 		if not cmd:
 			raise ValueError('Wrapper command must be defined')
@@ -185,7 +185,7 @@ class CommandWrapper(object):
 		'''
 		Invoke the command associated with the wrapper, with additional
 		arguments populated by self.args. Keyword arguments are passed
-		to subprocess32.Popen.communicate() to control interaction with
+		to subprocess.Popen.communicate() to control interaction with
 		the child process during its lifetime.
 
 		Returns an output dictionary, encoded with encodeResult(), that
@@ -326,12 +326,12 @@ class BlockCommandWrapper(CommandWrapper):
 		If duplicate block indices are encountered when building the
 		map, a KeyError will be raised. (This should never happen.)
 		'''
-		from Queue import Queue, Empty
+		from queue import Queue, Empty
 		from threading import Thread
 
 		# Compute the local share and size
 		nblocks = len(self.blocks)
-		share = nblocks / self.nchunks
+		share = nblocks // self.nchunks
 		rem = nblocks % self.nchunks
 		start = self.chunk * share + min(self.chunk, rem)
 		share += int(self.chunk < rem)

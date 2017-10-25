@@ -8,7 +8,7 @@ import multiprocessing
 
 from numpy.linalg import norm
 
-from itertools import izip
+
 
 from pycwp import process
 
@@ -17,7 +17,7 @@ from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
 from habis.formats import savetxt_keymat, loadmatlist
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def getreflpos(args):
@@ -98,7 +98,7 @@ def geteltpos(args):
 	else: pltri = trilateration.MultiPointTrilateration(reflpos)
 	repos = pltri.newton(ctimes, pos=celts, c=c, r=rad, tol=tol)
 
-	return dict(izip(elts, repos))
+	return dict(zip(elts, repos))
 
 
 def trilaterationEngine(config):
@@ -215,7 +215,7 @@ def trilaterationEngine(config):
 	# Accumulate all element coordinates and arrival times
 	eltpos = loadmatlist(inelements)
 	times = { k[0]: v
-			for k, v in loadmatlist(timefiles, nkeys=2).iteritems()
+			for k, v in loadmatlist(timefiles, nkeys=2).items()
 			if k[0] == k[1] }
 	# Only consider elements in both sets
 	elements = sorted(set(eltpos).intersection(times))
@@ -254,7 +254,7 @@ def trilaterationEngine(config):
 		# Use async calls to correctly handle keyboard interrupts
 		result = pool.map_async(getreflpos,
 				((t, celts, g[:-2], g[-1], g[-2], optc, optr, tol)
-					for t, g in izip(ctimes.T, guess)))
+					for t, g in zip(ctimes.T, guess)))
 		while True:
 			try:
 				reflectors = np.array(result.get(5))
@@ -266,7 +266,7 @@ def trilaterationEngine(config):
 		np.savetxt(outreflector, reflectors, fmt='%16.8f')
 
 		rfldist = norm(reflectors[:,:-2] - guess[:,:-2], axis=-1)
-		print 'Iteration', rnd, 'mean reflector shift', np.mean(rfldist), 'stdev', np.std(rfldist)
+		print('Iteration', rnd, 'mean reflector shift', np.mean(rfldist), 'stdev', np.std(rfldist))
 
 		# Skip trilateration of element positions if there is no ouptut file
 		if not outelements: break
@@ -278,23 +278,23 @@ def trilaterationEngine(config):
 		# Use async calls to correctly handle keyboard interrupts
 		cargs = (eltpos, times, reflectors, radius, c, tol, planewt)
 		result = pool.map_async(geteltpos, 
-				((elts,) + cargs for elts in facets.itervalues()))
+				((elts,) + cargs for elts in facets.values()))
 		while True:
 			try:
-				relements = dict(kp for r in result.get(5) for kp in r.iteritems())
+				relements = dict(kp for r in result.get(5) for kp in r.items())
 				break
 			except multiprocessing.TimeoutError:
 				pass
 
-		reltdist = [norm(v - eltpos[i]) for i, v in relements.iteritems()]
-		print 'Iteration', rnd, 'mean element shift', np.mean(reltdist), 'stdev', np.std(reltdist)
+		reltdist = [norm(v - eltpos[i]) for i, v in relements.items()]
+		print('Iteration', rnd, 'mean element shift', np.mean(reltdist), 'stdev', np.std(reltdist))
 
 		# Save the element coordinates in the output file
-		refmt = ['%d'] + ['%16.8f']*(len(relements.itervalues().next()))
+		refmt = ['%d'] + ['%16.8f']*(len(next(relements.values())))
 		savetxt_keymat(outelements, relements, fmt=refmt)
 
 		if max(rfldist) < stopdist and max(reltdist) < stopdist:
-			print 'Convergence achieved'
+			print('Convergence achieved')
 			break
 
 		eltpos = relements
@@ -309,7 +309,7 @@ if __name__ == '__main__':
 	try:
 		config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 

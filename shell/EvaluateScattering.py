@@ -46,12 +46,12 @@ if __name__ == '__main__':
 	evalscatenv = 'EVALUATESCATTERING'
 	
 	if len(sys.argv) < 6:
-		print >> sys.stderr, 'USAGE: %s <gpus> <freq> <elemlocs> <sensitivity> <input> ...' % sys.argv[0]
-		print >> sys.stderr, '  File names MUST end with an extension .facet<index>.<suffix> for an'
-		print >> sys.stderr, '  arbitrary extension <ext> (no dots) and an integer <idx> between 0 and 39'
-		print >> sys.stderr, ''
-		print >> sys.stderr, '  Override the environment variable %s with the path to' % evalscatenv
-		print >> sys.stderr, '  the %s CUDA program (default: $HOME/bin/EvaluateScattering)' % defprogname
+		print('USAGE: %s <gpus> <freq> <elemlocs> <sensitivity> <input> ...' % sys.argv[0], file=sys.stderr)
+		print('  File names MUST end with an extension .facet<index>.<suffix> for an', file=sys.stderr)
+		print('  arbitrary extension <ext> (no dots) and an integer <idx> between 0 and 39', file=sys.stderr)
+		print('', file=sys.stderr)
+		print('  Override the environment variable %s with the path to' % evalscatenv, file=sys.stderr)
+		print('  the %s CUDA program (default: $HOME/bin/EvaluateScattering)' % defprogname, file=sys.stderr)
 	
 		sys.exit(128)
 	
@@ -64,12 +64,12 @@ if __name__ == '__main__':
 			bindir = os.path.join(os.environ['HOME'], 'bin')
 		except KeyError:
 			# If $HOME is undefined, use the local directory
-			print >> sys.stderr, 'WARNING: $HOME undefined, trying local directory for %s' % defprogname
+			print('WARNING: $HOME undefined, trying local directory for %s' % defprogname, file=sys.stderr)
 			bindir = '.'
 	
 		evalscat = os.path.join(bindir, defprogname)
 	
-	print >> sys.stderr, 'Trying %s for %s CUDA program' % (evalscat, defprogname)
+	print('Trying %s for %s CUDA program' % (evalscat, defprogname), file=sys.stderr)
 	
 	# Grab the list of GPUs to use
 	gpus = [int(s.strip()) for s in sys.argv[1].split(',')]

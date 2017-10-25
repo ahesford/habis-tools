@@ -16,7 +16,7 @@ from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
 from habis.formats import loadmatlist, savez_keymat, savetxt_keymat
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def wavesfcEngine(config):
@@ -69,7 +69,7 @@ def wavesfcEngine(config):
 	# Read the element positions and backscatter arrival times
 	elements = loadmatlist(eltfiles, nkeys=1)
 	times = { k[0]: v
-			for k, v in loadmatlist(timefiles, scalar=False, nkeys=2).iteritems()
+			for k, v in loadmatlist(timefiles, scalar=False, nkeys=2).items()
 			if k[0] == k[1] }
 
 	reflectors = np.loadtxt(rflfile, ndmin=2)
@@ -97,7 +97,7 @@ def wavesfcEngine(config):
 
 		# Convert all times to distances
 		pdists = { }
-		for el, elpos in elements.iteritems():
+		for el, elpos in elements.items():
 			# Ray from reflector center to element
 			dl = elpos - pos
 			# Find distance to element and normalize ray
@@ -120,14 +120,14 @@ def wavesfcEngine(config):
 		if olrange is not None:
 			# Group distances according to olgroup
 			pgrps = defaultdict(dict)
-			for el, (ds, _) in pdists.iteritems():
+			for el, (ds, _) in pdists.items():
 				pgrps[int(el / olgroup)][el] = ds
 			# Filter outliers from each group and flatten map
-			pdists = { el: pdists[el] for pg in pgrps.itervalues()
+			pdists = { el: pdists[el] for pg in pgrps.values()
 					for el in stats.mask_outliers(pg, olrange) }
 
 		# Sort remaining values, separate indices and control points
-		cpel = sorted(pdists.iterkeys())
+		cpel = sorted(pdists.keys())
 		cpts = np.array([ pos + pdists[el][0] * pdists[el][1] for el in cpel ])
 
 		fname = fbase + idfmt.format(ridx) + fext
@@ -169,7 +169,7 @@ if __name__ == '__main__':
 	try:
 		config = HabisConfigParser(sys.argv[1])
 	except:
-		print >> sys.stderr, 'ERROR: could not load configuration file %s' % sys.argv[1]
+		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 

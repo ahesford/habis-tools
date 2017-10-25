@@ -20,10 +20,10 @@ def printHeader(hdr, clearline=True, stream=sys.stdout):
 	'''
 	hdr = '| ' + hdr + ' |'
 	pads = '+' + '=' * max(0, len(hdr) - 2) + '+'
-	print >> stream, pads
-	print >> stream, hdr
-	print >> stream, pads
-	if clearline: print >> stream, ''
+	print(pads, file=stream)
+	print(hdr, file=stream)
+	print(pads, file=stream)
+	if clearline: print('', file=stream)
 
 
 def printResult(results, cmd):
@@ -42,18 +42,18 @@ def printResult(results, cmd):
 
 	if stdout:
 		printHeader('RUN COMMAND: %s (stdout)' % (cmd.cmd,))
-		print stdout
-		print ''
+		print(stdout)
+		print('')
 
 	if stderr:
 		printHeader('RUN COMMAND: %s (stderr)' % (cmd.cmd,))
-		print stderr
-		print ''
+		print(stderr)
+		print('')
 
 	retcode = acc.returncode()
 	if retcode:
-		print 'ERROR: nonzero return status %d' % retcode
-		print ''
+		print('ERROR: nonzero return status %d' % retcode)
+		print('')
 
 	return results
 
@@ -65,12 +65,12 @@ def notifyError(err, cmd):
 	if cmd.fatalError: raise err
 
 	printHeader('NON-FATAL ERROR IN COMMAND: %s' % (cmd.cmd,), False)
-	print err
-	print ''
+	print(err)
+	print('')
 
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <cmdlist.yaml> [var=value ...]' % progname
+	print('USAGE: %s <cmdlist.yaml> [var=value ...]' % progname, file=sys.stderr)
 
 
 def findconfig(confname):
@@ -100,7 +100,7 @@ if __name__ == "__main__":
 	fatalError = False
 	def noteFatalError(reason):
 		printHeader('FATAL ERROR ENCOUNTERED (WILL TERMINATE)', False, sys.stderr)
-		print >> sys.stderr, reason.value
+		print(reason.value, file=sys.stderr)
 		fatalError = True
 		return reason
 
@@ -112,7 +112,7 @@ if __name__ == "__main__":
 		cseq = HabisRCG.executeCommandFile(confname,
 				printResult, notifyError, sys.argv[2:], reactor)
 	except Exception as e:
-		print >> sys.stderr, 'Cannot process conductor script:', e
+		print('Cannot process conductor script:', e, file=sys.stderr)
 		sys.exit(1)
 
 	# Register a fatal error

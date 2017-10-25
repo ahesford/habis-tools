@@ -6,7 +6,7 @@ Routines for performing acoustic trilateration.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import numpy as np, math
-from itertools import izip
+
 from numpy import ma, fft, linalg as la
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsmr, LinearOperator
@@ -77,8 +77,8 @@ class ArrivalTimeFinder(object):
 		'''
 		try:
 			# Pull the elements right from dictionary keys
-			txelts = tuple(sorted(set(k[0] for k in atmap.keys())))
-			rxelts = tuple(sorted(set(k[1] for k in atmap.keys())))
+			txelts, rxelts = [tuple(sorted(set(ks)))
+						for ks in zip(*atmap.keys())]
 		except AttributeError:
 			# Copy an array-like map, preserving any masks
 			atmap = ma.array(atmap, copy=True) 
@@ -88,13 +88,13 @@ class ArrivalTimeFinder(object):
 			except ValueError:
 				raise TypeError('Arrival-time map must be of rank 2') 
 
-			if txelts is None: txelts = tuple(xrange(ntx))
+			if txelts is None: txelts = tuple(range(ntx))
 			else:
 				if len(txelts) != ntx:
 					raise ValueError('Length of txelts must match row count in atmap')
 				txelts = tuple(txelts)
 
-			if rxelts is None: rxelts = tuple(xrange(nrx))
+			if rxelts is None: rxelts = tuple(range(nrx))
 			else:
 				if len(rxelts) != nrx:
 					raise ValueError('Length of rxelts must match column count in atmap')
@@ -155,7 +155,7 @@ class ArrivalTimeFinder(object):
 
 		# Solve the system and build the map
 		times = lsmr(matrix[mask], atmap[mask], **itargs)[0]
-		return dict(kp for kp in izip(eltlist, times))
+		return dict(kp for kp in zip(eltlist, times))
 
 
 class MultiPointTrilateration(object):
@@ -307,8 +307,8 @@ class MultiPointTrilateration(object):
 			x = np.reshape(x, (nelts, ndim), order='C')
 			# Create and fill output vector blockwise
 			y = np.empty((nelts, nrows), dtype=self.centers.dtype)
-			for yv, j, xv in izip(y, jacs, x):
-				yv[:] = np.dot(j, xv)
+			for yv, j, xv in zip(y, jacs, x):
+				yv[:] = j @ xv
 			return y.ravel('C')
 
 		def mvt(y):
@@ -317,8 +317,8 @@ class MultiPointTrilateration(object):
 			# Create an output if one was not provided
 			x = np.empty((nelts, ndim), dtype=self.centers.dtype)
 			# Fill output vector blockwise
-			for xv, j, yv in izip(x, jacs, y):
-				xv[:] = np.dot(j.T, yv)
+			for xv, j, yv in zip(x, jacs, y):
+				xv[:] = j.T @ yv
 			return x.ravel('C')
 
 		if self.optc:
@@ -335,7 +335,7 @@ class MultiPointTrilateration(object):
 				# Fill in the spatial part
 				xe[:nx] = smvt(y)
 				# Fill in the speed part
-				xe[nx] = np.dot(times.ravel('C'), y)
+				xe[nx] = times.ravel('C') @ y
 				return xe
 
 		if self.optr:
@@ -528,7 +528,7 @@ class PlaneTrilateration(MultiPointTrilateration):
 			x = np.reshape(x[:nelts*ndim], (nelts, ndim), order='C')
 			# Compute the coplanarity parts (weight as desired)
 			relx = planewt * (x - np.mean(x, axis=0))
-			y[bjshape[0]:] = np.dot(relx, normal)
+			y[bjshape[0]:] = relx @ normal
 			return y
 
 		def mvt(y):
@@ -538,7 +538,7 @@ class PlaneTrilateration(MultiPointTrilateration):
 			# Include coplanarity contribution (weight as desired)
 			yplan = y[bjshape[0]:,np.newaxis]
 			rely = planewt * (yplan - np.mean(yplan))
-			x[:nelts*ndim] += np.dot(rely, normal[np.newaxis,:]).ravel('C')
+			x[:nelts*ndim] += (rely @ normal[np.newaxis,:]).ravel('C')
 			return x
 
 		jac = LinearOperator(shape=jshape, matvec=mv,
@@ -580,5 +580,5 @@ class PlaneTrilateration(MultiPointTrilateration):
 		relpos = pos - np.mean(pos, axis=0)
 		normal = facet.lsqnormal(pos)
 		# Concatenate both contributions for the global cost
-		cfunc[n:] = self.planewt * np.dot(relpos, normal)
+		cfunc[n:] = self.planewt * (relpos @ normal)
 		return cfunc

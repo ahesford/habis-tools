@@ -29,8 +29,8 @@ def specwin(nsamp, freqs=None):
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
 	binfile = os.path.basename(progname)
-	print >> sys.stderr, 'USAGE: %s [-p p] [-h] [-m tgcmap] [-l n] [-w s:l] [-f s:e:w] [-t] [-n n] [-z] [-b] [-s s] [-o outpath] -g g <measurements>' % binfile
-	print >> sys.stderr, '''
+	print('USAGE: %s [-p p] [-h] [-m tgcmap] [-l n] [-w s:l] [-f s:e:w] [-t] [-n n] [-z] [-b] [-s s] [-o outpath] -g g <measurements>' % binfile, file=sys.stderr)
+	print('''
   Preprocess HABIS measurement data by Hadamard decoding transmissions and
   Fourier transforming the time-domain data. Measurement data is contained in
   the 'measurements' WaveformSet files.
@@ -55,7 +55,7 @@ def usage(progname=None, fatal=False):
   -b: Write output as a simple 3-D matrix rather than a WaveformSet file
   -s: Correct the decoded signs with the given sign map (default: skip)
   -o: Provide a path for placing output files
-	'''
+	''', file=sys.stderr)
 	if fatal: sys.exit(fatal)
 
 
@@ -240,7 +240,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	tgcmap = kwargs.pop('tgcmap', None)
 
 	if len(kwargs):
-		raise TypeError("Unrecognized keyword argument '%s'" % kwargs.iterkeys().next())
+		raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
 
 	# Open the input and create a corresponding output
 	wset = WaveformSet.fromfile(infile)
@@ -275,13 +275,13 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		wset.groupmap = grpmap
 
 		# Map global indices to transmission number
-		outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.iteritems()))
+		outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.items()))
 	else:
 		# Must specify a group map for FHT decoding
 		if dofht: raise ValueError('A valid Tx-group configuration is required')
 		# Otherwise, with no configuration, use passthrough transmission ordering
 		gsize = 1
-		outidx = OrderedDict((i, i) for i in xrange(wset.ntx))
+		outidx = OrderedDict((i, i) for i in range(wset.ntx))
 
 
 	# Handle TGC compensation if necessary
@@ -316,7 +316,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	oset.txidx = outidx.keys()
 
 	# Prepare a list of input rows to be copied to output
-	outrows = [wset.tx2row(i) for i in outidx.itervalues()]
+	outrows = [wset.tx2row(i) for i in outidx.values()]
 
 	if dofht:
 		if not fht.ispow2(gsize):
@@ -335,7 +335,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			fhts[gi].append((li, i))
 
 		# Sort indices in Hadamard index order
-		for i, v in fhts.iteritems():
+		for i, v in fhts.items():
 			if len(v) != gsize:
 				raise ValueError('Hadamard group %d does not contain full channel set' % i)
 			v.sort()
@@ -421,7 +421,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			data = np.asarray(data, order='F')
 
 			# Perform the grouped Hadamard transforms
-			for grp, idxmap in sorted(fhts.iteritems()):
+			for grp, idxmap in sorted(fhts.items()):
 				rows = [wset.tx2row(i[1]) for i in idxmap]
 				b[rows,ws:we] = fht.fht(data[rows,:], axes=0) / np.sqrt(gsize)
 				if signs is not None:
@@ -440,7 +440,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 			# Bandpass filter the spectral samples
 			if len(tails) > 0:
-				ltails = len(tails) / 2
+				ltails = len(tails) // 2
 				c[:,fswin.start:fswin.start+ltails] *= tails[np.newaxis,:ltails]
 				c[:,fswin.end-ltails:fswin.end] *= tails[np.newaxis,-ltails:]
 
@@ -512,7 +512,7 @@ if __name__ == '__main__':
 
 	try: infiles = matchfiles(args)
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(fatal=True)
 
 	# Determine the propr file extension
@@ -521,9 +521,9 @@ if __name__ == '__main__':
 	try:
 		outfiles = buildpaths(infiles, outpath, outext)
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(fatal=True)
 
 	for infile, outfile in zip(infiles, outfiles):
-		print 'Processing data file', infile, '->', outfile
+		print('Processing data file', infile, '->', outfile)
 		mpfhfft(nprocs, infile, outfile, grpmap, **kwargs)

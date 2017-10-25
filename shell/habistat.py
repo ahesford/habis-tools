@@ -8,7 +8,7 @@ import uptime
 import yaml
 import glob
 
-from itertools import izip
+
 from collections import OrderedDict
 
 def habistat():
@@ -38,7 +38,7 @@ def habistat():
 
 	try: loadavgs = os.getloadavg()
 	except Exception as e: loadavgs = 'Indeterminate'
-	else: loadavgs = dict(izip((1, 5, 15), loadavgs))
+	else: loadavgs = dict(zip((1, 5, 15), loadavgs))
 
 	hadevs = sorted(glob.glob('/dev/habis[0-9]*'))
 
@@ -52,4 +52,4 @@ if __name__ == '__main__':
 		stats = habistat()
 	except Exception as e:
 		stats = 'Unable to query HABIS status ' + str(e)
-	print stats
+	print(stats)

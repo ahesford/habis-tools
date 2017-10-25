@@ -7,7 +7,7 @@ Tools for manipulating and accessing HABIS configuration files.
 
 import shlex
 
-from itertools import izip
+
 
 
 def numrange(s):
@@ -39,7 +39,7 @@ def numrange(s):
 		elif npc == 1:
 			rvals.append(spc[0])
 		elif npc == 2:
-			rseg = range(spc[0], spc[1] + 1)
+			rseg = list(range(spc[0], spc[1] + 1))
 			if not len(rseg):
 				raise ValueError('Range "%s" includes no values' % s)
 			rvals.extend(rseg)
@@ -153,7 +153,7 @@ class HabisConfigParser(object):
 		will be interpreted if the Mako template engine is installed.
 		All extra kwargs are passed to mako.template.Template.render().
 		'''
-		if isinstance(f, basestring): f = open(f)
+		if isinstance(f, str): f = open(f)
 
 		if f is None:
 			# If there is no file, just create an empty 
@@ -170,7 +170,7 @@ class HabisConfigParser(object):
 			raise HabisConfigError.fromException(err, e)
 
 		# Validate the two-level structure of the configuration
-		for k, v in self._config.iteritems():
+		for k, v in self._config.items():
 			if not (hasattr(v, 'keys') and hasattr(v, 'values')):
 				raise HabisConfigError('Section %s must be dictionary-like' % k)
 
@@ -205,7 +205,7 @@ class HabisConfigParser(object):
 		'''
 		Return the list of section names in the configuration.
 		'''
-		return self._config.keys()
+		return list(self._config.keys())
 
 
 	def has_section(self, section):
@@ -230,7 +230,7 @@ class HabisConfigParser(object):
 		Return the list of options for a given section.
 		'''
 		try:
-			return self._config[section].keys()
+			return list(self._config[section].keys())
 		except KeyError:
 			raise HabisNoSectionError('The section %s does not exist' % section)
 
@@ -294,7 +294,7 @@ class HabisConfigParser(object):
 			except KeyError: pass
 
 		if len(kwargs):
-			raise TypeError('Unrecognized keyword argument %s' % kwargs.iterkeys().next())
+			raise TypeError('Unrecognized keyword %s' % (next(iter(kwargs.keys())),))
 
 		return optargs
 
@@ -386,7 +386,7 @@ class HabisConfigParser(object):
 			raise TypeError('Option is dictionary-like rather than list-like')
 
 		# Split a string into a list
-		if isinstance(val, basestring):
+		if isinstance(val, str):
 			val = shlex.split(val, comments=True)
 			inferredlist = True
 		else: inferredlist = False
@@ -399,7 +399,7 @@ class HabisConfigParser(object):
 
 		# Ensure that types are right
 		if (not inferredlist and optargs.get('checkmap', True) and
-				any(v != mv for v, mv in izip(val, mval))):
+				any(v != mv for v, mv in zip(val, mval))):
 			raise TypeError('List items are not of the prescribed type')
 
 		return mval

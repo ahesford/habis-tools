@@ -3,7 +3,7 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import sys, itertools, ConfigParser, numpy as np
+import sys, itertools, configparser, numpy as np
 
 from mpi4py import MPI
 from pycwp import boxer, mio
@@ -12,7 +12,7 @@ from pycwp import boxer, mio
 class ConfigurationError(Exception): pass
 
 def usage(progname):
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 
 
 def makebox(config):
@@ -30,7 +30,7 @@ def makebox(config):
 		# Assign the number of cells
 		box.ncell = [int(s) for s in config.get('grid', 'ncells').split()]
 
-	except (ConfigParser.Error, ValueError):
+	except (configparser.Error, ValueError):
 		raise ConfigurationError('Box configuration is not valid')
 
 	return box
@@ -84,12 +84,12 @@ def tracerEngine(config):
 	mpirank, mpisize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 	box = makebox(config)
 	if mpirank == 0:
-		print 'Using grid shape', box.ncell
+		print('Using grid shape', box.ncell)
 
 	# Try to read the contrast file
 	try:
 		contrast = mio.readbmat(config.get('grid', 'contrast'))
-	except ConfigParser.Error:
+	except configparser.Error:
 		raise ConfigurationError('Configuration must specify a contrast file')
 	except: raise
 
@@ -102,13 +102,13 @@ def tracerEngine(config):
 		groupRange = tuple(int(s) for s in config.get('paths', 'groups').split())
 		groups = range(*groupRange)
 		if mpirank == 0:
-			print 'Will average path speeds in range(%d,%d)' % groupRange
+			print('Will average path speeds in range(%d,%d)' % groupRange)
 		elementsPerGroup = int(config.get('paths', 'elementsPerGroup'))
 
 		# Grab the center and output formats
 		centerFormat = config.get('paths', 'centerFormat')
 		outputFormat = config.get('paths', 'outputFormat')
-	except ConfigParser.Error:
+	except configparser.Error:
 		raise ConfigurationError('Incomplete [paths] section in configuration')
 
 	for grp in groups:
@@ -116,7 +116,7 @@ def tracerEngine(config):
 		centers = np.loadtxt(centerFormat.format(grp))
 		# Compute the start and share of the local center chunk
 		ncenters = len(centers)
-		share, srem = ncenters / mpisize, ncenters % mpisize
+		share, srem = ncenters // mpisize, ncenters % mpisize
 		start = mpirank * share + min(mpirank, srem)
 		if mpirank < srem: share += 1
 
@@ -130,7 +130,7 @@ def tracerEngine(config):
 			MPI.COMM_WORLD.Barrier()
 
 			if mpirank == 0:
-				print 'Ray-marching for element', elnum, 'in group', grp
+				print('Ray-marching for element', elnum, 'in group', grp)
 
 			# Build a list of segments for this group
 			segs = [boxer.Segment3D(elt, cen)
@@ -160,9 +160,9 @@ if __name__ == '__main__':
 		sys.exit(1)
 
 	# Read the configuration file
-	config = ConfigParser.SafeConfigParser()
+	config = configparser.SafeConfigParser()
 	if len(config.read(sys.argv[1])) == 0:
-		print >> sys.stderr, 'ERROR: configuration file %s does not exist' % sys.argv[1]
+		print('ERROR: configuration file %s does not exist' % sys.argv[1], file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 

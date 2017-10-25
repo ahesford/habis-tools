@@ -44,9 +44,9 @@ def txgrpshift(infile, outfile, subtri, shift, grpmap):
 
 	if not outfile:
 		outfile = infile
-		print 'Will overwrite input file', infile
+		print('Will overwrite input file', infile)
 	else:
-		print 'Will create new input file', outfile
+		print('Will create new input file', outfile)
 
 	wset = WaveformSet.fromfile(infile)
 
@@ -58,7 +58,7 @@ def txgrpshift(infile, outfile, subtri, shift, grpmap):
 
 	# Map transmit subtriangle indices to record rows
 	txrows = [ wset.tx2row(wset.element2tx(i))
-			for i in xrange(64 * subtri, 64 * (subtri + 1)) ]
+			for i in range(64 * subtri, 64 * (subtri + 1)) ]
 
 	# Perform the shifts for each receive-channel record
 	for hdr, data in wset.allrecords():

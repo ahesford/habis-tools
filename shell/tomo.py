@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/opt/python-2.7.9/bin/python
 
 # Copyright (c) 2017 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
@@ -25,7 +25,7 @@ from random import sample
 
 from time import time
 
-from itertools import izip, count, repeat
+from itertools import count, repeat
 
 from mpi4py import MPI
 
@@ -67,7 +67,7 @@ class TomographyTask(object):
 		self.elements = { }
 		self.atimes = { }
 
-		for (t, r), v in atimes.iteritems():
+		for (t, r), v in atimes.items():
 			# Make sure t-r indices are distinct
 			if t == r: continue
 
@@ -128,34 +128,33 @@ class StraightRayTracer(TomographyTask):
 		indptr = [ 0 ]
 		indices = [ ]
 		data = [ ]
-		rhs = [ ]
-		trpairs = [ ]
+		self.trpairs = [ ]
+		self.rhs = { }
 
-		for (t, r), v in sorted(self.atimes.iteritems()):
+		for i, ((t, r), v) in enumerate(sorted(self.atimes.items())):
 			# March straight through the grid
 			seg = Segment3D(self.elements[t], self.elements[r])
 			# Compute the total segment length
 			if not fresnel:
 				# Build a simple row of the path-length matrix
 				path = self.box.raymarcher(seg)
-				for cidx, (s, e) in path.iteritems():
+				for cidx, (s, e) in path.items():
 					data.append(seg.length * (e - s))
 					indices.append(np.ravel_multi_index(cidx, ncell))
 			else:
 				# Build a row based on the first Fresnel zone
 				hits = self.box.fresnel(seg, fresnel)
-				htot = fsum(hits.itervalues())
-				for cidx, ll in hits.iteritems():
+				htot = fsum(iter(hits.values()))
+				for cidx, ll in hits.items():
 					data.append(seg.length * ll / htot)
 					indices.append(np.ravel_multi_index(cidx, ncell))
 			indptr.append(len(indices))
-			rhs.append(v)
-			trpairs.append((t, r))
+			self.rhs[i] = v
+			self.trpairs.append((t, r))
 
+		mshape = len(self.trpairs), np.prod(ncell)
 		self.pathmat = csr_matrix((data, indices, indptr),
-				shape=(len(rhs), np.prod(ncell)), dtype=np.float64)
-		self.rhs = np.array(rhs, dtype=np.float64)
-		self.trpairs = trpairs
+						shape=mshape, dtype=np.float64)
 
 	def timeadjust(self, si, **kwargs):
 		'''
@@ -182,26 +181,25 @@ class StraightRayTracer(TomographyTask):
 
 		# Compute the corrective factor for each (t, r) pair
 		cell = self.box.cell
-		rhs = [ ]
+		self.rhs = { }
 		ivals = { }
-		for (t, r) in self.trpairs:
+		for i, (t, r) in enumerate(self.trpairs):
 			vt = self.atimes[t,r]
 			tx = bx.cart2cell(*self.elements[t])
 			rx = bx.cart2cell(*self.elements[r])
+
 			try:
 				# Try to find the compensated straight-ray time
 				tc, ts = integrator.pathint(tx, rx, h=cell, **kwargs)
-			except ValueError:
-				# On failure, just use the measured time
-				rhs.append(vt)
-			else:
-				ivals[t,r] = (tc, ts)
-				# Compensate measured times (within reason)
-				tc = min(max(tc, vt), ts)
-				rhs.append(ts - (tc - vt))
+				# Check the time for sanity
+				if tc > ts or tc < vt - 0.5:
+					raise ValueError('Compensated time out of range')
+			except ValueError: continue
 
-		# Update the RHS with the compensated times
-		self.rhs = np.array(rhs, dtype=np.float64)
+			# Record the times and compensate the RHS
+			ivals[t,r] = (tc, ts)
+			self.rhs[i] = ts - max(0, (tc - vt))
+
 		return ivals
 
 	@staticmethod
@@ -317,7 +315,7 @@ class StraightRayTracer(TomographyTask):
 		else: timefilt, tfwidth = None, None
 
 		# Composite slowness transform and path-length operator as CSR
-		pathmat = self.pathmat.dot(s.tosparse()).tocsr()
+		pathmat = (self.pathmat @ s.tosparse()).tocsr()
 
 		if save_pathmat:
 			# Save the path-length matrix
@@ -326,34 +324,6 @@ class StraightRayTracer(TomographyTask):
 			np.savez(pname, data=pcoo.data, row=pcoo.row,
 					col=pcoo.col, trpairs=self.trpairs)
 			del pcoo, pname
-
-		if coleq:
-			# Compute norms of columns of global matrix
-			colscale = snorm(pathmat, axis=0)**2
-			self.comm.Allreduce(MPI.IN_PLACE, colscale, op=MPI.SUM)
-			np.sqrt(colscale, colscale)
-
-			# Clip normalization factors to avoid blow-up
-			mxnrm = np.max(colscale)
-			np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
-
-			# Normalize the columns
-			pathmat.data /= np.take(colscale, pathmat.indices)
-		else: colscale = 1.0
-
-		# Transpose operation requires communications
-		def amvp(u):
-			# Synchronize
-			self.comm.Barrier()
-			# Multiple by transposed local share, then flatten
-			v = pathmat.T.dot(u)
-			# Accumulate contributions from all ranks
-			self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
-			return v
-
-		# Build the linear operator representing the path matrix
-		A = LinearOperator(shape=pathmat.shape,
-				matvec=pathmat.dot, rmatvec=amvp, dtype=pathmat.dtype)
 
 		def unorm(u):
 			# Synchronize
@@ -375,16 +345,55 @@ class StraightRayTracer(TomographyTask):
 		msgfmt = 'Epoch %d RMSE %0.6g dsol %0.6g dct %0.6g dst %0.6g paths %d'
 		epoch, sol, ltimes = 0, 0, { }
 		while True:
+			# Separate the RHS into row keys and values
+			rkeys, rhs = zip(*self.rhs.items())
+			rhs = np.array(rhs)
+
+			lpmat = pathmat[rkeys,:]
+
+			if coleq:
+				# Compute norms of columns of global matrix
+				colscale = snorm(lpmat, axis=0)**2
+				self.comm.Allreduce(MPI.IN_PLACE, colscale, op=MPI.SUM)
+				np.sqrt(colscale, colscale)
+
+				# Clip normalization factors to avoid blow-up
+				mxnrm = np.max(colscale)
+				np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
+			else: colscale = None
+
+			# Include column scaling in the matrix-vector product
+			def mvp(x):
+				if colscale is not None: x = x / colscale
+				v = lpmat @ x
+				return v
+
+			# Transpose operation requires communications
+			def amvp(u):
+				# Synchronize
+				self.comm.Barrier()
+				# Multiple by transposed local share, then flatten
+				v = lpmat.T @ u
+				if colscale is not None: v /= colscale
+				# Accumulate contributions from all ranks
+				self.comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
+				return v
+
+			# Build the linear operator representing the path matrix
+			A = LinearOperator(shape=lpmat.shape, matvec=mvp,
+						rmatvec=amvp, dtype=lpmat.dtype)
+
 			# RHS is arrival times minus unperturbed solution
-			rhs = self.rhs - self.pathmat.dot(s.perturb(sol).ravel('C'))
+			rhs -= self.pathmat[rkeys,:] @ s.perturb(sol).ravel('C')
 
 			# Use the right maxiter value for this epoch
 			results = lsmr(A, rhs, unorm=unorm, vnorm=norm,
-					maxiter=itercounts.next(), **lsmropts)
+					maxiter=next(itercounts), **lsmropts)
 
-			ds = results[0] / colscale
+			ds = results[0]
+			if colscale is not None: ds /= colscale
 
-			cmwt = chamwts.next()
+			cmwt = next(chamwts)
 			if cmwt:
 				ds = denoise_tv_chambolle(s.unflatten(ds), cmwt)
 				ds = s.flatten(ds)
@@ -410,7 +419,7 @@ class StraightRayTracer(TomographyTask):
 				tv = self.timeadjust(nsi, **pathopts)
 				# Find RMS arrival-time error for compensated model
 				terr = fsum((v[0] - self.atimes[k])**2
-						for k, v in tv.iteritems())
+						for k, v in tv.items())
 				tn = self.comm.allreduce(len(tv), op=MPI.SUM)
 				terr = self.comm.allreduce(terr, op=MPI.SUM)
 				terr = np.sqrt(terr / tn)
@@ -435,7 +444,7 @@ class StraightRayTracer(TomographyTask):
 					if self.isRoot:
 						rname = save_times.format(epoch=epoch)
 						tv = dict(kp for v in tv
-								for kp in v.iteritems())
+								for kp in v.items())
 						savez_keymat(rname, tv)
 			else:
 				# Without compensation, error is LSMR residual
@@ -446,7 +455,7 @@ class StraightRayTracer(TomographyTask):
 			if self.isRoot:
 				ctnrm = np.sqrt(tdiffs[0] / tdiffs[2])
 				stnrm = np.sqrt(tdiffs[1] / tdiffs[3])
-				print msgfmt % (epoch, terr, dsnrm, ctnrm, stnrm, tn)
+				print(msgfmt % (epoch, terr, dsnrm, ctnrm, stnrm, tn))
 
 			epoch += 1
 			if epoch > epochs: break
@@ -535,7 +544,7 @@ class BentRayTracer(TomographyTask):
 
 		# Compute the random sample of measurements
 		if nm < 1 or nm > len(self.atimes): nm = len(self.atimes)
-		trset = sample(atimes.keys(), nm)
+		trset = sample(list(atimes.keys()), nm)
 
 		# Accumulate the local cost function and gradient
 		f = []
@@ -543,7 +552,7 @@ class BentRayTracer(TomographyTask):
 		gshape = self.tracer.box.ncell
 		gf = np.zeros(gshape, dtype=np.float64, order='C')
 
-		nrows, nskip = 0L, 0L
+		nrows, nskip = 0, 0
 
 		if self.save_hitmaps:
 			hitmaps = np.zeros(si.shape + (2,), dtype=np.float64)
@@ -564,11 +573,11 @@ class BentRayTracer(TomographyTask):
 			err = pint - atimes[t,r]
 			f.append(err**2)
 			# Add gradient contribution
-			for c, l in plens.iteritems(): gf[c] += l * err
+			for c, l in plens.items(): gf[c] += l * err
 
 			if self.save_hitmaps:
 				# Update the hit maps
-				for c, l in plens.iteritems():
+				for c, l in plens.items():
 					hitmaps[c + (0,)] += 1.
 					hitmaps[c + (1,)] += l
 
@@ -751,9 +760,9 @@ class BentRayTracer(TomographyTask):
 				# Print some convergence numbers
 				msgfmt = ('At epoch %d update %d cost %#0.4g '
 						'RMSE %#0.4g (time: %0.2f sec)')
-				print msgfmt % (epoch, update, f, rmserr, stime)
+				print(msgfmt % (epoch, update, f, rmserr, stime))
 				if nrows != maxrows:
-					print '%d/%d untraceable paths' % (maxrows - nrows, maxrows)
+					print('%d/%d untraceable paths' % (maxrows - nrows, maxrows))
 
 			return f, lgf
 
@@ -778,12 +787,12 @@ class BentRayTracer(TomographyTask):
 				lg += cg
 
 				nlx = norm(lx)**2
-				xdg = abs(np.dot(lx, lg))
+				xdg = abs(lx @ lg)
 
 				if xdg < sys.float_info.epsilon * nlx:
 					# Terminate if step size blows up
 					if self.isRoot:
-						print 'TERMINATE: epoch', k, 'step size breakdown'
+						print('TERMINATE: epoch', k, 'step size breakdown')
 					break
 
 				eta = nlx / xdg / updates
@@ -794,9 +803,9 @@ class BentRayTracer(TomographyTask):
 				eta = np.exp(lck - lkp)
 
 			if self.isRoot:
-				print 'Epoch', k,
-				if rgwt: print 'regularizer weight', rgwt['weight'],
-				print 'gradient descent step', eta
+				print('Epoch', k, end=' ')
+				if rgwt: print('regularizer weight', rgwt['weight'], end=' ')
+				print('gradient descent step', eta)
 
 			# Copy negative of last solution and gradient
 			lx = -x
@@ -830,7 +839,7 @@ class BentRayTracer(TomographyTask):
 				cg = beta * lgf + (1 - beta) * cg
 
 			if converged:
-				if self.isRoot: print 'TERMINATE: Convergence achieved'
+				if self.isRoot: print('TERMINATE: Convergence achieved')
 				break
 
 			# Adjust the regularization weight as appropriate
@@ -852,7 +861,7 @@ class BentRayTracer(TomographyTask):
 
 def usage(progname=None, retcode=1):
 	if not progname: progname = os.path.basename(sys.argv[0])
-	print >> sys.stderr, 'USAGE: %s <configuration>' % progname
+	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
 	sys.exit(int(retcode))
 
 
@@ -872,7 +881,7 @@ if __name__ == "__main__":
 	bx = tracer.box
 
 	if not rank:
-		print 'Solution defined on grid', bx.lo, bx.hi, bx.ncell
+		print('Solution defined on grid', bx.lo, bx.hi, bx.ncell)
 
 	tsec = 'tomo'
 
@@ -933,7 +942,7 @@ if __name__ == "__main__":
 	try: mask_outliers = config.getlist(tsec, 'maskoutliers', default=False)
 	except Exception as e: _throw('Invalid optional maskoutliers', e)
 
-	if not rank and mask_outliers: print 'Will exclude outlier arrival times'
+	if not rank and mask_outliers: print('Will exclude outlier arrival times')
 
 	try: fresnel = config.get(tsec, 'fresnel', mapper=float, default=None)
 	except Exception as e: _throw('Invalid optional fresnel', e)
@@ -947,7 +956,7 @@ if __name__ == "__main__":
 		if vclip:
 			if len(vclip) != 2:
 				raise ValueError('Range must specify two elements')
-			elif not rank: print 'Will limit average path speeds to', vclip
+			elif not rank: print('Will limit average path speeds to', vclip)
 	except Exception as e:
 		_throw('Invalid optional vclip', e)
 
@@ -958,7 +967,7 @@ if __name__ == "__main__":
 		tfiles = flocshare(tfiles, MPI.COMM_WORLD)
 		# Pull out local share of locally available arrival times
 		atimes = { }
-		for tf, (st, ln) in tfiles.iteritems():
+		for tf, (st, ln) in tfiles.items():
 			atimes.update(getatimes(tf, elements, 0, False,
 						vclip, mask_outliers, st, ln))
 	except Exception as e: _throw('Configuration must specify valid timefile', e)
@@ -968,7 +977,7 @@ if __name__ == "__main__":
 			raise ValueError('Slowness mask is required in piecewise mode')
 		mask = np.load(mask)
 		slw = PiecewiseSlowness(mask, s)
-		if not rank: print 'Using piecewise slowness model'
+		if not rank: print('Using piecewise slowness model')
 	else:
 		# Convert the scalar slowness or file name into a matrix
 		try: s = float(s)
@@ -983,7 +992,7 @@ if __name__ == "__main__":
 	# Collect the total number of arrival-time measurements
 	timecount = MPI.COMM_WORLD.reduce(len(atimes), op=MPI.SUM)
 	if not rank:
-		print 'Using a total of %d arrival-time measurements' % (timecount,)
+		print('Using a total of %d arrival-time measurements' % (timecount,))
 
 	if not sropts:
 		# Build the cost calculator
@@ -1006,7 +1015,7 @@ if __name__ == "__main__":
 			# Save the hitmaps
 			hmaps = np.zeros(cshare.box.ncell + (2,), dtype=np.float64)
 
-			for k, v in cshare.pathmat.todok().iteritems():
+			for k, v in cshare.pathmat.todok().items():
 				l,m,n = np.unravel_index(k[1], cshare.box.ncell)
 				hmaps[l,m,n,0] += 1.
 				hmaps[l,m,n,1] += v
@@ -1022,9 +1031,9 @@ if __name__ == "__main__":
 		np.save(output, ns.astype(np.float32))
 
 		if hmaps is not None:
-			print 'Will save hit maps'
+			print('Will save hit maps')
 			np.save(hitmaps[0], hmaps[:,:,:,0])
 			try: np.save(hitmaps[1], hmaps[:,:,:,1])
 			except IndexError: pass
 
-		print 'Finished'
+		print('Finished')

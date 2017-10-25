@@ -59,7 +59,7 @@ def getatimes(atfile, elements, column=0, backscatter=True,
 		eldists = { }
 		spdvals = [ ]
 
-	for (t, r), v in loadkeymat(atfile, nkeys=2, scalar=False).iteritems():
+	for (t, r), v in loadkeymat(atfile, nkeys=2, scalar=False).items():
 		# Skip backscatter if possible
 		if not backscatter and t == r: continue
 
@@ -93,7 +93,7 @@ def getatimes(atfile, elements, column=0, backscatter=True,
 	lo, hi = q1 - mask_outliers * iqr, q3 + mask_outliers * iqr
 
 	# Filter arrival times to remove outliers
-	return { (t, r): v for (t, r), v in atimes.iteritems()
+	return { (t, r): v for (t, r), v in atimes.items()
 			if t == r or lo <= eldists[t,r] / v <= hi }
 
 
@@ -139,7 +139,7 @@ def frankmap(fhmap, comm):
 	increasing rank order.
 	'''
 	rankmap = { }
-	for rank, csums in enumerate(comm.allgather(fhmap.keys())):
+	for rank, csums in enumerate(comm.allgather(list(fhmap.keys()))):
 		for cs in csums:
 			try: rankmap[cs].append(rank)
 			except KeyError: rankmap[cs] = [rank]
@@ -162,7 +162,7 @@ def flocshare(fnames, comm, msize=10):
 	rank = comm.rank
 
 	lmap = { }
-	for cs, fn in fhmap.iteritems():
+	for cs, fn in fhmap.items():
 		# Find the index of this rank in the rank list
 		try: rlist = frmap[cs]
 		except KeyError:

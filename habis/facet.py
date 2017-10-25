@@ -35,7 +35,7 @@ def normal(f):
 	# Enumerate local directions of all other elements
 	vecs = cutil.vecnormalize(f[1:-1,:] - f[0][np.newaxis,:], axis=1)
 	# Find the vector most orthogonal to the reference
-	v = vecs[np.argmin(np.dot(vecs, ref)),:]
+	v = vecs[np.argmin(vecs @ ref),:]
 	# Compute the normal
 	n = cutil.vecnormalize(np.cross(v, ref))
 
@@ -44,7 +44,7 @@ def normal(f):
 		return cutil.vecnormalize(np.mean(f, axis=0))
 
 	# Find length of normal segment connecting origin to facet plane
-	d = np.dot(f[0], n)
+	d = f[0] @ n
 	# If d is positive, the normal already points outward
 	return n if (d > 0) else -n
 
@@ -78,7 +78,7 @@ def lsqnormal(f, maxit=100, tol=1e-6, itargs={}):
 
 	for i in range(maxit):
 		# Build the cost function and Jacobian
-		cost = np.concatenate([np.dot(df, guess), [np.dot(guess, guess) - 1.]])
+		cost = np.concatenate([df @ guess, [guess @ guess - 1.]])
 		jac = np.concatenate([df, 2 * guess[np.newaxis,:]])
 		# Invert, check for convergence and update
 		delt = lsmr(jac, cost, **itargs)[0]
@@ -88,5 +88,5 @@ def lsqnormal(f, maxit=100, tol=1e-6, itargs={}):
 
 	# Normalize and check directionality of the normal
 	guess = cutil.vecnormalize(guess)
-	d = np.dot(mp, guess)
+	d = mp @ guess
 	return guess if (d > 0) else -guess

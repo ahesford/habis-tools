@@ -10,9 +10,10 @@ import numpy as np
 import os
 import struct
 
-from itertools import izip, repeat
+from itertools import repeat
 
 from collections import OrderedDict, defaultdict, namedtuple
+from functools import reduce
 
 def _strict_int(x):
 	ix = int(x)
@@ -74,14 +75,14 @@ def loadmatlist(files, *a, **k):
 	no files. Otherwise, if forcematch is omitted or False, a glob that
 	matches no files will cause an empty map to be returned.
 	'''
-	if isinstance(files, basestring):
+	if isinstance(files, str):
 		from glob import glob
 		files = glob(files)
 		forcematch = k.pop('forcematch', False)
 		if forcematch and not files: raise IOError('No matches for glob "files"')
 
 	return OrderedDict(sorted(kv for f in files
-		for kv in loadkeymat(f, *a, **k).iteritems()))
+		for kv in loadkeymat(f, *a, **k).items()))
 
 
 def loadkeymat(f, scalar=None, dtype=None, nkeys=None):
@@ -107,7 +108,7 @@ def loadkeymat(f, scalar=None, dtype=None, nkeys=None):
 		return loadtxt_keymat(f, **kwargs)
 
 	if nkeys is not None and len(mapping):
-		key = next(iter(mapping))
+		key = next(iter(mapping.keys()))
 
 		try: nk = len(key)
 		except TypeError: nk = 1
@@ -154,7 +155,7 @@ def savez_keymat(f, mapping, sortrows=True, compressed=False, comment=None):
 	if comment is not None: exargs = { 'comment': str(comment) }
 	else: exargs = { }
 
-	keys = sorted(mapping.iterkeys()) if sortrows else mapping.keys()
+	keys = sorted(mapping.keys()) if sortrows else list(mapping.keys())
 
 	# Build the length array and flattened value array
 	lengths, values = [ ], [ ]
@@ -223,7 +224,7 @@ def loadz_keymat(*args, **kwargs):
 		# Load the file
 		with np.load(*args, **kwargs) as data:
 			try:
-				files = set(data.iterkeys())
+				files = set(data.keys())
 
 				# Ignore a comment in the file
 				try: files.remove('comment')
@@ -282,7 +283,7 @@ def loadz_keymat(*args, **kwargs):
 	mapping = OrderedDict()
 	start = 0
 
-	for key, lv in izip(keys, lengths if lengths.ndim == 1 else repeat(lengths)):
+	for key, lv in zip(keys, lengths if lengths.ndim == 1 else repeat(lengths)):
 		mapping[key] = values[start] if scalar else values[start:start+lv]
 		start += lv
 
@@ -364,7 +365,7 @@ def savetxt_keymat(*args, **kwargs):
 		try: return list(x)
 		except TypeError: return list([x])
 
-	rows = x.iteritems() if not sortrows else sorted(x.iteritems())
+	rows = iter(x.items()) if not sortrows else sorted(x.items())
 
 	# Convert the dictionary to a list of lists
 	mat = [ aslist(k) + aslist(v) for k, v in rows ]
@@ -651,7 +652,7 @@ class RxChannelHeader(tuple):
 		keys = ['idx', 'pos', 'win', 'txgrp']
 		props = dict((key, kwargs.pop(key, getattr(self, key))) for key in keys)
 		if len(kwargs):
-			raise TypeError("Unrecognized keyword argument '%s'" % (kwargs.iterkeys().next()))
+			raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
 		return type(self)(**props)
 
 
@@ -662,9 +663,8 @@ class WaveformSet(object):
 	'''
 	# A bidirectional mapping between typecodes and Numpy dtype names
 	from pycwp.util import bidict
-	typecodes = bidict(I2 = 'int16', I4 = 'int32', I8 = 'int64',
-			F2 = 'float16', F4 = 'float32', F8 = 'float64',
-			C4 = 'complex64', C8 = 'complex128')
+	typecodes = bidict({b'I2': 'int16', b'I4': 'int32', b'I8': 'int64', b'F2': 'float16',
+			b'F4': 'float32', b'F8': 'float64', b'C4': 'complex64', b'C8': 'complex128'})
 
 	@classmethod
 	def fromfile(cls, f, *args, **kwargs):
@@ -746,7 +746,7 @@ class WaveformSet(object):
 		defzero = kwargs.pop('defzero', False)
 
 		if len(kwargs):
-			raise TypeError('Unrecognized keyword argument %s' % kwargs.iterkeys().next())
+			raise TypeError('Unrecognized keyword %s' % (next(iter(kwargs.keys())),))
 
 		# Map the nsamp and f2c for each file to a global range
 		lsamp = 0
@@ -801,11 +801,11 @@ class WaveformSet(object):
 				rxtxmap[rxi].update(ltx)
 
 		# Identify all unique transmit channels
-		txidx = { v for s in rxtxmap.itervalues() for v in s }
+		txidx = { v for s in rxtxmap.values() for v in s }
 
 		if not defzero:
 			# Check to make sure every waveform is accounted for
-			if not all(v == txidx for v in rxtxmap.itervalues()):
+			if not all(v == txidx for v in rxtxmap.values()):
 				raise ValueError('Not all receive channels specify waveforms for all transmissions')
 
 		# Build the transmit-index list and map to record rows
@@ -817,7 +817,7 @@ class WaveformSet(object):
 		outset = cls(ntx, 0, lsamp - f2c, f2c, dtype, txgrps)
 		outset.txidx = txidx
 
-		for rxi, rhdr in sorted(rcvhdrs.iteritems()):
+		for rxi, rhdr in sorted(rcvhdrs.items()):
 			# Subtract the global f2c from the data window
 			win = Window(rhdr.win.start - outset.f2c, rhdr.win.length)
 			rec = np.zeros((ntx, win.length), dtype=outset.dtype)
@@ -852,7 +852,7 @@ class WaveformSet(object):
 		context of the created WaveformSet will be empty
 		'''
 		nwset = cls(wset.ntx, wset.txstart, wset.nsamp, wset.f2c, wset.dtype, wset.txgrps)
-		if with_context: nwset.context = dict(wset.context.iteritems())
+		if with_context: nwset.context = wset.context.copy()
 		else: nwset.context = { }
 		return nwset
 
@@ -951,7 +951,7 @@ class WaveformSet(object):
 		used to load() may cause unexpected behavior.
 		'''
 		# Open the file if it is not open
-		if isinstance(f, basestring):
+		if isinstance(f, str):
 			f = open(f, mode=('wb' if not append else 'ab'))
 
 		# Only version (1,5) is supported for output
@@ -963,7 +963,7 @@ class WaveformSet(object):
 
 		if not append:
 			# Encode the magic number and file version
-			hbytes = struct.pack('<4s2I', 'WAVE', major, minor)
+			hbytes = struct.pack('<4s2I', b'WAVE', major, minor)
 
 			# Encode temperature values
 			temps = self.context.get('temps', [float('nan')]*2)
@@ -1031,7 +1031,7 @@ class WaveformSet(object):
 		file. This mapping is copy-on-write; changes do not persist.
 		'''
 		# Open the file if it is not open
-		if isinstance(f, basestring):
+		if isinstance(f, str):
 			f = open(f, mode='rb')
 
 		def funpack(fmt):
@@ -1041,7 +1041,7 @@ class WaveformSet(object):
 		# Read the magic number and file version
 		magic, major, minor = funpack('<4s2I')
 
-		if magic != 'WAVE':
+		if magic != b'WAVE':
 			raise ValueError('Invalid magic number in file')
 
 		major, minor = self._verify_file_version((major, minor))
@@ -1084,7 +1084,7 @@ class WaveformSet(object):
 			if count > 0:
 				# Default group size, if unspecified, is 10240 / count
 				if size == 0:
-					size = 10240 / count
+					size = 10240 // count
 					if size * count != 10240:
 						raise ValueError('Cannot infer group size for %d groups' % count)
 
@@ -1175,7 +1175,7 @@ class WaveformSet(object):
 		'''
 		Return a list of receive-channel indices in file order.
 		'''
-		return self._records.keys()
+		return list(self._records.keys())
 
 
 	@property
@@ -1257,10 +1257,10 @@ class WaveformSet(object):
 		try:
 			maxtx = self.txgrps.maxtx
 		except AttributeError:
-			for i in xrange(txstart, txstart + self.ntx):
+			for i in range(txstart, txstart + self.ntx):
 				yield i
 		else:
-			for i in xrange(txstart, txstart + self.ntx):
+			for i in range(txstart, txstart + self.ntx):
 				yield i % maxtx
 
 
@@ -1453,7 +1453,7 @@ class WaveformSet(object):
 
 		# Make sure the map is valid and consistent with txgrp configuration
 		ngrpmap = { }
-		for k, v in grpmap.iteritems():
+		for k, v in grpmap.items():
 			ki = _strict_nonnegative_int(k)
 			vi, vg = [_strict_nonnegative_int(vl) for vl in v]
 			if vi >= self.txgrps.size:
@@ -1602,7 +1602,7 @@ class WaveformSet(object):
 		except TypeError:
 			singletx = False
 			if tid is None:
-				tcidx = range(self.ntx)
+				tcidx = list(range(self.ntx))
 			else:
 				tcidx = [self.tx2row(t) for t in tid]
 

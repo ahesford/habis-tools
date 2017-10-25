@@ -6,14 +6,14 @@ import numpy as np
 from random import sample
 
 from multiprocessing import Pool
-from itertools import izip
+
 
 from habis.formats import WaveformSet, loadkeymat
 from habis.habiconf import matchfiles, numrange
 
 def usage(progname=None, fatal=True):
 	progname = progname or sys.argv[0]
-	print >> sys.stderr, 'USAGE: %s [-o outspec] [-r <random>] [-m <trmap>] <inputs>' % progname
+	print('USAGE: %s [-o outspec] [-r <random>] [-m <trmap>] <inputs>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
@@ -41,9 +41,9 @@ def bsextract(infiles, outspec=None):
 	# Load all waveform sets
 	wsets = [WaveformSet.fromfile(f) for f in infiles]
 
-	for wset, f in izip(wsets, infiles):
+	for wset, f in zip(wsets, infiles):
 		obase = outspec or (os.path.splitext(f)[0] + '.Backscatter{0:05d}.wset')
-		print 'Extracting backscatter waves from file', f, 'to output spec', obase
+		print('Extracting backscatter waves from file', f, 'to output spec', obase)
 
 		for rx in wset.rxidx:
 			try: wf = wset.getwaveform(rx, rx, maptids=True)
@@ -90,9 +90,9 @@ def trextract(infiles, trmap, random=None, outspec=None):
 	# Load all waveform sets
 	wsets = [WaveformSet.fromfile(f) for f in infiles]
 
-	for wset, f in izip(wsets, infiles):
+	for wset, f in zip(wsets, infiles):
 		obase = outspec or (os.path.splitext(f)[0] + '.Tx{0:05d}.Rx{1:05d}.wset')
-		print 'Extracting Tx,Rx pairs from file', f, 'to output spec', obase
+		print('Extracting Tx,Rx pairs from file', f, 'to output spec', obase)
 
 		# Determine a local portion of the trlist
 		rset = set(wset.rxidx)
@@ -136,7 +136,7 @@ if __name__ == '__main__':
 
 	try: infiles = matchfiles(args)
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(sys.argv[0], True)
 
 	if not trmap: bsextract(infiles, outspec)

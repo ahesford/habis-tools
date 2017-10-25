@@ -6,7 +6,7 @@
 import sys, numpy as np, os, getopt
 import multiprocessing
 
-from itertools import izip
+
 from collections import defaultdict
 
 from habis.habiconf import matchfiles, buildpaths
@@ -14,7 +14,7 @@ from habis.formats import WaveformSet
 
 
 def usage(progname, fatal=False):
-	print >> sys.stderr, 'USAGE: %s [-c] [-z] [-o outpath] <inputs>' % progname
+	print('USAGE: %s [-c] [-z] [-o outpath] <inputs>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
@@ -70,7 +70,7 @@ if __name__ == '__main__':
 	# Prepare the input files and group by basename
 	try: infiles = matchfiles(args)
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(sys.argv[0], fatal=True)
 
 	ingroups = defaultdict(list)
@@ -81,12 +81,12 @@ if __name__ == '__main__':
 		# Map each basename to an ouptut file
 		outnames = { k: buildpaths([k], outpath, 'cat.wset')[0] for k in ingroups }
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(sys.argv[0], fatal=True)
 
-	for k, infiles in ingroups.iteritems():
+	for k, infiles in ingroups.items():
 		if len(infiles) < 2:
-			print 'Ignoring file with basename', k
+			print('Ignoring file with basename', k)
 			continue
-		print 'Concatenating files', k, 'to output', outnames[k]
+		print('Concatenating files', k, 'to output', outnames[k])
 		concatenate(infiles, outnames[k], **kwargs)

@@ -5,7 +5,7 @@
 
 import sys, numpy as np, os, getopt
 
-import multiprocessing, Queue
+import multiprocessing, queue
 
 from pycwp import process
 from habis.habiconf import matchfiles, buildpaths
@@ -14,7 +14,7 @@ from habis.formats import WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = os.path.basename(sys.argv[0])
-	print >> sys.stderr, 'USAGE: %s [-g grpmap] [-l locmap] [-p nprocs] <inputs>' % progname
+	print('USAGE: %s [-g grpmap] [-l locmap] [-p nprocs] <inputs>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
@@ -37,7 +37,7 @@ def getchanlist(infiles, queue=None):
 		wset = WaveformSet.fromfile(infile)
 
 		# Read the headers and update the channel list
-		for hdr, _ in wset._records.itervalues():
+		for hdr, _ in wset._records.values():
 			if hdr.idx in chanlist:
 				raise ValueError('Channel index collision')
 			chanlist[hdr.idx] = tuple(hdr.pos), hdr.txgrp and tuple(hdr.txgrp)
@@ -83,10 +83,10 @@ def mpchanlists(infiles, nproc=1):
 			try:
 				results = queue.get(timeout=0.1)
 				responses += 1
-			except Queue.Empty:
+			except queue.Empty:
 				pass
 			else:
-				for chan, rec in results.iteritems():
+				for chan, rec in results.items():
 					if chan in chanlist:
 						raise ValueError('Channel index collision')
 					chanlist[chan] = rec
@@ -104,7 +104,7 @@ if __name__ == '__main__':
 	try:
 		optlist, args = getopt.getopt(sys.argv[1:], 'g:l:p:')
 	except getopt.GetoptError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(fatal=True)
 
 	for opt in optlist:
@@ -120,7 +120,7 @@ if __name__ == '__main__':
 	# Prepare the input and output lists
 	try: infiles = matchfiles(args)
 	except IOError as e:
-		print >> sys.stderr, 'ERROR:', e
+		print('ERROR:', e, file=sys.stderr)
 		usage(fatal=True)
 
 	# Get the channel list
@@ -128,17 +128,17 @@ if __name__ == '__main__':
 
 	# If no output files are specified, just print
 	if not grpmap and not locmap:
-		for idx, (pos, txgrp) in sorted(chanlist.iteritems()):
-			print idx, pos, txgrp
+		for idx, (pos, txgrp) in sorted(chanlist.items()):
+			print(idx, pos, txgrp)
 
 	if grpmap:
 		try:
-			grps = [[i] + list(v[1]) for i, v in chanlist.iteritems()]
+			grps = [[i] + list(v[1]) for i, v in chanlist.items()]
 		except TypeError:
-			print >> sys.stderr, 'Will not print group map when at least one channel has no group index'
+			print('Will not print group map when at least one channel has no group index', file=sys.stderr)
 		else:
 			np.savetxt(grpmap, grps, fmt='%6d %6d %6d')
 
 	if locmap:
-		locs = [[i] + list(v[0]) for i, v in chanlist.iteritems()]
+		locs = [[i] + list(v[0]) for i, v in chanlist.items()]
 		np.savetxt(locmap, locs, fmt='%6d %14.8f %14.8f %14.8f')
