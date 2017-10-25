@@ -11,26 +11,27 @@ and for exchanging data among multiple nodes between imaging stages.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 DOCLINES = __doc__.split('\n')
-
-def configuration(parent_package='', top_path=None):
-	from numpy.distutils.misc_util import Configuration
-	config = Configuration(None, parent_package, top_path)
-	config.set_options(ignore_setup_xxx_py=True,
-			assume_default_configuration=True,
-			delegate_options_to_subpackages=True,
-			quiet=True)
-	config.add_subpackage('habis')
-	config.add_scripts(['shell/*.py'])
-
-	return config
+VERSION = '1.1'
 
 if __name__ == '__main__':
-	from numpy.distutils.core import setup
+	try: import wheel
+	except ImportError: pass
 
-	setup(name = 'habis', version = '1.0',
-			description = DOCLINES[0],
-			long_description = '\n'.join(DOCLINES[2:]),
-			author = 'Andrew J. Hesford',
-			author_email = 'ajh@sideband.org',
-			platforms = ['any'], license = 'BSD', packages = ['habis'],
-			configuration = configuration)
+	from setuptools import setup, find_packages
+	from Cython.Build import cythonize
+	from glob import glob
+
+	import numpy as np
+
+	setup(name='habis',
+			version=VERSION,
+			description=DOCLINES[0],
+			long_description='\n'.join(DOCLINES[2:]),
+			author='Andrew J. Hesford',
+			author_email='ajh@sideband.org',
+			platforms=['any'], license='Closed',
+			packages=['habis'],
+			scripts=glob('shell/*.py'),
+			ext_modules=cythonize('habis/*.pyx'),
+			include_dirs = [np.get_include()],
+		)
