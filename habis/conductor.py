@@ -551,7 +551,7 @@ class HabisRemoteConductorGroup(object):
 
 		{ (h, k): CommandWrapper.decodeResult(v)
 			for h, r in zip(hosts, results)
-				for k, v in results.iteritems() }.
+				for k, v in results.items() }.
 
 		If duplicate keys are found, a KeyError will be raised.
 		'''

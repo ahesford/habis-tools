@@ -873,12 +873,12 @@ class PathTracer(object):
 			tlen = fsum(norm(r - l) for r, l in zip(points, points[1:]))
 
 			# Convert Fresnel-zone weights to integral contributions
-			wtot = fsum(plens.itervalues())
-			plens = { k: tlen * v / wtot for k, v in plens.iteritems() }
+			wtot = fsum(plens.values())
+			plens = { k: tlen * v / wtot for k, v in plens.items() }
 
 			# Reintegrate over Fresnel path
 			pint = fsum(v * si.evaluate(*k, grad=False)
-					for k, v in plens.iteritems())
+					for k, v in plens.items())
 
 			return pint if intonly else (plens, pint)
 
@@ -891,7 +891,7 @@ class PathTracer(object):
 		for (st, ed), march in zip(zip(points, points[1:]), marches):
 			# Compute whol length of this path segment
 			dl = norm(ed - st)
-			for cell, (tmin, tmax) in march.iteritems():
+			for cell, (tmin, tmax) in march.items():
 				# Convert fractional length to real length
 				# 0 <= tmin <= tmax <= 1 guaranteed by march algorithm
 				contrib = (tmax - tmin) * dl
@@ -902,7 +902,7 @@ class PathTracer(object):
 
 		# Accumulate the contributions to each cell
 		# Return the path map and the path-length integral
-		return { k: fsum(v) for k, v in plens.iteritems() }, pint
+		return { k: fsum(v) for k, v in plens.items() }, pint
 
 
 @cython.cdivision(True)
