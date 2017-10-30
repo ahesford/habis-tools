@@ -156,7 +156,7 @@ class StraightRayTracer(TomographyTask):
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def timeadjust(self, si, tmin=0., **kwargs):
+	def timeadjust(self, si, tmin=0., omega=1., **kwargs):
 		'''
 		Adjust the arrival times in self.rhs with a corrective factor
 		that tracks wavefront normal directions using the method of
@@ -165,12 +165,19 @@ class StraightRayTracer(TomographyTask):
 		The argument si should be an Interpolator3D instance that
 		represents a slowness model used to adjust the times.
 
-		If tmin is not None, it should be a float such that any path
-		with an actual arrival time T and a compensated arrival time Tc
-		that fails to satisfy Tc >= tmin * T will be excluded from
-		self.rhs.
+		The argument tmin should be a float such that any path with an
+		actual arrival time T and a compensated arrival time Tc that
+		fails to satisfy Tc >= tmin * T will be excluded from self.rhs.
 
-		The keyword arguments kwargs are passed to the method
+		The argument omega should be a float used to damp time
+		adjustments. For a given path with measured arrival time T in
+		self.atimes, compensated arrival time Tc and straight-ray
+		arrival time Ts (each in the presence of the model si), the
+		adjusted time for the path is
+
+			Ta = Ts + omega * (T - Tc).
+
+		The remaining keyword arguments kwargs are passed to the method
 		WavefrontNormalIntegrator.pathint to control the corrective
 		terms. The keyword "h" is forbidden.
 
@@ -205,7 +212,7 @@ class StraightRayTracer(TomographyTask):
 
 			# Record the times and compensate the RHS
 			ivals[t,r] = (tc, ts)
-			self.rhs[i] = vt + ts - min(max(tc, vt), ts)
+			self.rhs[i] = ts + omega * (vt - tc)
 
 		return ivals
 
