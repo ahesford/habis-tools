@@ -1,4 +1,4 @@
-#!/opt/python-2.7.9/bin/python
+#!/usr/bin/env python
 
 # Copyright (c) 2017 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
@@ -156,7 +156,7 @@ class StraightRayTracer(TomographyTask):
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def timeadjust(self, si, **kwargs):
+	def timeadjust(self, si, tmin=0., **kwargs):
 		'''
 		Adjust the arrival times in self.rhs with a corrective factor
 		that tracks wavefront normal directions using the method of
@@ -164,6 +164,11 @@ class StraightRayTracer(TomographyTask):
 
 		The argument si should be an Interpolator3D instance that
 		represents a slowness model used to adjust the times.
+
+		If tmin is not None, it should be a float such that any path
+		with an actual arrival time T and a compensated arrival time Tc
+		that fails to satisfy Tc >= tmin * T will be excluded from
+		self.rhs.
 
 		The keyword arguments kwargs are passed to the method
 		WavefrontNormalIntegrator.pathint to control the corrective
@@ -179,6 +184,8 @@ class StraightRayTracer(TomographyTask):
 		# Build the integrator
 		integrator = WavefrontNormalIntegrator(si)
 
+		tmin = float(tmin)
+
 		# Compute the corrective factor for each (t, r) pair
 		cell = self.box.cell
 		self.rhs = { }
@@ -192,13 +199,13 @@ class StraightRayTracer(TomographyTask):
 				# Try to find the compensated straight-ray time
 				tc, ts = integrator.pathint(tx, rx, h=cell, **kwargs)
 				# Check the time for sanity
-				if tc > ts or tc < vt - 0.5:
+				if not ts >= tc >= tmin * vt:
 					raise ValueError('Compensated time out of range')
 			except ValueError: continue
 
 			# Record the times and compensate the RHS
 			ivals[t,r] = (tc, ts)
-			self.rhs[i] = ts - max(0, (tc - vt))
+			self.rhs[i] = vt + ts - min(max(tc, vt), ts)
 
 		return ivals
 

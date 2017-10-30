@@ -1,4 +1,4 @@
-#!/opt/python-2.7.9/bin/python
+#!/usr/bin/env python
 
 import os, sys, numpy as np
 from habis.formats import WaveformSet
