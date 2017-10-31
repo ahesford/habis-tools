@@ -129,7 +129,6 @@ class StraightRayTracer(TomographyTask):
 		indices = [ ]
 		data = [ ]
 		self.trpairs = [ ]
-		self.rhs = { }
 
 		for i, ((t, r), v) in enumerate(sorted(self.atimes.items())):
 			# March straight through the grid
@@ -149,33 +148,26 @@ class StraightRayTracer(TomographyTask):
 					data.append(seg.length * ll / htot)
 					indices.append(np.ravel_multi_index(cidx, ncell))
 			indptr.append(len(indices))
-			self.rhs[i] = v
 			self.trpairs.append((t, r))
 
 		mshape = len(self.trpairs), np.prod(ncell)
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def timeadjust(self, si, tmin=0., omega=1., **kwargs):
+	def comptimes(self, si, tmin=0., **kwargs):
 		'''
-		Adjust the arrival times in self.rhs with a corrective factor
-		that tracks wavefront normal directions using the method of
-		habis.pathtracer.WavefrontNormalIntegrator.
+		Compute compensated and straight-ray arrival times for all
+		transmit-receive pairs in self.atimes through the medium
+		represented by slowness si, as an Interpolator3D instance.
 
-		The argument si should be an Interpolator3D instance that
-		represents a slowness model used to adjust the times.
+		The compensated time adjusts the arrival-time with a factor
+		that accounts for deviation of the wavefront normal from the
+		straight path.
 
 		The argument tmin should be a float such that any path with an
 		actual arrival time T and a compensated arrival time Tc that
-		fails to satisfy Tc >= tmin * T will be excluded from self.rhs.
-
-		The argument omega should be a float used to damp time
-		adjustments. For a given path with measured arrival time T in
-		self.atimes, compensated arrival time Tc and straight-ray
-		arrival time Ts (each in the presence of the model si), the
-		adjusted time for the path is
-
-			Ta = Ts + omega * (T - Tc).
+		fails to satisfy Tc >= tmin * T will be excluded from the
+		output.
 
 		The remaining keyword arguments kwargs are passed to the method
 		WavefrontNormalIntegrator.pathint to control the corrective
@@ -184,9 +176,7 @@ class StraightRayTracer(TomographyTask):
 		The return value is a map from transmit-receive index pairs to
 		pairs of compensated and uncompensated straight-ray arrival
 		times. If a path integral fails for some transmit-receive pair,
-		or if the compensated integral does not fall between the
-		straight-ray integral and the true arrival time, it will not be
-		included in the map.
+		it will not be included in the map.
 		'''
 		# Build the integrator
 		integrator = WavefrontNormalIntegrator(si)
@@ -195,9 +185,8 @@ class StraightRayTracer(TomographyTask):
 
 		# Compute the corrective factor for each (t, r) pair
 		cell = self.box.cell
-		self.rhs = { }
 		ivals = { }
-		for i, (t, r) in enumerate(self.trpairs):
+		for t, r in self.trpairs:
 			vt = self.atimes[t,r]
 			tx = bx.cart2cell(*self.elements[t])
 			rx = bx.cart2cell(*self.elements[r])
@@ -212,7 +201,6 @@ class StraightRayTracer(TomographyTask):
 
 			# Record the times and compensate the RHS
 			ivals[t,r] = (tc, ts)
-			self.rhs[i] = ts + omega * (vt - tc)
 
 		return ivals
 
@@ -233,9 +221,10 @@ class StraightRayTracer(TomographyTask):
 		if mfilter: s = median_filter(s, size=mfilter)
 		np.save(fname, s.astype(np.float32))
 
-	def lsmr(self, s, epochs=1, coleq=False, pathopts={}, chambolle=None,
-			tfilter=None, mfilter=None, partial_output=None,
-			lsmropts={}, save_pathmat=None, save_times=None):
+	def lsmr(self, s, epochs=1, coleq=False, pathopts={},
+			chambolle=None, tfilter=None, mfilter=None,
+			partial_output=None, lsmropts={}, omega=1.,
+			minmax=False, save_pathmat=None, save_times=None):
 		'''
 		For each of epochs rounds, compute, using LSMR, a slowness
 		image that satisfies the straight-ray arrival-time equations
@@ -260,18 +249,33 @@ class StraightRayTracer(TomographyTask):
 		of values in the list, the final value will be repeated as
 		necessary.
 
-		Between subsequent epochs, the arrival times will be updated
-		according to self.timeadjust(si, **pathopts) to incorporate
-		straight-ray compensations. The argument si is an
-		Interpolator3D representation of s (linear if self.linear is
-		True, cubic otherwise).
+		Within each epoch, an update to the slowness image is computed
+		based on the difference between the compensated arrival time
+		produced by self.comptimes(si, **pathopts) and the actual
+		arrival times in self.atimes. The argument si is an instance of
+		Interpolator3D to represent s (linear if self.linear is True,
+		cubic otherwise).
+
+		If minmax is True, each compensated arrival is replaced by
+
+			Tc = min(max(Tc, Ta), Ts),
+
+		where Tc, Ts, Ta are the compensated, straight-ray and actual
+		(measured) arrival times for the path, respectively.
+
+		The parameter omega should be a float used to damp updates at
+		the end of each epoch. In other words, if ds is the update
+		computed in an epoch, the slowness s at the end of the epoch
+		will be updated according to
+
+			s <- s + omega * ds.
 
 		If tfilter is not None, it should be a tuple of the form
 		(name, size), where name is a string used to select an image
 		filter as scipy.ndimage.<name>_filter and size is the second
 		argument to the filter (the image to filter is the first
 		argument). The chosen filter will be applied to the slowness
-		image when producing the interpolator used by self.timeadjust.
+		image when producing the interpolator used by self.comptimes.
 		The filter will not influence the evolution of images between
 		epochs. If tfilter is None, no filtering is attempted.
 
@@ -316,9 +320,6 @@ class StraightRayTracer(TomographyTask):
 			# Make sure non-root tasks are always silent
 			lsmropts['show'] = False
 
-		if 'calc_var' in lsmropts:
-			raise TypeError('Argument "calc_var" is forbidden')
-
 		ncell = self.box.ncell
 
 		if tfilter:
@@ -358,9 +359,58 @@ class StraightRayTracer(TomographyTask):
 
 		msgfmt = 'Epoch %d RMSE %0.6g dsol %0.6g dct %0.6g dst %0.6g paths %d'
 		epoch, sol, ltimes = 0, 0, { }
+		ns = s.perturb(sol)
 		while True:
+			# Filter and interpolate image for time compensation
+			if timefilt and tfwidth > 0: ns = timefilt(ns, tfwidth)
+			nsi = self.interpolator(ns)
+			nsi.default = slowdef
+
+			# Adjust RHS times with straight-ray compensation
+			tv = self.comptimes(nsi, **pathopts)
+			# Find RMS arrival-time error for compensated model
+			terr = fsum((v[0] - self.atimes[k])**2
+					for k, v in tv.items())
+			tn = self.comm.allreduce(len(tv), op=MPI.SUM)
+			terr = self.comm.allreduce(terr, op=MPI.SUM)
+			terr = np.sqrt(terr / tn)
+
+			# Compute norms of model times and time changes
+			tdiffs = [ ]
+			for k in set(tv).intersection(ltimes):
+				a, b = tv[k]
+				c, d = ltimes[k]
+				tdiffs.append([(a-c)**2, (b-d)**2, a**2, b**2])
+			# Reduce square norms across all ranks
+			if tdiffs: tdiffs = np.sum(tdiffs, axis=0)
+			else: tdiffs = np.array([0.]*4, dtype=np.float64)
+			self.comm.Allreduce(MPI.IN_PLACE, tdiffs, op=MPI.SUM)
+			# Set placeholder values if there is no value
+			if tdiffs[2] == 0: tdiffs[0] = tdiffs[2] = 1.
+			if tdiffs[3] == 0: tdiffs[1] = tdiffs[3] = 1.
+			ltimes = tv
+
+			if save_times:
+				tv = self.comm.gather(tv)
+				if self.isRoot:
+					rname = save_times.format(epoch=epoch)
+					tv = dict(kp for v in tv for kp in v.items())
+					savez_keymat(rname, tv)
+
+			rkeys = [ ]
+			rhs = [ ]
+			for i, (t, r) in enumerate(self.trpairs):
+				try:
+					tc, ts = ltimes[t,r]
+					ta = self.atimes[t,r]
+				except KeyError: continue
+
+				if minmax: tc = min(max(tc, ta), ts)
+
+				rhs.append(ta - tc)
+				rkeys.append(i)
+
 			# Separate the RHS into row keys and values
-			rkeys, rhs = zip(*self.rhs.items())
 			rhs = np.array(rhs)
 
 			lpmat = pathmat[rkeys,:]
@@ -397,9 +447,6 @@ class StraightRayTracer(TomographyTask):
 			A = LinearOperator(shape=lpmat.shape, matvec=mvp,
 						rmatvec=amvp, dtype=lpmat.dtype)
 
-			# RHS is arrival times minus unperturbed solution
-			rhs -= self.pathmat[rkeys,:] @ s.perturb(sol).ravel('C')
-
 			# Use the right maxiter value for this epoch
 			results = lsmr(A, rhs, unorm=unorm, vnorm=norm,
 					maxiter=next(itercounts), **lsmropts)
@@ -412,64 +459,20 @@ class StraightRayTracer(TomographyTask):
 				ds = denoise_tv_chambolle(s.unflatten(ds), cmwt)
 				ds = s.flatten(ds)
 
-			# Compute relative change in solution
-			dsnrm = norm(ds) / norm(sol + ds)
+			if self.isRoot:
+				# Compute relative change in solution
+				dsnrm = norm(ds) / norm(sol + ds)
+
+				ctnrm = np.sqrt(tdiffs[0] / tdiffs[2])
+				stnrm = np.sqrt(tdiffs[1] / tdiffs[3])
+				print(msgfmt % (epoch, terr, dsnrm, ctnrm, stnrm, tn))
 
 			# Update the solution
-			sol = sol + ds
+			sol = sol + omega * ds
 			ns = s.perturb(sol)
 
 			if partial_output:
 				self.save(partial_output, ns, epoch, mfilter)
-
-			if epochs:
-				# Filter and interpolate image for time compensation
-				if timefilt and tfwidth > 0:
-					ns = timefilt(ns, tfwidth)
-				nsi = self.interpolator(ns)
-				nsi.default = slowdef
-
-				# Adjust RHS times with straight-ray compensation
-				tv = self.timeadjust(nsi, **pathopts)
-				# Find RMS arrival-time error for compensated model
-				terr = fsum((v[0] - self.atimes[k])**2
-						for k, v in tv.items())
-				tn = self.comm.allreduce(len(tv), op=MPI.SUM)
-				terr = self.comm.allreduce(terr, op=MPI.SUM)
-				terr = np.sqrt(terr / tn)
-
-				# Compute norms of model times and time changes
-				tdiffs = [ ]
-				for k in set(tv).intersection(ltimes):
-					a, b = tv[k]
-					c, d = ltimes[k]
-					tdiffs.append([(a-c)**2, (b-d)**2, a**2, b**2])
-				# Reduce square norms across all ranks
-				if tdiffs: tdiffs = np.sum(tdiffs, axis=0)
-				else: tdiffs = np.array([0.]*4, dtype=np.float64)
-				self.comm.Allreduce(MPI.IN_PLACE, tdiffs, op=MPI.SUM)
-				# Set placeholder values if there is no value
-				if tdiffs[2] == 0: tdiffs[0] = tdiffs[2] = 1.
-				if tdiffs[3] == 0: tdiffs[1] = tdiffs[3] = 1.
-				ltimes = tv
-
-				if save_times:
-					tv = self.comm.gather(tv)
-					if self.isRoot:
-						rname = save_times.format(epoch=epoch)
-						tv = dict(kp for v in tv
-								for kp in v.items())
-						savez_keymat(rname, tv)
-			else:
-				# Without compensation, error is LSMR residual
-				tn = self.comm.allreduce(len(self.rhs), op=MPI.SUM)
-				terr = results[3] / np.sqrt(tn)
-				tdiffs = [1.] * 4
-
-			if self.isRoot:
-				ctnrm = np.sqrt(tdiffs[0] / tdiffs[2])
-				stnrm = np.sqrt(tdiffs[1] / tdiffs[3])
-				print(msgfmt % (epoch, terr, dsnrm, ctnrm, stnrm, tn))
 
 			epoch += 1
 			if epoch > epochs: break
