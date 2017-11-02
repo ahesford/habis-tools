@@ -224,7 +224,7 @@ class StraightRayTracer(TomographyTask):
 	def lsmr(self, s, epochs=1, coleq=False, pathopts={},
 			chambolle=None, tfilter=None, mfilter=None,
 			partial_output=None, lsmropts={}, omega=1.,
-			minmax=False, save_pathmat=None, save_times=None):
+			minmax=0., save_pathmat=None, save_times=None):
 		'''
 		For each of epochs rounds, compute, using LSMR, a slowness
 		image that satisfies the straight-ray arrival-time equations
@@ -256,9 +256,10 @@ class StraightRayTracer(TomographyTask):
 		Interpolator3D to represent s (linear if self.linear is True,
 		cubic otherwise).
 
-		If minmax is True, each compensated arrival is replaced by
+		The value minmax should be a floating-point value such that
+		compensated arrival will be replaced by
 
-			Tc = min(max(Tc, Ta), Ts),
+			Tc = min(max(Tc, minmax * Ta), Ts),
 
 		where Tc, Ts, Ta are the compensated, straight-ray and actual
 		(measured) arrival times for the path, respectively.
@@ -357,6 +358,8 @@ class StraightRayTracer(TomographyTask):
 		except TypeError: chamwts = repeat(chambolle)
 		else: chamwts = (chambolle[min(i, len(chambolle)-1)] for i in count())
 
+		minmax = float(minmax)
+
 		msgfmt = 'Epoch %d RMSE %0.6g dsol %0.6g dct %0.6g dst %0.6g paths %d'
 		epoch, sol, ltimes = 0, 0, { }
 		ns = s.perturb(sol)
@@ -405,7 +408,7 @@ class StraightRayTracer(TomographyTask):
 					ta = self.atimes[t,r]
 				except KeyError: continue
 
-				if minmax: tc = min(max(tc, ta), ts)
+				tc = min(max(tc, minmax * ta), ts)
 
 				rhs.append(ta - tc)
 				rkeys.append(i)
