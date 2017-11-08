@@ -29,7 +29,7 @@ from itertools import count, repeat
 
 from mpi4py import MPI
 
-from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D, CubicInterpolator3D
+from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.regularize import epr, totvar, tikhonov
 from pycwp.iterative import lsmr
 from pycwp.cytools.boxer import Segment3D
@@ -107,10 +107,10 @@ class StraightRayTracer(TomographyTask):
 		embody the first Fresnel zone for a principal wavelength of
 		fresnel (in units that match the units of box.cell).
 
-		For time compensation (if applied), slowness will be
-		interpolated with LinearInterpolato3D if linear is True
-		(CubicInterpolator3D otherwise). The interpolator will inherit
-		a default (out-of-bounds) slowness slowdef.
+		For time compensation slowness will be interpolated with
+		LinearInterpolato3D if linear is True (HermiteInterpolator3D
+		otherwise). The interpolator will inherit a default
+		(out-of-bounds) slowness slowdef.
 		'''
 		# Initialize the data and communicator
 		super(StraightRayTracer, self).__init__(elements, atimes, comm)
@@ -121,7 +121,7 @@ class StraightRayTracer(TomographyTask):
 
 		# Identify the right interpolator for multi-round imaging
 		self.interpolator = (LinearInterpolator3D if linear
-						else CubicInterpolator3D)
+						else HermiteInterpolator3D)
 		self.slowdef = slowdef
 
 		# Build the path-length matrix and RHS vector
@@ -234,7 +234,10 @@ class StraightRayTracer(TomographyTask):
 		self.box.
 
 		If coleq is True, the columns of each path-length operator will
-		be scaled so that they all have unity norm.
+		be scaled so that they all have unity norm. The value of coleq
+		can also be a float that specifies the minimum allowable column
+		norm (as a fraction of the maximum norm) to avoid excessive
+		scaling of very weak columns.
 
 		The LSMR implementation uses pycwp.iterative.lsmr to support
 		arrival times distributed across multiple MPI tasks in
@@ -271,14 +274,10 @@ class StraightRayTracer(TomographyTask):
 
 			s <- s + omega * ds.
 
-		If tfilter is not None, it should be a tuple of the form
-		(name, size), where name is a string used to select an image
-		filter as scipy.ndimage.<name>_filter and size is the second
-		argument to the filter (the image to filter is the first
-		argument). The chosen filter will be applied to the slowness
-		image when producing the interpolator used by self.comptimes.
-		The filter will not influence the evolution of images between
-		epochs. If tfilter is None, no filtering is attempted.
+		The tfilter argument should be suitable to pass as the third
+		argument to the constructor of LinearInterpolator3D or
+		HermiteInterpolator3D to effect Savitzky-Golay filtering of the
+		medium for compensated travel-time integrals.
 
 		If chambolle is not None, it should be the "weight" parameter
 		to the function skimage.restoration.denoise_tv_chambolle. In
@@ -323,12 +322,9 @@ class StraightRayTracer(TomographyTask):
 
 		ncell = self.box.ncell
 
-		if tfilter:
-			tfname = tfilter[0].lower() + '_filter'
-			try: timefilt = getattr(scipy.ndimage, tfname)
-			except AttributeError: timefilt = None
-			tfwidth = tfilter[1]
-		else: timefilt, tfwidth = None, None
+		# Set a default for Boolean coleq
+		if coleq is True: coleq = 1e-3
+		elif coleq: coleq = float(coleq)
 
 		# Composite slowness transform and path-length operator as CSR
 		pathmat = (self.pathmat @ s.tosparse()).tocsr()
@@ -365,9 +361,7 @@ class StraightRayTracer(TomographyTask):
 		ns = s.perturb(sol)
 		while True:
 			# Filter and interpolate image for time compensation
-			if timefilt and tfwidth > 0: ns = timefilt(ns, tfwidth)
-			nsi = self.interpolator(ns)
-			nsi.default = slowdef
+			nsi = self.interpolator(ns, self.slowdef, tfilter)
 
 			# Adjust RHS times with straight-ray compensation
 			tv = self.comptimes(nsi, **pathopts)
@@ -426,7 +420,7 @@ class StraightRayTracer(TomographyTask):
 
 				# Clip normalization factors to avoid blow-up
 				mxnrm = np.max(colscale)
-				np.clip(colscale, 1e-3 * mxnrm, mxnrm, colscale)
+				np.clip(colscale, coleq * mxnrm, mxnrm, colscale)
 			else: colscale = None
 
 			# Include column scaling in the matrix-vector product
@@ -492,7 +486,7 @@ class BentRayTracer(TomographyTask):
 			slowdef=None, linear=True, comm=MPI.COMM_WORLD, hitmaps=False):
 		'''
 		Create a worker to do path tracing on the element pairs present
-		in atimes. Slowness will be interpolated with
+		in atimes. Slowness will be interpolated by an instance of
 		LinearInterpolator3D if linear is True (HermiteInterpolator3D
 		otherwise). The interpolator will inherit a default
 		(out-of-bounds) slowness slowdef.
@@ -514,7 +508,7 @@ class BentRayTracer(TomographyTask):
 		# Record solver parameters
 		self.slowdef = slowdef
 		self.interpolator = (LinearInterpolator3D if linear
-					else HermiteInterpolator3D)
+						else HermiteInterpolator3D)
 
 		# Save most recent hit map, if desired
 		self.save_hitmaps = bool(hitmaps)
