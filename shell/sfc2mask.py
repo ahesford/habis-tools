@@ -1,20 +1,9 @@
 #!/usr/bin/env python 
 
 import numpy as np, getopt, sys, os
-
-from math import sqrt
-
-from scipy.signal import hilbert
-
-
-
-from collections import defaultdict
+from argparse import ArgumentParser
 
 from pycwp.boxer import Box3D, Triangle3D, Octree
-
-from habis.habiconf import matchfiles
-from habis.sigtools import Waveform, Window
-from habis.formats import loadmatlist, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
@@ -84,21 +73,38 @@ def depthmap(otree, tris, grid):
 
 
 if __name__ == '__main__':
-	if len(sys.argv) != 6: usage(fatal=True)
+	parser = ArgumentParser(description='From a backscatter surface mesh, '
+						'build a binary interior-exterior mask')
 
-	# Read grid parameters
-	lo = tuple(float(v) for v in sys.argv[1].split(','))
-	hi = tuple(float(v) for v in sys.argv[2].split(','))
-	ncell = tuple(int(v) for v in sys.argv[3].split(','))
+	parser.add_argument('-z', type=int, default=None, metavar='zmax',
+				help='Exclude z slabs with indices larger than zmax')
+	parser.add_argument('lo', type=float, nargs=3, help='Low corner, '
+				'as "lx ly lz", of the grid spanned by the mask')
+	parser.add_argument('hi', type=float, nargs=3, help='High corner, '
+				'as "hx hy hz", of the grid spanned by the mask')
+	parser.add_argument('ncell', type=int, nargs=3, help='Number of cells, '
+				'as "nx ny nz", in the grid spanned by the mask')
+	parser.add_argument('meshfile', type=str,
+				help='Mesh file that defines the backscatter surface')
+	parser.add_argument('maskfile', type=str, help='Mask file to be written')
+
+	args = parser.parse_args(sys.argv[1:])
+
+	# Read grid parameters and build the grid
+	grid = Box3D(args.lo, args.hi, args.ncell)
+
+	if args.z is not None:
+		zmax = grid.ncell[2] - 1
+		if not 0 < args.z < zmax:
+			raise ValueError(f'Value zmax must be in range (0, {zmax})')
 
 	# Read mesh parameters
-	with np.load(sys.argv[4]) as mesh:
+	with np.load(args.meshfile) as mesh:
 		triangles = mesh['triangles']
 		nodes = mesh['nodes']
 
-	# Build triangle list and the voxel grid
+	# Build triangle list
 	tris = [Triangle3D([nodes[v] for v in t]) for t in triangles]
-	grid = Box3D(lo, hi, ncell)
 
 	print('Will prepare a mask for grid', grid.lo, grid.hi, grid.ncell)
 
@@ -110,7 +116,11 @@ if __name__ == '__main__':
 	depth = depthmap(otree, tris, grid)
 	print('Finished building depth map')
 
-	print('Saving mask to file', sys.argv[5])
+	print('Saving mask to file', args.maskfile)
 	# Build the mask from the depth map
 	mask = np.arange(grid.ncell[2])[np.newaxis,np.newaxis,:] >= depth[:,:,np.newaxis]
-	np.save(sys.argv[5], mask)
+
+	# Squash values above zmax
+	if args.z is not None: mask[:,:,args.z+1:] = False
+
+	np.save(args.maskfile, mask)
