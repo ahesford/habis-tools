@@ -154,7 +154,7 @@ class StraightRayTracer(TomographyTask):
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def comptimes(self, si, tmin=0., **kwargs):
+	def comptimes(self, si, normwt=1., tmin=0., **kwargs):
 		'''
 		Compute compensated and straight-ray arrival times for all
 		transmit-receive pairs in self.atimes through the medium
@@ -163,6 +163,9 @@ class StraightRayTracer(TomographyTask):
 		The compensated time adjusts the arrival-time with a factor
 		that accounts for deviation of the wavefront normal from the
 		straight path.
+
+		The argument normwt is passed as the "normwt" argument to the
+		WavefrontNormalIntegrator constructor.
 
 		The argument tmin should be a float such that any path with an
 		actual arrival time T and a compensated arrival time Tc that
@@ -179,7 +182,7 @@ class StraightRayTracer(TomographyTask):
 		it will not be included in the map.
 		'''
 		# Build the integrator
-		integrator = WavefrontNormalIntegrator(si)
+		integrator = WavefrontNormalIntegrator(si, normwt=normwt)
 
 		tmin = float(tmin)
 

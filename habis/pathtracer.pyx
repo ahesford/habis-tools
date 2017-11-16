@@ -121,6 +121,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	instance, compensating the integral by tracking the wavefront normal.
 	'''
 	cdef readonly Interpolator3D data
+	cdef public double normwt
 
 	@classmethod
 	def errmsg(cls, IntegrableStatus code, WNErrCode subcode):
@@ -138,12 +139,20 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			}.get(subcode, 'Unknown error')
 
 
-	def __init__(self, Interpolator3D data):
+	def __init__(self, Interpolator3D data, double normwt=1.0):
 		'''
 		Create a new WavefrontNormalIntegrator to evaluate integrals
 		through the interpolated function represented by data.
+
+		The value normwt is used to alter the contribution of slowness
+		gradients to the progression on wavefront normals. Set to unity
+		to use full compensation or zero to eliminate wavefront-normal
+		compensation.
 		'''
 		self.data = data
+		if normwt < 0 or normwt > 1:
+			raise ValueError('Value of normwt must be in range [0, 1]')
+		self.normwt = normwt
 
 	@cython.boundscheck(False)
 	@cython.wraparound(False)
@@ -216,7 +225,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 
 		# Update the wavefront normal
 		# TODO: Should this be gf at refu instead of u?
-		nrm = axpy(L * (u - refu) / dot(ba, refnrm), gf, refnrm)
+		nrm = axpy(self.normwt * L * (u - refu) / dot(ba, refnrm), gf, refnrm)
 		rn = ptnrm(nrm)
 		if almosteq(rn, 0.0):
 			wctx.custom_retcode = WNErrCode.NORMAL_VANISHES

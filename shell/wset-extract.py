@@ -68,12 +68,18 @@ def trextract(infiles, trmap, random=None, outspec=None):
 	(t, r) pair will be considered "missing" if the transmitter index
 	cannot be mapped to a transmission index in an input file.
 	
-	If random is True, it should be a float in the range (0, 1) that
+	If random is True, it should be a float in the range (0, 1) or an
+	integer no less than 1. If random is a float in (0, 1) range, it
 	specifies a random sampling fraction. The total number of (t, r) pairs
 	that will actually be extracted (after discarding pairs that do not
 	exist in the inputs) will be multiplied by random and converted to an
 	int, and the resulting number of (t, r) pairs will be extracted from
-	the inputs.
+	the inputs. If random is at least 1, the random sampling fraction is
+	computed by dividing the value of random by the total number of (t, r)
+	pairs in trmap. In other words, if a collection of files contains all
+	pairs in trmap, specifying an integer for random should result in a
+	total number of extracted waveforms that approximately equals the value
+	of random.
 
 	If outspec is provided, it should be a string that will be converted
 	into a file name by calling outspec.format(tx, rx) for each receive
@@ -82,10 +88,13 @@ def trextract(infiles, trmap, random=None, outspec=None):
 	'''
 	if outspec: _checkoutdir(outspec)
 
+	# Find the maximum number of (t, r) pairs
+	ntrm = sum(len(v) for v in trmap.values())
 	if random:
-		random = float(random)
+		if random >= 1: random = float(random) / ntrm
+		else: random = float(random)
 		if not 0 < random < 1:
-			raise ValueError('Value of "random" must be in range (0, 1)')
+			raise ValueError(f'Value of "random" must be in range (0, {ntrm})')
 
 	# Load all waveform sets
 	wsets = [WaveformSet.fromfile(f) for f in infiles]
