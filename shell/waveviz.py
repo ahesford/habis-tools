@@ -412,7 +412,7 @@ def getwavegrps(infiles, nsamp=None):
 	return { k: v for k, v in wavegrps.items() if len(v) == maxlen }
 
 
-def getwave(infile, nsamp=None, equalize=False):
+def getwave(infile, nsamp=None):
 	'''
 	For an input WaveformSet file infile that contains a single waveform,
 	return the (t, r) index pair stored in the file and the waveform it
@@ -443,10 +443,6 @@ def getwave(infile, nsamp=None, equalize=False):
 	# Shift out the F2C
 	dwin = wf.datawin 
 	wf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
-
-	if equalize:
-		pkamp = wf.envelope().extremum()[0]
-		if pkamp > sqrt(sys.float_info.epsilon): wf /= pkamp
 
 	return (tx, rx), wf
 
@@ -534,7 +530,7 @@ if __name__ == '__main__':
 		plotframes(imgname, wavegrps, atimes, dwin, cthresh, bitrate)
 	else:
 		# Load the waveforms
-		waves = dict(getwave(inf, nsamp, equalize) for inf in infiles)
+		waves = dict(getwave(inf, nsamp) for inf in infiles)
 
 		# There is no mean arrival time unless arrival times are provided
 		mtime = None
@@ -553,6 +549,18 @@ if __name__ == '__main__':
 		elif dwin is not None:
 			# Convert the window specification to a Window object
 			dwin = Window(dwin[0], end=dwin[1], nonneg=True)
+
+		# Window and equalize, if necessary
+		if dwin is not None or equalize:
+			for (t, r) in waves:
+				wave = waves[t,r]
+				if dwin is not None:
+					wave = wave.window(dwin)
+				if equalize:
+					pkamp = wave.envelope().extremum()[0]
+					if pkamp > sqrt(sys.float_info.epsilon):
+						wave /= pkamp
+				waves[t,r] = wave
 
 		if hidewf and atimes:
 			print('Suppressing unaligned waveforms')
