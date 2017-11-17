@@ -374,10 +374,10 @@ def tracerEngine(config):
 		if not pathsave:
 			# Write a simple text file if paths aren't saved
 			with open(output, 'wb') as f:
-				f.write('# Exterior sound speed\n')
-				f.write('%0.18g\n' % (vbg,))
-				f.write('# Interior sound speed\n')
-				f.write('%0.18g\n' % (x[0],))
+				f.write(b'# Exterior sound speed\n')
+				f.write(b'%0.18g\n' % (vbg,))
+				f.write(b'# Interior sound speed\n')
+				f.write(b'%0.18g\n' % (x[0],))
 			return
 		# Store the interior speed is a single value (as a 1-element array)
 		szargs['inspd'] = x
