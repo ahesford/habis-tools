@@ -1136,6 +1136,22 @@ class Waveform(object):
 		  index. If the distance exceeds maxshift, a ValueError is
 		  raised. Ignored when index is None.
 
+		* onset: An optional dictionary that holds at least a key
+		  'threshold' with a float value between 0 and 1. If fsv is
+		  specified, index must be None. In this case, the square of
+		  the derivative of the waveform is used to estimate the onset
+		  of the signal; the value of index will be set to the earliest
+		  sample for which the square of the derivative meets or
+		  exceeds onset['threshold'] * M, where M is the maximum of the
+		  square of the derivative of the waveform.
+
+		  If onset contains an optional 'savgol' key, the value for the
+		  key should be the 2-tuple (width, order), where width and
+		  order are the half-width and polynomial order of a
+		  Savitzky-Golay filter that will be used to estimate the
+		  waveform derivatives. Without 'savgol', the derivatives will
+		  be estimated by finite differences.
+
 		The highest peak, which has no key col has a width that reaches
 		to the far end of the signal's data window and a prominence
 		that equals its envelope amplitude.
@@ -1161,9 +1177,13 @@ class Waveform(object):
 		minwidth = kwargs.pop('minwidth', 0)
 		maxshift = kwargs.pop('maxshift', None)
 		useheight = kwargs.pop('useheight', False)
+		onset = kwargs.pop('onset', None)
 
 		if len(kwargs):
 			raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
+
+		if onset and index is not None:
+			raise ValueError("Cannot specify 'onset' and a value for 'index'")
 
 		if prommode not in ('absolute', 'noisedb', 'relative'):
 			raise ValueError("Keyword argument 'prommode' must be one of 'absolute', 'noisedb' or 'relative'")
@@ -1216,10 +1236,28 @@ class Waveform(object):
 
 		if len(fpeaks) < 1: raise ValueError('No peaks found')
 
+		if index is None and onset:
+			try: wsav, osav = onset['savgol']
+			except KeyError:
+				# Use finite differencing to approximate derivatives
+				dsig = (self._data[1:] - self._data[:-1])**2
+			else:
+				# Compute the derivative of the waveform
+				from scipy.signal import savgol_filter as sgfilt
+				dsig = sgfilt(self._data, wsav, osav, deriv=1)**2
+			dsmin = onset['threshold'] * np.max(dsig)
+			for i, v in enumerate(dsig):
+				if v >= dsmin:
+					index = i
+					break
+			else: raise ValueError('Undetectable signal onset')
+			index += self._datastart
+
 		if index is not None:
 			ctr, _, width = min(fpeaks, key=lambda pk: abs(pk[0] - index))
 			if maxshift is not None and abs(ctr - index) > maxshift:
-				raise ValueError('Identified peak %d is too far from expected location %d' % (ctr, index))
+				raise ValueError(f'Identified peak {ctr} too far '
+							f'from expected location {index}')
 		else:
 			ctr, _, width = max(fpeaks, key=lambda pk: pk[1])
 
