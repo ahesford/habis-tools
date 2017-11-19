@@ -277,8 +277,20 @@ class StraightRayTracer(TomographyTask):
 
 			s <- s + omega * ds.
 
-		The tfilter argument should be suitable to pass as the third
-		argument to the constructor of LinearInterpolator3D or
+		The tfilter argument, if not None, should be a dictionary or a
+		sequence.
+
+		If tfilter is a dictionary, it must have the 'method' and
+		'args' keys. The 'method' key should specify the first part of
+		a named filter in the scipy.ndimage module (i.e., the filter
+		will be f'{tfilter["method"]}_filter'), while the 'args' keys
+		should be a sequence that specifies positional arguments for
+		the filter that will follow the input image. As a special case,
+		args can be a scalar, in which case it will be wrapped in a
+		tuple before calling the filter.
+
+		If tfilter is a sequence, it should be suitable to pass as the
+		third argument to the constructor of LinearInterpolator3D or
 		HermiteInterpolator3D to effect Savitzky-Golay filtering of the
 		medium for compensated travel-time integrals.
 
@@ -357,6 +369,31 @@ class StraightRayTracer(TomographyTask):
 		except TypeError: chamwts = repeat(chambolle)
 		else: chamwts = (chambolle[min(i, len(chambolle)-1)] for i in count())
 
+		if tfilter:
+			# Handle tfilter dicts
+			try:
+				tfname = tfilter['method'] + '_filter'
+			except KeyError:
+				raise KeyError('Dict "tfilter" must contain "method" key')
+			except TypeError:
+				if self.isRoot:
+					print('Using Savitzky-Golay pre-integral filter')
+			else:
+				# Process dictionary tfilter argument
+				try: tfilter['method'] = getattr(scipy.ndimage, tfname)
+				except AttributeError:
+					raise AttributeError(f'Filter scipy.ndimage.{tfname} does not exist')
+
+				try: tfargs = tfilter['args']
+				except KeyError:
+					raise KeyError('Dict "tfilter" must contain "args" key')
+
+				try: len(tfargs)
+				except TypeError: tfilter['args'] = (tfargs,)
+
+				if self.isRoot:
+					print(f'Using {tfname} pre-integral filter')
+
 		minmax = float(minmax)
 
 		msgfmt = 'Epoch %d RMSE %0.6g dsol %0.6g dct %0.6g dst %0.6g paths %d'
@@ -364,7 +401,10 @@ class StraightRayTracer(TomographyTask):
 		ns = s.perturb(sol)
 		while True:
 			# Filter and interpolate image for time compensation
-			nsi = self.interpolator(ns, self.slowdef, tfilter)
+			try: ns = tfilter['method'](ns, *tfilter['args'])
+			except TypeError:
+				nsi = self.interpolator(ns, self.slowdef, tfilter)
+			else: nsi = self.interpolator(ns, self.slowdef)
 
 			# Adjust RHS times with straight-ray compensation
 			tv = self.comptimes(nsi, **pathopts)
@@ -636,8 +676,8 @@ class BentRayTracer(TomographyTask):
 
 		return callback
 
-	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
-			regularizer=None, mfilter=None, partial_output=None):
+	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6, maxstep=None,
+				regularizer=None, mfilter=None, partial_output=None):
 		'''
 		Iteratively compute a slowness image by minimizing the cost
 		functional represented in this BentRayTracer instance and using
@@ -655,15 +695,18 @@ class BentRayTracer(TomographyTask):
 
 		The descent step is selecting using a stochastic
 		Barzilai-Borwein (BB) scheme. The first two epochs will each
-		use a fixed step size of 1. Later updates rely on
-		approximations to the gradient in previous epochs. The
-		approximate gradient at epoch k is defined recursively over t
-		updates as
+		use a fixed step size. Later updates rely on approximations to
+		the gradient in previous epochs. The approximate gradient at
+		epoch k is defined recursively over t updates as
 
 		  g_{k,t} = beta * grad(f_t)(x_t) + (1 - beta) g_{k,t-1},
 
 		where g_{k,0} == 0, f_t is the t-th sampled cost functional for
 		the epoch and x_t is the solution at update t.
+
+		If maxstep is not None, the BB step size will be clipped above
+		the value of maxstep. With no maxstep, the BB step size will
+		not be clipped.
 
 		If regularizer is not None, the cost function will be
 		regularized with a method from pycwp.cytools.regularize. The
@@ -790,6 +833,11 @@ class BentRayTracer(TomographyTask):
 		maxcost = 0.0
 		converged = False
 
+		if maxstep is not None:
+			maxstep = float(maxstep)
+			if maxstep <= 0:
+				raise ValueError('Value of "maxstep" must be positive')
+
 		# The first guess at a solution and its gradient
 		x = np.zeros((s.nnz,), dtype=np.float64)
 		cg = np.zeros((s.nnz,), dtype=np.float64)
@@ -818,6 +866,9 @@ class BentRayTracer(TomographyTask):
 				lkp = np.log(k + 1.0)
 				lck = ((k - 2) * lck + np.log(eta) + lkp) / (k - 1.0)
 				eta = np.exp(lck - lkp)
+
+			# Clip the step size, if desired
+			if maxstep: eta = min(eta, maxstep)
 
 			if self.isRoot:
 				print('Epoch', k, end=' ')
