@@ -874,7 +874,7 @@ class PathTracer(object):
 		# Convert path to world coordinates for marching
 		points = np.array([box.cell2cart(*p) for p in popt])
 
-		if fresnel > 0:
+		if (fresnel or 0) > 0:
 			# Trace the Fresnel zone through the box
 			plens = box.fresnel(points, fresnel)
 
