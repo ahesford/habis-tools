@@ -4,7 +4,7 @@ of parameters.
 '''
 
 import numpy as np
-from scipy.sparse import csr_matrix, coo_matrix
+from scipy.sparse import csr_matrix, coo_matrix, eye as speye
 
 
 
@@ -117,7 +117,7 @@ class Slowness(object):
 		Return a scalar representation of the linear transformation
 		represented by this Slowness, which is just an identity.
 		'''
-		return np.array(1., dtype=np.float64)
+		return speye(self.nnz, dtype=np.float64, format='csr')
 
 
 class MaskedSlowness(Slowness):
