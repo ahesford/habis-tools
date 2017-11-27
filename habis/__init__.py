@@ -8,6 +8,6 @@ instrument and exchanging data between nodes.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 __all__ = [ 'habiconf', 'formats', 'facet', 'mpdfile', 'sigtools',
-		'pathtracer', 'trilateration', 'wrappers', 'conductor' ]
+		'slowness', 'pathtracer', 'trilateration', 'wrappers', 'conductor' ]
 
 from . import *
