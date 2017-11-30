@@ -336,29 +336,38 @@ class Waveform(object):
 		dstart, dlength = self.datawin
 		nsamp = self.nsamp
 
-		if isinstance(key, int):
-			# Wrap negative values
-			if key < 0: key += nsamp
-			# Check if the wrapped value is in range
-			if key < 0 or key >= nsamp:
-				raise ValueError('Sample indices must be in range [0, self.nsamp) or [-self.nsamp, 0)')
+		errmsg = 'Only integers and slices are valid indices'
 
-			# Shift to the data window
-			key -= dstart
-			if 0 <= key < dlength:
-				# Return data sample inside the window
-				return self._data[key]
-			else:
-				# Return zero outside of the data window
-				return self.dtype.type(0.)
-		elif isinstance(key, slice):
-			# Generate indices in the data window
-			idxgen = (i - dstart for i in range(*key.indices(nsamp)))
-			return np.array([
-				self._data[idx] if (0 <= idx < dlength) else 0
-				for idx in idxgen], dtype=self.dtype)
+		try:
+			# Make sure the key is numeric
+			ikey = int(key)
+		except TypeError:
+			# Generate indices in the data window from a slice
+			try: idxgen = (i - dstart for i in range(*key.indices(nsamp)))
+			except AttributeError: raise IndexError(errmsg)
 
-		raise IndexError('Only integers and slices are valid indices')
+			# Copy the data in the slicer
+			arr = [ ]
+			for idx in idxgen:
+				arr.append(self._data[idx] if 0 <= idx < dlength else 0)
+			return np.array(arr, dtype=self.dtype)
+			
+		if ikey != key: raise IndexError(errmsg)
+		
+		# Wrap negative values
+		if key < 0: key += nsamp
+		# Check if the wrapped value is in range
+		if key < 0 or key >= nsamp:
+			raise ValueError('Sample indices must be in range [-self.nsamp, self.nsamp)')
+
+		# Shift to the data window
+		key -= dstart
+		if 0 <= key < dlength:
+			# Return data sample inside the window
+			return self._data[key]
+		else:
+			# Return zero outside of the data window
+			return self.dtype.type(0.)
 
 
 	def __pos__(self):
