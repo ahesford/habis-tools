@@ -134,7 +134,7 @@ if __name__ == '__main__':
 		elif opt[0] == '-o':
 			outspec = opt[1]
 		elif opt[0] == '-m':
-			trmap = loadkeymat(opt[1])
+			trmap = loadkeymat(opt[1], scalar=False)
 		elif opt[0] == '-r':
 			random = float(opt[1])
 		else:
