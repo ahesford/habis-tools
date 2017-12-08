@@ -224,9 +224,9 @@ def hadtest(decfile, stxfile, **kwargs):
 				try: expk = 0.5 * (atmap[rxc] + atmap[txc])
 				except KeyError: expk = None
 				# Attempt to isolate peaks, if possible
-				try: decwave = decwave.isolatepeak(expk, **peaks)
+				try: decwave = decwave.isolatepeak(expk, **peaks)[0]
 				except ValueError: pass
-				try: stxwave = stxwave.isolatepeak(expk, **peaks)
+				try: stxwave = stxwave.isolatepeak(expk, **peaks)[0]
 				except ValueError: pass
 
 			# Record the data windows for the cross-correlation

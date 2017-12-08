@@ -17,6 +17,28 @@ from itertools import groupby
 from pycwp import cutil, mio, signal, stats
 
 
+def _valley(lpk, hpk):
+	'''
+	For two peaks lpk and hpk as output by pycwp.signal.findpeaks, find a
+	col between them associated with the smaller peak.
+
+	If something goes wrong, None may be returned.
+	'''
+	# Pull the col from the smaller peak
+	if lpk['peak'][1] > hpk['peak'][1]: lpk, hpk = hpk, lpk
+
+	left, right = lpk['peak'][0], hpk['peak'][0]
+	if left > right: left, right = right, left
+
+	col = lpk['keycol']
+	if col and left < col[0] < right: return col[0]
+
+	col = lpk['subcol']
+	if col and left < col[0] < right: return col[0]
+
+	return None
+
+
 class Window(tuple):
 	'''
 	A subclass of tuple restricting the form to (start, length), where each
@@ -1083,9 +1105,9 @@ class Waveform(object):
 		Return the output of pycwp.signal.findpeaks for self.envelope().
 		'''
 		# Find peaks in the data window
-		st, ln = self.datawin
-		envelope = self.envelope().getsignal((st, ln), forcecopy=False)
-		peaks = signal.findpeaks(envelope)
+		env = self.envelope()
+		peaks = signal.findpeaks(env._data)
+		st, ln = env.datawin
 		# Map peak and col indices to global window
 		return [ { k: (v and (v[0] + st, v[1]) or None)
 			   for k, v in pk.items() } for pk in peaks ]
@@ -1101,12 +1123,58 @@ class Waveform(object):
 				self._data * np.abs(self._data), self._datastart)
 
 
+	def enratio(self, prewin, postwin=None):
+		'''
+		Compute the energy ratio for each sample of the signal, which
+		is given as the ratio between the average energy in a window of
+		width postwin samples following (and including) the sample
+		under test to the average energy in a window of width prewin
+		samples preceding the sample under test.
+
+		For samples approaching the ends of the signal, the preceding
+		and following windows will run past the data; the missing
+		samples will be replaced with the average energy in the entire
+		signal.
+
+		If postwin is None, it will be the same as prewin.
+		'''
+		prewin = int(prewin)
+		if prewin <= 0: raise ValueError('Value "prewin" must be positive')
+
+		if postwin is None:
+			prewin = int(prewin)
+		else:
+			postwin = int(postwin)
+			if postwin <= 0:
+				raise ValueError('Value "postwin" must be None or positive')
+
+		# Build an expanded data window
+		ld = len(self._data)
+		end = ld + prewin
+		exdata = np.empty((ld + prewin + postwin - 1), dtype=self.dtype)
+		# Copy the real data
+		exdata[prewin:end] = self._data**2
+		# Fill in padded values with the mean
+		mval = np.mean(exdata[prewin:end])
+		exdata[:prewin] = mval
+		exdata[end:] = mval
+
+		# Compute the rolling average energy for pre-window
+		left = stats.rolling_mean(exdata, prewin)
+		# Reuse average when windows are identical
+		if prewin == postwin: er = left[prewin:end] / left[:ld]
+		else: er = stats.rolling_mean(exdata[prewin:], postwin)[:ld] / left[:ld]
+
+		return Waveform(self.nsamp, er, self._datastart)
+
+
 	def isolatepeak(self, index=None, **kwargs):
 		'''
 		Use self.envpeaks() to identify the peak nearest the provided
 		index that also matches any filtering criteria specified in the
 		kwargs. A copy of the signal, windowed (by default) to +/-1
-		peak width around the identified peak, is returned.
+		peak width around the identified peak, is returned, along with
+		the location of the identified peak.
 
 		If index is None, the most prominent peak in the signal is
 		returned.
@@ -1116,14 +1184,16 @@ class Waveform(object):
 		* minprom: Only peaks with a prominence greater than the
 		  specified value are considered (default: 0).
 
-		* prommode: One of 'absolute' (default), 'relative', or
-		  'noisedb', changes the interpretation of minprom. For
-		  'absolute', the minprom value is interpreted as an absolute
-		  threshold. For 'relative', the minprom threshold is specified
-		  as a fraction of the prominence of the most prominent peak.
-		  For 'noisedb', the minprom threshold specifies a ratio, in
-		  dB, between the peak prominence and the noise floor (computed
-		  using self.noisefloor); see the 'noisewin' kwarg.
+		* prommode: One of 'absolute' (default), 'relative', 
+		  'noisedb', or 'rolling_snr'; changes the interpretation of
+		  minprom. For 'absolute', the minprom value is interpreted as
+		  an absolute threshold. For 'relative', the minprom threshold
+		  is specified as a fraction of the prominence of the most
+		  prominent peak.  For 'noisedb', the minprom threshold
+		  specifies a ratio, in dB, between the peak prominence and the
+		  noise floor (computed using self.noisefloor); see the
+		  'noisewin' kwarg. For 'rolling_snr', the minprom threshold
+		  specifies the SNR as estimated by self.rolling_snr.
 
 		* useheight: If False (default), the 'prominence' used to
 		  filter peaks according to minprom and prommode is the
@@ -1133,44 +1203,44 @@ class Waveform(object):
 
 		* noisewin: If prommode is 'noisedb', this optional kwarg
 		  specifies the width of the window used to estimate noise
-		  floor with self.noisefloor. Defaults to 100 and is ignored
-		  when prommode is not 'noisedb'.
+		  floor with self.noisefloor. If prommode is 'rolling_snr',
+		  this argument is passed to self.rolling_snr to estimate the
+		  SNR per sample. Defaults to 100 and is ignored when prommode
+		  is not 'noisedb' or 'rolling_snr'.
 
 		* minwidth: Only peaks with a width (the distance between the
-		  index of the peak and the index of its key col) no less than
-		  the specified value are considered.
+		  index of the peak and the index of the closer of its key or
+		  sub cols) no less than the specified value are considered.
+
+		* relaxed: If True (False by default), relax the width and
+		  prominence constraints to ensure the highest peak (or peaks,
+		  if there are two equally dominant peaks) is always isolated,
+		  subject to satisfaction of the maxshift parameter.
 
 		* maxshift: If specified, limits the maximum number of samples
 		  the peak to isolate is allowed to fall from the provided
 		  index. If the distance exceeds maxshift, a ValueError is
 		  raised. Ignored when index is None.
 
-		* onset: An optional dictionary that holds at least a key
-		  'threshold' with a float value between 0 and 1. If fsv is
-		  specified, index must be None. In this case, the square of
-		  the derivative of the waveform is used to estimate the onset
-		  of the signal; the value of index will be set to the earliest
-		  sample for which the square of the derivative meets or
-		  exceeds onset['threshold'] * M, where M is the maximum of the
-		  square of the derivative of the waveform.
-
-		  If onset contains an optional 'savgol' key, the value for the
-		  key should be the 2-tuple (width, order), where width and
-		  order are the half-width and polynomial order of a
-		  Savitzky-Golay filter that will be used to estimate the
-		  waveform derivatives. Without 'savgol', the derivatives will
-		  be estimated by finite differences.
-
-		The highest peak, which has no key col has a width that reaches
-		to the far end of the signal's data window and a prominence
-		that equals its envelope amplitude.
+		A single highest peak, which has no key col, has a width that
+		reaches to the further end of the signal's data window and a
+		prominence that equals its envelope amplitude.
 
 		Two additional kwargs control the isolation window:
 
-		* window: A tuple of the form (relstart, length). The actual
-		  isolation window is (relstart + pidx, length), where pidx is
-		  the index of the isolated peak. For a peak with a width
-		  "width", the default window is (-width, 2 * width).
+		* window: The string 'tight' or a tuple (rstart, length). The
+		  actual isolation window of the tuple form will be, for an
+		  index pidx of the isolated peak, (rstart + pidx, length).
+		  The default relative window is (-width, 2 * width).
+
+		  If the window is 'tight', the window will span from the
+		  lowest point between the peak and any other peak (not just a
+		  higher one) to the left, to the lowest point between the peak
+		  and any other peak to the right.
+
+		  If, in 'tight' mode, there is no other peak to the left
+		  (right) of the isolated peak, the window will not clip the
+		  signal to the left (right).
 
 		* tails: Passed through as the "tails" argument to
 		  self.window() without further processing.
@@ -1186,19 +1256,17 @@ class Waveform(object):
 		minwidth = kwargs.pop('minwidth', 0)
 		maxshift = kwargs.pop('maxshift', None)
 		useheight = kwargs.pop('useheight', False)
-		onset = kwargs.pop('onset', None)
+		relaxed = kwargs.pop('relaxed', False)
 
 		if len(kwargs):
 			raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
 
-		if onset and index is not None:
-			raise ValueError("Cannot specify 'onset' and a value for 'index'")
+		if prommode not in ('absolute', 'noisedb', 'rolling_snr', 'relative'):
+			raise ValueError("Argument 'prommode' must be 'rolling_snr', "
+						"'noisedb', 'absolute' or 'relative'")
 
-		if prommode not in ('absolute', 'noisedb', 'relative'):
-			raise ValueError("Keyword argument 'prommode' must be one of 'absolute', 'noisedb' or 'relative'")
-
-		# Find the peak nearest the index
-		peaks = self.envpeaks()
+		# Find peaks in the envelope, keyed by smaple index
+		peaks = { pk['peak'][0]: pk for pk in self.envpeaks() }
 
 		# Adjust the minimum prominence for relative thresholds
 		if prommode == 'noisedb':
@@ -1206,24 +1274,32 @@ class Waveform(object):
 			try:
 				nfloor  = self.noisefloor(noisewin)
 			except ValueError:
-				raise ValueError('Noise window %d too wide to compute standard deviation' % noisewin)
+				raise ValueError(f'Noise window {noisewin} too wide to compute standard deviation')
 			minprom = 10.**((minprom + nfloor) / 20.)
 		elif prommode == 'relative':
+			try: minprom *= max(pk['peak'][1] for pk in peaks.values())
+			except ValueError: raise ValueError('No peaks found')
+		elif prommode == 'rolling_snr':
 			try:
-				minprom = minprom * max(pk['peak'][1] for pk in peaks)
+				srms = stats.rolling_rms(self._data, noisewin)
+				if not len(srms): raise ValueError('Data too short')
 			except ValueError:
-				raise ValueError('No peaks found')
+				raise ValueError(f'Noise window {noisewin} too wide to compute rolling RMS')
+			minprom = 10.**(minprom / 20.)
 
-		# Rework the peaks list to take the desired form
+		dst, dlen = self.datawin
+
+		# Identify peaks that match the desired criteria
 		fpeaks = []
-		for pk in peaks:
+		maxpks = []
+		for pk in peaks.values():
 			i, v = pk['peak']
 
 			try:
 				ki, kv = pk['keycol']
 			except TypeError:
 				# Width of dominant peak is to far end of data window
-				width = max(i, self.datawin.length - i)
+				width = max(i, dlen - i)
 				# Prominence of dominant peak is always its height
 				prom = v
 			else:
@@ -1240,27 +1316,26 @@ class Waveform(object):
 					# Width is to closer of key and sub col
 					width = min(abs(i - ki), abs(i - si))
 
-			if width >= minwidth and prom >= minprom:
+			if prommode == 'rolling_snr':
+				ip = i - noisewin - dst
+				bsv = srms[max(0, ip - 1)]
+				exceed = (prom >= minprom * bsv)
+			else: exceed = (prom >= minprom)
+
+			if width >= minwidth and exceed:
 				fpeaks.append((i, prom, width))
+			elif relaxed:
+				# Remove all peaks smaler than this
+				if maxpks and maxpks[0][1] < prom:
+					maxpks = [ ]
+				# Add this peak if there are no larger
+				if not maxpks or maxpks[0][1] == prom:
+					maxpks.append((i, prom, width))
+
+		# In relaxed mode, replace an empty peak list with maximum peaks
+		if not fpeaks and maxpks: fpeaks = maxpks
 
 		if len(fpeaks) < 1: raise ValueError('No peaks found')
-
-		if index is None and onset:
-			try: wsav, osav = onset['savgol']
-			except KeyError:
-				# Use finite differencing to approximate derivatives
-				dsig = (self._data[1:] - self._data[:-1])**2
-			else:
-				# Compute the derivative of the waveform
-				from scipy.signal import savgol_filter as sgfilt
-				dsig = sgfilt(self._data, wsav, osav, deriv=1)**2
-			dsmin = onset['threshold'] * np.max(dsig)
-			for i, v in enumerate(dsig):
-				if v >= dsmin:
-					index = i
-					break
-			else: raise ValueError('Undetectable signal onset')
-			index += self._datastart
 
 		if index is not None:
 			ctr, _, width = min(fpeaks, key=lambda pk: abs(pk[0] - index))
@@ -1270,15 +1345,30 @@ class Waveform(object):
 		else:
 			ctr, _, width = max(fpeaks, key=lambda pk: pk[1])
 
-		# The default window is +/- 1 peak width
-		if window is None: window = (-width, 2 * width)
-
-		# Find the first and last samples of the absolute window
-		fs = max(0, window[0] + ctr)
-		ls = min(window[0] + window[1] + ctr, self.nsamp)
+		if window != 'tight':
+			# The default window is +/- 1 peak width
+			if window is None: window = (-width, 2 * width)
+			
+			# Find the first and last samples of the absolute window
+			fs = max(0, window[0] + ctr)
+			ls = min(window[0] + window[1] + ctr, self.nsamp)
+		elif window == 'tight':
+			# Find the tight window in absolute samples
+			lp, rp = None, None
+			for pk in peaks.keys():
+				if pk < ctr and (lp is None or lp < pk): lp = pk
+				elif pk > ctr and (rp is None or rp > pk): rp = pk
+			if lp is not None:
+				fs = _valley(peaks[lp], peaks[ctr])
+				if fs is None: raise ValueError('No col to left of peak')
+			else: fs = 0
+			if rp is not None:
+				ls = _valley(peaks[ctr], peaks[rp])
+				if ls is None: raise ValueError('No col to right of peak')
+			else: ls = 0
 
 		# Window the signal around the identified peak
-		return self.window(Window(fs, end=ls), tails=tails)
+		return self.window(Window(fs, end=ls), tails=tails), ctr
 
 
 	def debias(self):
@@ -1403,17 +1493,51 @@ class Waveform(object):
 		return 20. * np.log10(max(mstd, eps))
 
 
-	def snr(self, noisewin):
+	def rolling_snr(self, noisewin):
 		'''
-		Estimate the signal SNR (in dB) of the signal by comparing the
-		peak envelope amplitude to the minimum standard deviation of
-		the signal over a sliding window of width noisewin.
+		Estimate the SNR (in dB) of the signal at each sample by
+		comparing the amplitude of the envelope at that point to the
+		RMS value of the preceding noisewin samples.
+
+		For the first noisewin samples of the signal data, the RMS
+		value of the preceding window is not well defined. The RMS
+		value for the first noisewin samples will be used for all such
+		early samples.
 		'''
-		if len(self._data) < 2:
-			raise ValueError('Signal data window must have at least 2 samples')
-		# Convert the peak amplitude, in dB, and subtract noise dB
-		env = max(np.abs(hilbert(self._data)))
-		return 20. * np.log10(env) - self.noisefloor(noisewin)
+		if not 2 <= noisewin < len(self._data):
+			raise ValueError('Data window and noisewin must be at least 2 samples')
+		# Compute the rolling RMS levels
+		rms = np.zeros_like(self._data)
+		rms[noisewin:] = stats.rolling_rms(self._data, noisewin)[:-1]
+		rms[:noisewin] = rms[noisewin]
+
+		env = self.envelope()
+		env._data = 20 * np.log10(env._data / rms)
+		return env
+
+
+	def snr(self, noisewin, rolling=False):
+		'''
+		Estimate the SNR (in dB) of the signal by comparing the peak
+		envelope amplitude to the minimum standard deviation of the
+		signal over a sliding window of width noisewin as computed by
+		self.noisefloor.
+
+		If rolling is True, instead of using self.noisefloor to
+		estimate the noise level, the noise level for each sample is
+		assumed to be the RMS value of the preceding noisewin samples.
+		Note that, for samples within the first noisewin samples, this
+		preceding interval is not well-defined. For all samples in this
+		early region, the noise level is assumed to be the RMS value of
+		the first noisewin samples of the signal.
+		'''
+		if not rolling:
+			# Find noise floor and envelope peak
+			nf = self.noisefloor(noisewin)
+			env = max(np.abs(hilbert(self._data)))
+			# Convert the peak amplitude, in dB, and subtract noise dB
+			return 20. * np.log10(env) - nf
+		else: return np.max(self.rolling_snr(noisewin)._data)
 
 
 def dimcompat(sig, ndim=1):

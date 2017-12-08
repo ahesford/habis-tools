@@ -109,7 +109,7 @@ def sigffts(datfiles, chans, peakwin={}, osamp=1, nsamp=None):
 			if 'window' in peakwin or nmidx is not None:
 				# Isolate the peak according to preferences
 				try:
-					sig = sig.isolatepeak(nmidx, **peakwin)
+					sig = sig.isolatepeak(nmidx, **peakwin)[0]
 				except ValueError:
 					# Record indices of "bad" channels for masking
 					masked.append((i, j))

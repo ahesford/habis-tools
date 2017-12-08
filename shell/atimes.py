@@ -122,6 +122,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	The optional kwargs are parsed for the following keys:
 
+	* flipref: A Boolean (default: False) that, when True, causes the
+	  refrence waveform to be negated when read.
+
 	* nsamp: Override datafile.nsamp. Useful mainly for bandpass filtering.
 
 	* negcorr: A Boolean (default: False) passed to Waveform.delay as the
@@ -236,6 +239,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Read the data and reference
 	data = WaveformSet.fromfile(datafile)
 	ref = Waveform.fromfile(reffile)
+
+	# Negate the reference, if desired
+	if kwargs.pop('flipref', False): ref = -ref
 
 	# Override the sample count, if desired
 	try: nsamp = kwargs.pop('nsamp')
@@ -432,7 +438,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 			except KeyError:
 				if neardefault is None: exd = None
 				else: exd = neardefault - data.f2c
-			try: sig = sig.isolatepeak(exd, **peaks)
+			try: sig = sig.isolatepeak(exd, **peaks)[0]
 			except ValueError: continue
 
 		# Compute and record the delay
@@ -613,6 +619,7 @@ def atimesEngine(config):
 	optimize = config.get(asec, 'optimize', mapper=bool, default=False)
 	kwargs['negcorr'] = config.get(asec, 'negcorr', mapper=bool, default=False)
 	kwargs['signsquare'] = config.get(asec, 'signsquare', mapper=bool, default=False)
+	kwargs['flipref'] = config.get(asec, 'flipref', mapper=bool, default=False)
 
 	# Check for delay cache specifications as boolean or file suffix
 	cachedelay = config.get(asec, 'cachedelay', default=True)
