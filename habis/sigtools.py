@@ -373,9 +373,9 @@ class Waveform(object):
 			for idx in idxgen:
 				arr.append(self._data[idx] if 0 <= idx < dlength else 0)
 			return np.array(arr, dtype=self.dtype)
-			
+
 		if ikey != key: raise IndexError(errmsg)
-		
+
 		# Wrap negative values
 		if key < 0: key += nsamp
 		# Check if the wrapped value is in range
@@ -1123,7 +1123,7 @@ class Waveform(object):
 				self._data * np.abs(self._data), self._datastart)
 
 
-	def enratio(self, prewin, postwin=None):
+	def enratio(self, prewin, postwin=None, vpwin=None):
 		'''
 		Compute the energy ratio for each sample of the signal, which
 		is given as the ratio between the average energy in a window of
@@ -1137,35 +1137,59 @@ class Waveform(object):
 		signal.
 
 		If postwin is None, it will be the same as prewin.
+
+		If vpwin is not None, a second energy ratio will be calculated
+		and returned. In the second ratio, the following window remains
+		the same, but the preceding window has width vpwin and will be
+		shifted left by prewin samples. (In other words, the early
+		preceding window in the second ratio will end where the
+		preceding window from the first ratio begins.)
 		'''
 		prewin = int(prewin)
 		if prewin <= 0: raise ValueError('Value "prewin" must be positive')
 
-		if postwin is None:
-			prewin = int(prewin)
-		else:
-			postwin = int(postwin)
-			if postwin <= 0:
-				raise ValueError('Value "postwin" must be None or positive')
+		postwin = int(postwin or prewin)
+		if postwin <= 0:
+			raise ValueError('Value "postwin" must be None or positive')
+
+		vpwin = int(vpwin or 0)
+		if vpwin < 0:
+			raise ValueError('Value "vpwin" must be None or nonnegative')
 
 		# Build an expanded data window
 		ld = len(self._data)
-		end = ld + prewin
-		exdata = np.empty((ld + prewin + postwin - 1), dtype=self.dtype)
+		# The start and end of real data in expanded window
+		start = prewin + vpwin
+		end = ld + start
+		exdata = np.empty((end + postwin - 1), dtype=self.dtype)
 		# Copy the real data
-		exdata[prewin:end] = self._data**2
+		exdata[start:end] = self._data**2
 		# Fill in padded values with the mean
-		mval = np.mean(exdata[prewin:end])
-		exdata[:prewin] = mval
+		mval = np.mean(exdata[start:end])
+		exdata[:start] = mval
 		exdata[end:] = mval
 
-		# Compute the rolling average energy for pre-window
-		left = stats.rolling_mean(exdata, prewin)
-		# Reuse average when windows are identical
-		if prewin == postwin: er = left[prewin:end] / left[:ld]
-		else: er = stats.rolling_mean(exdata[prewin:], postwin)[:ld] / left[:ld]
+		# Compute the rolling average for the far-left window
+		if vpwin: vleft = stats.rolling_mean(exdata, vpwin)
+		else: vleft = None
 
-		return Waveform(self.nsamp, er, self._datastart)
+		# When left and far-left match, reuse the averages
+		# Either way, skip far-left-only samples in data or averages
+		if prewin == vpwin: left = vleft[vpwin:]
+		else: left = stats.rolling_mean(exdata[vpwin:], prewin)
+
+		# When left or far-left match right, reuse
+		# Regardless, skip far-left- and left-only samples
+		if prewin == postwin: right = left[prewin:]
+		elif prewin == postwin: right = vleft[start:]
+		else: right = stats.rolling_mean(exdata[start:], postwin)
+
+		# Build the straddling energy ratio
+		er = Waveform(self.nsamp, right[:ld] / left[:ld], self._datastart)
+		if not vpwin: return er
+
+		# Build the long-distance energy ratio
+		return er, Waveform(self.nsamp, right[:ld] / vleft[:ld], self._datastart)
 
 
 	def isolatepeak(self, index=None, **kwargs):
@@ -1184,7 +1208,7 @@ class Waveform(object):
 		* minprom: Only peaks with a prominence greater than the
 		  specified value are considered (default: 0).
 
-		* prommode: One of 'absolute' (default), 'relative', 
+		* prommode: One of 'absolute' (default), 'relative',
 		  'noisedb', or 'rolling_snr'; changes the interpretation of
 		  minprom. For 'absolute', the minprom value is interpreted as
 		  an absolute threshold. For 'relative', the minprom threshold
@@ -1348,7 +1372,7 @@ class Waveform(object):
 		if window != 'tight':
 			# The default window is +/- 1 peak width
 			if window is None: window = (-width, 2 * width)
-			
+
 			# Find the first and last samples of the absolute window
 			fs = max(0, window[0] + ctr)
 			ls = min(window[0] + window[1] + ctr, self.nsamp)
