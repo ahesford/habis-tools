@@ -1123,10 +1123,84 @@ class Waveform(object):
 				self._data * np.abs(self._data), self._datastart)
 
 
-	def enratio(self, prewin, postwin=None, vpwin=None):
+	def imer(self, avgwin, *args, raw=False, **kwargs):
 		'''
-		Compute the energy ratio for each sample of the signal, which
-		is given as the ratio between the average energy in a window of
+		For the modified energy ratios returned by the call
+
+			NER, FER = self.mer(*args, **kwargs),
+
+		compute the improved modified energy ratio, defined as
+
+			IMER = MA(FER, avgwin) - MA(NER, avgwin),
+
+		where MA is a right-looking moving average of width avgwin. The
+		moving average is not well defined for the first and last
+		(avgwin - 1) samples; these undefined samples will be replaced
+		by the nearest valid samples.
+		
+		The return value of self.mer must return two valid MERs or a
+		ValueError will be raised.
+
+		If the keyword-only arugment raw is True, the raw data array,
+		defined over a window self.datawin, will be returned;
+		otherwise, the ratio will be packaged as a new Waveform object.
+		'''
+		avgwin = int(avgwin)
+		if avgwin <= 0: raise ValueError('Argument "avgwin" must be nonnegative')
+
+		# Compute the energy ratios
+		ner, fer = self.mer(*args, raw=True, **kwargs)
+		if fer is None:
+			raise ValueError('Call to self.mer(*args, **kwargs) '
+						'must return two ratio arrays')
+
+		# Compute rightward moving average of each signal
+		ld = len(ner)
+		ner[:-avgwin+1] = stats.rolling_mean(ner, avgwin)
+		ner[-avgwin+1:] = ner[-avgwin]
+		fer[:-avgwin+1] = stats.rolling_mean(fer, avgwin)
+		fer[:-avgwin+1:] = fer[-avgwin]
+
+		if raw: return ner - fer
+		else: return Waveform(self.nsamp, ner - fer, self._datastart)
+
+
+	def mer(self, erpow=3, sigpow=3, *args, raw=False, **kwargs):
+		'''
+		For the energy ratio(s) returned by the call
+		
+			self.enratio(*args, **kwargs),
+
+		compute the modified energy ratio, which is
+
+			MER = ER**erpow * abs(self)**sigpow
+
+		for an energy ratio ER. If the second energy ratio returned by
+		self.enratio is None, the second MER will also be None.
+
+		If the keyword-only argument raw is True, the raw data arrays
+		(or None if the second MER is None), defined over self.datawin,
+		will be returned; otherwise, non-None ratios will be packaged
+		as new Waveform objects.
+		'''
+		# Compute the energy ratios and raise the powers
+		ner, fer = self.enratio(*args, raw=True, **kwargs)
+		sig = np.abs(self._data)**sigpow
+		ner = ner**erpow * sig
+		if fer is not None: fer = fer**erpow * sig
+
+		if not raw:
+			ner = Waveform(self.nsamp, ner, self._datastart)
+			if fer is not None:
+				fer = Waveform(self.nsamp, fer, self._datastart)
+
+		return ner, fer
+
+
+	def enratio(self, prewin, postwin=None, vpwin=None, *, raw=False):
+		'''
+		Compute energy ratios for each sample of the signal, which is
+		given as the ratio between the average energy in a window of
 		width postwin samples following (and including) the sample
 		under test to the average energy in a window of width prewin
 		samples preceding the sample under test.
@@ -1144,6 +1218,13 @@ class Waveform(object):
 		shifted left by prewin samples. (In other words, the early
 		preceding window in the second ratio will end where the
 		preceding window from the first ratio begins.)
+
+		If vpwin is None or 0, the secondary ratio will be None.
+
+		If the keyword-only argument raw is True, the raw data arrays
+		(or None if the secondary ratio is None), defined over the
+		window self.datawin, will be returned; otherwise, non-None
+		ratios will be packaged as new Waveform objects.
 		'''
 		prewin = int(prewin)
 		if prewin <= 0: raise ValueError('Value "prewin" must be positive')
@@ -1184,12 +1265,19 @@ class Waveform(object):
 		elif prewin == postwin: right = vleft[start:]
 		else: right = stats.rolling_mean(exdata[start:], postwin)
 
-		# Build the straddling energy ratio
-		er = Waveform(self.nsamp, right[:ld] / left[:ld], self._datastart)
-		if not vpwin: return er
+		ner = right[:ld] / left[:ld]
+		if vpwin: fer = right[:ld] / vleft[:ld]
+		else: fer = None
 
-		# Build the long-distance energy ratio
-		return er, Waveform(self.nsamp, right[:ld] / vleft[:ld], self._datastart)
+		if not raw:
+			# Build Waveform objects
+			ner = Waveform(self.nsamp, ner, self._datastart)
+			if fer is not None:
+				fer = Waveform(self.nsamp, fer, self._datastart)
+
+		return ner, fer
+
+
 
 
 	def isolatepeak(self, index=None, **kwargs):
