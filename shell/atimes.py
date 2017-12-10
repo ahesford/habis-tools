@@ -3,12 +3,8 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import sys, itertools, numpy as np
+import sys, itertools, numpy as np, os
 import multiprocessing, queue as pyqueue
-
-from numpy import ma
-
-
 
 from collections import OrderedDict, defaultdict
 
@@ -61,6 +57,9 @@ def finddelays(nproc=1, *args, **kwargs):
 	# Extend the kwargs to include the stride
 	kwargs['stride'] = nproc
 
+	# Keep track of skipped waveforms
+	skipped = defaultdict(int)
+
 	# Spawn the desired processes to perform the cross-correlation
 	with process.ProcessPool() as pool:
 		for i in range(nproc):
@@ -79,10 +78,18 @@ def finddelays(nproc=1, *args, **kwargs):
 			try: results = queue.get(timeout=0.1)
 			except pyqueue.Empty: pass
 			else:
-				delays.update(results)
+				delays.update(results[0])
+				for k, v in results[1].items():
+					if v: skipped[k] += v
 				responses += 1
 
 		pool.wait()
+
+	if skipped:
+		print(f'For file {os.path.basename(args[0])} '
+				f'({len(delays)} identfied times):')
+		for k, v in skipped.items():
+			if v: print(f'    Skipped {v} {k} waveforms')
 
 	if len(delays):
 		# Save the computed delays, if desired
@@ -117,8 +124,10 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	The reference waveform is read from reffile using the method
 	habis.sigtools.Waveform.fromfile.
 
-	The return value is a dictionary that maps a (t,r) transmit-receive
-	index pair to an adjusted delay in samples.
+	The return value is a 2-tuple containing, first, a dictionary that maps
+	a (t,r) transmit-receive index pair to an adjusted delay in samples;
+	and, second, a dictionary that maps reasons for skipping waveforms to
+	the number of waveforms skipped for that reason.
 
 	The optional kwargs are parsed for the following keys:
 
@@ -223,7 +232,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 	  The default map is 'backscatter'.
 
-	* queue: If not none, the return list is passed as an argument to
+	* queue: If not none, the return values are passed as an argument to
 	  queue.put().
 
 	* eleak: If not None, a floating-point value in the range [0, 1) that
@@ -326,6 +335,9 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Pull a copy of the windowing configuration
 	window = dict(kwargs.pop('window', ()))
 
+	# Pull a copy of the IMER configuration, if it exists
+	imer = dict(kwargs.pop('imer', ()))
+
 	# Make sure a per-channel map and empty default window exist
 	window.setdefault('map', { })
 	window.setdefault('default', { })
@@ -374,11 +386,13 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	hdr, wforms, tmap = None, None, None
 
 	numneg = 0
+	skipped = defaultdict(int)
 
 	for rid, tid in ellst[start::stride]:
 		try:
 			# Use a cahced value if possible
 			result[(tid, rid)] = delaycache[(tid, rid)]
+			skipped['cached'] += 1
 			continue
 		except KeyError: pass
 
@@ -423,46 +437,66 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 		if eleak:
 			# Calculate cumulative energy in unwindowed waveform
-			ewin = sig.datawin
-			cenergy = np.cumsum(sig.getsignal(ewin, forcecopy=False)**2)
+			cenergy = sig.getsignal(sig.datawin, forcecopy=False)
+			cenergy = np.cumsum(cenergy**2)
 
 		# Square the signal if desired
 		if signsquare: sig = sig.signsquare()
 
 		if minsnr is not None and noisewin is not None:
-			if sig.snr(noisewin) < minsnr: continue
+			if sig.snr(noisewin, rolling=True) < minsnr:
+				skipped['low-snr'] += 1
+				continue
 
-		if peaks:
-			# Isolate the peak nearest the expected location (if one exists)
-			try: exd = nearmap[tid,rid] - data.f2c
-			except KeyError:
-				if neardefault is None: exd = None
-				else: exd = neardefault - data.f2c
-			try: sig = sig.isolatepeak(exd, **peaks)[0]
-			except ValueError: continue
+		if imer:
+			# Compute IMER and its mean
+			ssim = sig.imer(**imer).getsignal(sig.datawin, forcecopy=False)
+			smlev = np.mean(ssim)
+			if smlev < 0:
+				smlev = -smlev
+				ssim = -ssim
+			# Find the first point where IMER breaks the mean
+			try: dl = np.nonzero(ssim >= smlev)[0][0] + sig.datawin.start
+			except IndexError:
+				skipped['failed-IMER'] += 1
+				continue
+		else:
+			if peaks:
+				# Isolate peak nearest expected location (if one exists)
+				try: exd = nearmap[tid,rid] - data.f2c
+				except KeyError:
+					if neardefault is None: exd = None
+					else: exd = neardefault - data.f2c
+				try: sig = sig.isolatepeak(exd, **peaks)[0]
+				except ValueError:
+					skipped['missing-peak'] += 1
+					continue
 
-		# Compute and record the delay
-		dl = sig.delay(ref, osamp, negcorr)
-		if negcorr:
-			if dl[1] < 0: numneg += 1
-			dl = dl[0]
+			# Compute and record the delay
+			dl = sig.delay(ref, osamp, negcorr)
+			if negcorr:
+				if dl[1] < 0: numneg += 1
+				dl = dl[0]
 
 		if eleak:
 			# Evaluate leaked energy
-			ssamp = int(dl) - ewin.start - 1
-			if ssamp < 0: pass
-			elif ssamp >= len(cenergy): continue
-			elif cenergy[ssamp] > eleak * cenergy[-1]: continue
+			ssamp = int(dl) - sig.datawin.start - 1
+			if not 0 <= ssamp < len(cenergy):
+				skipped['out-of-bounds'] += 1
+				continue
+			elif cenergy[ssamp] >= eleak * cenergy[-1]:
+				skipped['leaky'] += 1
+				continue
 
 		result[(tid, rid)] = dl + data.f2c
 
 	if negcorr and numneg:
-		print('%d waveforms matched with negative cross-correlations' % (numneg,))
+		print(f'{numneg} waveforms matched with negative cross-correlations')
 
-	try: queue.put(result)
+	try: queue.put((result, skipped))
 	except AttributeError: pass
 
-	return result
+	return result, skipped
 
 
 def atimesEngine(config):
@@ -614,6 +648,16 @@ def atimesEngine(config):
 	except Exception as e:
 		err = 'Invalid specification of optional peaks in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Determine IMER criteria
+		kwargs['imer'] = config.get(asec, 'imer')
+	except HabisNoOptionError:
+		pass
+	except Exception as e:
+		err = 'Invalid specification of optional imer in [%s]' % asec
+		raise HabisConfigError.fromException(err, e)
+
 
 	maskoutliers = config.get(asec, 'maskoutliers', mapper=bool, default=False)
 	optimize = config.get(asec, 'optimize', mapper=bool, default=False)
