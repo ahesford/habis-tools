@@ -1133,10 +1133,10 @@ class Waveform(object):
 
 			IMER = MA(FER, avgwin) - MA(NER, avgwin),
 
-		where MA is a right-looking moving average of width avgwin. The
-		moving average is not well defined for the first and last
-		(avgwin - 1) samples; these undefined samples will be replaced
-		by the nearest valid samples.
+		where MA is a left-looking moving average of width avgwin. The
+		moving average is not well defined for the first (avgwin - 1)
+		samples; these undefined values will be replaced by the nearest
+		valid average.
 		
 		The return value of self.mer must return two valid MERs or a
 		ValueError will be raised.
@@ -1155,14 +1155,14 @@ class Waveform(object):
 						'must return two ratio arrays')
 
 		# Compute rightward moving average of each signal
-		ld = len(ner)
-		ner[:-avgwin+1] = stats.rolling_mean(ner, avgwin)
-		ner[-avgwin+1:] = ner[-avgwin]
-		fer[:-avgwin+1] = stats.rolling_mean(fer, avgwin)
-		fer[:-avgwin+1:] = fer[-avgwin]
+		vld = len(ner) - avgwin
+		ner[avgwin:] = stats.rolling_mean(ner, avgwin)[:vld]
+		ner[:avgwin] = ner[avgwin]
+		fer[avgwin:] = stats.rolling_mean(fer, avgwin)[:vld]
+		fer[:avgwin] = fer[avgwin]
 
-		if raw: return ner - fer
-		else: return Waveform(self.nsamp, ner - fer, self._datastart)
+		if raw: return fer - ner
+		else: return Waveform(self.nsamp, fer - ner, self._datastart)
 
 
 	def mer(self, erpow=3, sigpow=3, *args, raw=False, **kwargs):
