@@ -18,7 +18,7 @@ from habis.sigtools import Waveform
 
 
 def usage(progname):
-	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
+	print(f'USAGE: {progname} <configuration>', file=sys.stderr)
 
 
 def finddelays(nproc=1, *args, **kwargs):
@@ -245,12 +245,21 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  times. Energy leaks are estimated after any bandpass filtering or
 	  windowing. Estimates never consider peak isolation.
 	'''
+	# Pull a copy of the IMER configuration, if it exists
+	imer = dict(kwargs.pop('imer', ()))
+
 	# Read the data and reference
 	data = WaveformSet.fromfile(datafile)
-	ref = Waveform.fromfile(reffile)
 
-	# Negate the reference, if desired
-	if kwargs.pop('flipref', False): ref = -ref
+	# Read the reference if IMER times are not desired
+	if not imer: ref = Waveform.fromfile(reffile)
+	else: ref = None
+	# Negate the reference, if appropriate
+	if kwargs.pop('flipref', False) and ref is not None: ref = -ref
+
+	# Unpack the signsquare argument and flip the reference if necessary
+	signsquare = kwargs.pop('signsquare', False)
+	if signsquare and ref is not None: ref = ref.signsquare()
 
 	# Override the sample count, if desired
 	try: nsamp = kwargs.pop('nsamp')
@@ -328,15 +337,8 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Unpack minimum SNR requirements
 	minsnr, noisewin = kwargs.pop('minsnr', (None, None))
 
-	# Unpack the signsquare argument
-	signsquare = kwargs.pop('signsquare', False)
-	if signsquare: ref = ref.signsquare()
-
 	# Pull a copy of the windowing configuration
 	window = dict(kwargs.pop('window', ()))
-
-	# Pull a copy of the IMER configuration, if it exists
-	imer = dict(kwargs.pop('imer', ()))
 
 	# Make sure a per-channel map and empty default window exist
 	window.setdefault('map', { })
@@ -450,16 +452,21 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 
 		if imer:
 			# Compute IMER and its mean
-			ssim = sig.imer(**imer).getsignal(sig.datawin, forcecopy=False)
-			smlev = np.mean(ssim)
+			smsig = sig.imer(**imer).getsignal(sig.datawin, forcecopy=False)
+			smlev = np.mean(smsig)
 			if smlev < 0:
 				smlev = -smlev
-				ssim = -ssim
+				smsig = -smsig
 			# Find the first point where IMER breaks the mean
-			try: dl = np.nonzero(ssim >= smlev)[0][0] + sig.datawin.start
+			try: dl = np.nonzero(smsig >= smlev)[0][0]
 			except IndexError:
 				skipped['failed-IMER'] += 1
 				continue
+			if dl > 0:
+				# Linearly interpolate in the interval if possible
+				v0, v1 = smsig[dl - 1], smsig[dl]
+				if v0 != v1: dl += (smlev - v1) / (v1 - v0)
+			dl += sig.datawin.start
 		else:
 			if peaks:
 				# Isolate peak nearest expected location (if one exists)
@@ -675,7 +682,7 @@ def atimesEngine(config):
 		guesses = loadmatlist(guesses, nkeys=2, scalar=False)
 	except IOError as e:
 		guesses = None
-		print('WARNING - Ignoring nearmap:', e, file=sys.stderr)
+		print(f'WARNING - Ignoring nearmap: {e}', file=sys.stderr)
 	except (KeyError, TypeError, AttributeError):
 		guesses = None
 	else:
@@ -693,7 +700,7 @@ def atimesEngine(config):
 		winmap = loadmatlist(winmap, nkeys=2, scalar=False)
 	except IOError as e:
 		winmap = None
-		print('WARNING - Ignoring window map:', e, file=sys.stderr)
+		print(f'WARNING - Ignoring window map: {e}', file=sys.stderr)
 	except (KeyError, TypeError, AttributeError):
 		winmap = None
 	else:
@@ -716,7 +723,8 @@ def atimesEngine(config):
 
 		times[target] = dict()
 
-		print('Finding delays for target %s (%d data files)' % (target, len(datafiles)))
+		dltype = 'IMER' if kwargs.get('imer', None) else 'cross-correlation'
+		print(f'Finding {dltype} delays for {target} ({len(datafiles)} files)')
 
 		for (dfile, dlayfile) in zip(datafiles, delayfiles):
 			kwargs['cachefile'] = dlayfile
@@ -770,11 +778,11 @@ if __name__ == '__main__':
 	# Read the configuration file
 	try: config = HabisConfigParser(sys.argv[1])
 	except:
-		print('ERROR: could not load configuration file %s' % sys.argv[1], file=sys.stderr)
+		print(f'ERROR: could not load configuration file {sys.argv[1]}', file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 
 	# Call the calculation engine
 	try: atimesEngine(config)
 	except Exception as e:
-		print("Unable to complete arrival-time estimation;", e, file=sys.stderr)
+		print(f'Unable to complete arrival-time estimation: {e}', file=sys.stderr)
