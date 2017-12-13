@@ -13,7 +13,6 @@ import numpy as np
 from numpy.linalg import norm
 
 import scipy.ndimage
-from scipy.ndimage import median_filter
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import LinearOperator, norm as snorm
 
@@ -39,6 +38,7 @@ from habis.pathtracer import PathTracer, WavefrontNormalIntegrator, TraceError
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadmatlist as ldmats, savez_keymat
 from habis.mpdfile import flocshare, getatimes
+from habis.mpfilter import parfilter
 from habis.slowness import Slowness, MaskedSlowness, PiecewiseSlowness
 
 def makeinterpolator(interpolator, slowdef=None, tfilter=None):
@@ -51,14 +51,11 @@ def makeinterpolator(interpolator, slowdef=None, tfilter=None):
 	the type of pre-filtering selected, or None if tfilter is None.
 
 	If tfilter is a dictionary, it must have the 'method' key. From the
-	key, a filter f"scipy.ndimage.{tfilter['method']}_filter" will be used
-	to filter the array s before building the interpolator. The tfilter
-	dictionary may contain an optional 'args' sequence (default: ()) and an
-	optional 'kwargs' dictionary (default: {}) to govern the filtering.
-
-	If tfilter is a sequence, it should be suitable to pass as the third
-	argument to the constructor of the types LinearInterpolator3D or
-	HermiteInterpolator3D to effect Savitzky-Goaly filtering.
+	key, the habis.mpfilter.parfilter function will be used  to filter the
+	array s before building the interpolator, using tfilter['method'] as
+	the first argument to select the filter. The tfilter dictionary may
+	contain an optional 'args' sequence (default: ()) and an optional
+	'kwargs' dictionary (default: {}) to govern the filtering.
 
 	If tfilter is None, no pre-filtering is done.
 
@@ -79,37 +76,32 @@ def makeinterpolator(interpolator, slowdef=None, tfilter=None):
 
 	    f(s) = interpolator(s, slowdef).
 	'''
-	# Handle tfilter dicts
-	try: tfname = tfilter['method'] + '_filter'
-	except KeyError: raise KeyError('Dict "tfilter" must contain "method" key')
+	try:
+		tfname = tfilter['method']
+	except KeyError:
+		raise KeyError('Dict "tfilter" must contain "method" key')
 	except TypeError:
-		if tfilter is None:
-			def filterfunc(s):
-				return interpolator(s, slowdef)
-			tfname = None
-		else:
-			def filterfunc(s):
-				return interpolator(s, slowdef, tfilter)
-			tfname = 'Savitzky-Golay'
+		if tfilter is not None:
+			raise TypeError('Argument "tfilter" must be None or a dictionary')
+		# With no tfilter, just build the interpolator
+		def filterfunc(s):
+			return interpolator(s, slowdef)
+		tfname = None
 	else:
-		# Process dictionary tfilter argument
-		try: filt = getattr(scipy.ndimage, tfname)
-		except AttributeError:
-			raise AttributeError(f'scipy.ndimage.{tfname} does not exist')
 
 		# Check for positional arguments
 		args = tfilter.get('args', ())
 
 		# Check for keyword arguments
-		kwargs = tfilter.get('kwargs', { })
-		
+		kwargs = tfilter.get('kwargs', { }) 
+
 		try: len(args)
 		except TypeError: args = (args,)
 
 		def filterfunc(s):
-			# Do the filter
-			ns = filt(s, *args, **kwargs)
-			return interpolator(ns, slowdef)
+			# Do the filtering before 
+				ns = parfilter(tfname, s, *args, **kwargs)
+				return interpolator(ns, slowdef)
 
 	return filterfunc, tfname
 
@@ -292,13 +284,13 @@ class StraightRayTracer(TomographyTask):
 
 		the slowness s as a 3-D Numpy array. If mfilter is True, it
 		should be a value passed as the "size" argument to
-		scipy.ndimage.median_filter that will smooth the slowness
-		before output.
+		habis.mpfilter.parfilter (with "median_filter" as the filter
+		name) that will smooth the slowness before output.
 		'''
-		fname = template.format(epoch=epoch)
-
-		if mfilter: s = median_filter(s, size=mfilter)
-		np.save(fname, s.astype(np.float32))
+		if mfilter: s = parfilter('median_filter', s, size=mfilter)
+		if self.isRoot:
+			fname = template.format(epoch=epoch)
+			np.save(fname, s.astype(np.float32))
 
 	def lsmr(self, s, epochs=1, coleq=False, pathopts={}, chambolle=None,
 			mfilter=None, partial_output=None, lsmropts={},
@@ -541,7 +533,7 @@ class StraightRayTracer(TomographyTask):
 			epoch += 1
 			if epoch > epochs: break
 
-		if mfilter: ns = median_filter(ns, size=mfilter)
+		if mfilter: ns = parfilter('median_filter', ns, size=mfilter)
 		return ns
 
 
@@ -669,10 +661,10 @@ class BentRayTracer(TomographyTask):
 	@staticmethod
 	def callbackgen(templ, s, epoch, mfilter):
 		'''
-		Build a callback with signature callback(x, nit) to write
-		partial images of perturbations x to an assumed slowness model
-		s (as a habis.slowness.Slowness instance) for a given SGD-BB
-		epoch 'epoch'.
+		Build a callback with signature callback(x, nit, isroot) to
+		write partial images of perturbations x to an assumed slowness
+		model s (as a habis.slowness.Slowness instance) for a given
+		SGD-BB epoch 'epoch'.
 
 		If mfilter is True, it should be a value passed as the "size"
 		argument to scipy.ndimage.median_filter to smooth the perturbed
@@ -683,12 +675,14 @@ class BentRayTracer(TomographyTask):
 		'''
 		if not templ: return None
 
-		def callback(x, nit):
+		def callback(x, nit, isroot):
 			# Write out the iterate
 			sp = s.perturb(x)
-			if mfilter: sp[:,:,:] = median_filter(sp, size=mfilter)
-			fname = templ.format(epoch=epoch, iter=nit)
-			np.save(fname, sp.astype(np.float32))
+			if mfilter:
+				sp[:,:,:] = parfilter('median_filter', sp, size=mfilter)
+			if isroot:
+				fname = templ.format(epoch=epoch, iter=nit)
+				np.save(fname, sp.astype(np.float32))
 
 		return callback
 
@@ -899,9 +893,7 @@ class BentRayTracer(TomographyTask):
 			cg[:] = 0.
 
 			# Build a callback to write per-iteration results, if desired
-			if self.isRoot:
-				cb = self.callbackgen(partial_output, s, k, mfilter)
-			else: cb = None
+			cb = self.callbackgen(partial_output, s, k, mfilter)
 
 			for t in range(updates):
 				# Compute the sampled cost functional and its gradient
@@ -911,7 +903,7 @@ class BentRayTracer(TomographyTask):
 				x -= eta * lgf
 
 				# Store the partial update if desired
-				if cb: cb(x, t)
+				if cb: cb(x, t, self.isRoot)
 
 				# Check for convergence
 				maxcost = max(f, maxcost)
