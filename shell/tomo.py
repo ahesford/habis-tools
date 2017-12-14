@@ -165,6 +165,28 @@ class TomographyTask(object):
 		return self.comm and not self.comm.rank
 
 
+	def save(self, template, s, epoch, mfilter):
+		'''
+		Store, in a file whose name is produced by invoking
+
+			template.format(epoch=epoch),
+
+		the slowness s as a 3-D Numpy array. If mfilter is True, it
+		should be a value passed as the "size" argument to
+		habis.mpfilter.parfilter (with "median_filter" as the filter
+		name) that will smooth the slowness before output.
+
+		Only the root process will do the writing.
+		'''
+		if mfilter:
+			s = parfilter('median_filter', s, size=mfilter)
+
+		if self.isRoot:
+			fname = template.format(epoch=epoch)
+			np.save(fname, s.astype(np.float32))
+
+
+
 class StraightRayTracer(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform straight-ray path tracing.
@@ -275,23 +297,6 @@ class StraightRayTracer(TomographyTask):
 
 		return ivals
 
-	@staticmethod
-	def save(template, s, epoch, mfilter):
-		'''
-		Store, in a file whose name is produced by invoking
-
-			template.format(epoch=epoch),
-
-		the slowness s as a 3-D Numpy array. If mfilter is True, it
-		should be a value passed as the "size" argument to
-		habis.mpfilter.parfilter (with "median_filter" as the filter
-		name) that will smooth the slowness before output.
-		'''
-		if mfilter: s = parfilter('median_filter', s, size=mfilter)
-		if self.isRoot:
-			fname = template.format(epoch=epoch)
-			np.save(fname, s.astype(np.float32))
-
 	def lsmr(self, s, epochs=1, coleq=False, pathopts={}, chambolle=None,
 			mfilter=None, partial_output=None, lsmropts={},
 			omega=1., mindiff=False, save_pathmat=None, save_times=None):
@@ -349,7 +354,7 @@ class StraightRayTracer(TomographyTask):
 		After each epoch, if partial_output is True, a partial solution
 		will be saved by calling
 
-		  self.lsmr(partial_output, s, epoch, mfilter).
+		  self.save(partial_output, s, epoch, mfilter).
 
 		The return value will be the final, perturbed solution. If
 		mfilter is True, the solution will be processed with
@@ -658,34 +663,6 @@ class BentRayTracer(TomographyTask):
 
 		return f, nrows, gf
 
-	@staticmethod
-	def callbackgen(templ, s, epoch, mfilter):
-		'''
-		Build a callback with signature callback(x, nit, isroot) to
-		write partial images of perturbations x to an assumed slowness
-		model s (as a habis.slowness.Slowness instance) for a given
-		SGD-BB epoch 'epoch'.
-
-		If mfilter is True, it should be a value passed as the "size"
-		argument to scipy.ndimage.median_filter to smooth the perturbed
-		slowness prior to output.
-
-		The callback will store images in npy format with the name
-		given by templ.format(epoch=epoch, iter=nit).
-		'''
-		if not templ: return None
-
-		def callback(x, nit, isroot):
-			# Write out the iterate
-			sp = s.perturb(x)
-			if mfilter:
-				sp[:,:,:] = parfilter('median_filter', sp, size=mfilter)
-			if isroot:
-				fname = templ.format(epoch=epoch, iter=nit)
-				np.save(fname, sp.astype(np.float32))
-
-		return callback
-
 	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6, maxstep=None,
 				regularizer=None, mfilter=None, partial_output=None):
 		'''
@@ -738,14 +715,10 @@ class BentRayTracer(TomographyTask):
 		image before beginning the next round. The argument mfilter can
 		be a scalar or a three-element sequence of positive integers.
 
-		If partial_output is not None, it should be a string specifying
-		a name template that will be rendered to store images produced
-		after each update. An "update" counts as a update in a single
-		epoch. The formatted output name will be
-		partial_output.format(epoch=epoch, iter=iter), where "epoch"
-		and "iter" are the epoch index and update iteration number,
-		respectively. If partial_output is None, no partial images will
-		be stored.
+		If partial_output is not None, the current solution s will be
+		saved after every update within each epoch by calling
+
+			self.save(partial_output, s, epoch, mfilter).
 		'''
 		# Determine the grid shape
 		gshape = self.tracer.box.ncell
@@ -892,9 +865,6 @@ class BentRayTracer(TomographyTask):
 			# Clear gradient for next iteration
 			cg[:] = 0.
 
-			# Build a callback to write per-iteration results, if desired
-			cb = self.callbackgen(partial_output, s, k, mfilter)
-
 			for t in range(updates):
 				# Compute the sampled cost functional and its gradient
 				f, lgf = ffg(x, k, t)
@@ -903,7 +873,8 @@ class BentRayTracer(TomographyTask):
 				x -= eta * lgf
 
 				# Store the partial update if desired
-				if cb: cb(x, t, self.isRoot)
+				if partial_output:
+					self.save(partial_output, s.perturb(x), k, mfilter)
 
 				# Check for convergence
 				maxcost = max(f, maxcost)
@@ -930,7 +901,7 @@ class BentRayTracer(TomographyTask):
 		# Update the image
 		sp = s.perturb(x)
 		# Apply a desired filter
-		if mfilter: sp = median_filter(sp, size=mfilter)
+		if mfilter: sp = parfilter('median_filter', sp, size=mfilter)
 
 		return sp
 
