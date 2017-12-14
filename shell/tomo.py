@@ -716,7 +716,7 @@ class BentRayTracer(TomographyTask):
 		be a scalar or a three-element sequence of positive integers.
 
 		If partial_output is not None, the current solution s will be
-		saved after every update within each epoch by calling
+		saved after every epoch by calling
 
 			self.save(partial_output, s, epoch, mfilter).
 		'''
@@ -872,10 +872,6 @@ class BentRayTracer(TomographyTask):
 				# Adjust the solution against the gradient
 				x -= eta * lgf
 
-				# Store the partial update if desired
-				if partial_output:
-					self.save(partial_output, s.perturb(x), k, mfilter)
-
 				# Check for convergence
 				maxcost = max(f, maxcost)
 				if f < tol * maxcost:
@@ -884,6 +880,10 @@ class BentRayTracer(TomographyTask):
 
 				# Update the average gradient
 				cg = beta * lgf + (1 - beta) * cg
+
+			# Store the partial update if desired
+			if partial_output:
+				self.save(partial_output, s.perturb(x), k, mfilter)
 
 			if converged:
 				if self.isRoot: print('TERMINATE: Convergence achieved')
