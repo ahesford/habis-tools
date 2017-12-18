@@ -85,10 +85,6 @@ if __name__ == '__main__':
 	start = rank * share + min(rank, srem)
 	if rank < srem: share += 1
 
-	# Build an interpolator for the slowness map
-	si = LinearInterpolator3D(s)
-	si.default = slowdef
-
 	if eikonal:
 		# Prepare the Eikonal solver
 		eik = FastSweep(bx)
@@ -105,7 +101,8 @@ if __name__ == '__main__':
 
 		if not eikonal:
 			# Use path tracing; only the path integral matters
-			atimes[t,r] = tracer.trace(si, src, rcv, intonly=True)
+			tracer.set_slowness(s)
+			atimes[t,r] = tracer.trace(src, rcv, intonly=True)
 		else:
 			# Use the Eikonal solution
 			if t != lt or tmi is None:

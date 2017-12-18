@@ -28,10 +28,8 @@ from itertools import count, repeat
 
 from mpi4py import MPI
 
-from pycwp.cytools.interpolator import HermiteInterpolator3D, LinearInterpolator3D
 from pycwp.cytools.regularize import epr, totvar, tikhonov
 from pycwp.iterative import lsmr
-from pycwp.cytools.boxer import Segment3D
 
 from habis.pathtracer import PathTracer, TraceError
 
@@ -41,70 +39,6 @@ from habis.mpdfile import flocshare, getatimes
 from habis.mpfilter import parfilter
 from habis.slowness import Slowness, MaskedSlowness, PiecewiseSlowness
 
-def makeinterpolator(interpolator, slowdef=None, tfilter=None):
-	'''
-	For a given pycwp.cytools.interpolator.Interpolator3D subclass
-	interpolator and a time-filter argument tfilter, return a function that
-	will compute an Interpolator3D for a 3-D Numpy array s. The
-	interpolator will have a default value slowdef, and tfilter is used to
-	control optional pre-filtering. Also returned is a string indicating
-	the type of pre-filtering selected, or None if tfilter is None.
-
-	If tfilter is a dictionary, it must have the 'method' key. From the
-	key, the habis.mpfilter.parfilter function will be used  to filter the
-	array s before building the interpolator, using tfilter['method'] as
-	the first argument to select the filter. The tfilter dictionary may
-	contain an optional 'args' sequence (default: ()) and an optional
-	'kwargs' dictionary (default: {}) to govern the filtering.
-
-	If tfilter is None, no pre-filtering is done.
-
-	Hence, a function f returned by this function satisfies:
-
-	* When tfilter is a dictionary,
-
-	    f(s) = interpolator(filter(s, *args, **kwargs), slowdef),
-
-	  where filter is the function indicated by the 'method' key, and args
-	  and kwargs are associated with respective keys in tfilter.
-
-	* When tfilter is not a dictionary and is not None,
-
-	    f(s) = interpolator(s, slowdef, tfilter).
-
-	* When tfilter is None,
-
-	    f(s) = interpolator(s, slowdef).
-	'''
-	try:
-		tfname = tfilter['method']
-	except KeyError:
-		raise KeyError('Dict "tfilter" must contain "method" key')
-	except TypeError:
-		if tfilter is not None:
-			raise TypeError('Argument "tfilter" must be None or a dictionary')
-		# With no tfilter, just build the interpolator
-		def filterfunc(s):
-			return interpolator(s, slowdef)
-		tfname = None
-	else:
-
-		# Check for positional arguments
-		args = tfilter.get('args', ())
-
-		# Check for keyword arguments
-		kwargs = tfilter.get('kwargs', { }) 
-
-		try: len(args)
-		except TypeError: args = (args,)
-
-		def filterfunc(s):
-			# Do the filtering before 
-				ns = parfilter(tfname, s, *args, **kwargs)
-				return interpolator(ns, slowdef)
-
-	return filterfunc, tfname
-
 
 class TomographyTask(object):
 	'''
@@ -112,17 +46,13 @@ class TomographyTask(object):
 	tomographic reconstructions. Each instances takes responsibility for a
 	set of arrival-time measurements provided to it.
 	'''
-	def __init__(self, elements, atimes, interpolator, tracer, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, tracer, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker that collaborates with other ranks in the given
 		MPI communicator comm to compute tomographic images. Elements
 		have coordinates given by elements[i] for some integer index i,
 		and first-arrival times from transmitter t ot receiver r are
 		given by atimes[t,r].
-
-		When slowness maps (s) must be interpolated (such as when
-		computing arrival-time path integrals), the interpolation will
-		be done by calling interpolator(s).
 
 		Path integrals (either bent- or straight-ray, with or without
 		compensation) will be evaluated with the PathTracer tracer.
@@ -131,11 +61,7 @@ class TomographyTask(object):
 		elements[t] or elements[r] is not defined, or for which t == r,
 		will be discarded.
 		'''
-		if not callable(interpolator):
-			raise ValueError('Argument "interpolator" must be callable')
-
-		# Record the interpolator and tracer
-		self.interpolator = interpolator
+		# Record the tracer
 		self.tracer = tracer
 
 		# Record the communicator
@@ -169,21 +95,20 @@ class TomographyTask(object):
 		return self.comm and not self.comm.rank
 
 
-	def save(self, template, s, epoch, mfilter):
+	def save(self, template, s, epoch, filt):
 		'''
 		Store, in a file whose name is produced by invoking
 
 			template.format(epoch=epoch),
 
-		the slowness s as a 3-D Numpy array. If mfilter is True, it
-		should be a value passed as the "size" argument to
-		habis.mpfilter.parfilter (with "median_filter" as the filter
-		name) that will smooth the slowness before output.
+		the slowness s as a 3-D Numpy array. If filt is not None, it
+		must be a callable that accepts as its single argument the
+		array s. In this case, filt(s) will be called prior to writing
+		the output.
 
 		Only the root process will do the writing.
 		'''
-		if mfilter:
-			s = parfilter('median_filter', s, size=mfilter)
+		if filt: s = filt(s)
 
 		if self.isRoot:
 			fname = template.format(epoch=epoch)
@@ -195,8 +120,8 @@ class StraightRayTracer(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform straight-ray path tracing.
 	'''
-	def __init__(self, elements, atimes, interpolator,
-			tracer, fresnel=None, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, tracer,
+			fresnel=None, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker for straight-ray tomography on the element
 		pairs present in atimes.
@@ -205,13 +130,9 @@ class StraightRayTracer(TomographyTask):
 		value. In this case, rays are represented as ellipsoids that
 		embody the first Fresnel zone for a principal wavelength of
 		fresnel (in units that match the units of tracer.box.cell).
-
-		For time compensation, a slowness s will be interpolated by
-		calling interpolator(s).
 		'''
 		# Initialize the data and communicator
-		super(StraightRayTracer, self).__init__(elements,
-					atimes, interpolator, tracer, comm)
+		super(StraightRayTracer, self).__init__(elements, atimes, tracer, comm)
 
 		# Figure out the grid dimensions
 		ncell = tracer.box.ncell
@@ -235,11 +156,11 @@ class StraightRayTracer(TomographyTask):
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def comptimes(self, si, tmin=0.):
+	def comptimes(self, s, tmin=0.):
 		'''
 		Compute compensated and straight-ray arrival times for all
 		transmit-receive pairs in self.atimes through the medium
-		represented by slowness si, as an Interpolator3D instance.
+		represented by slowness s, a 3-D Numpy array.
 
 		The compensated time adjusts the arrival-time with a factor
 		that accounts for deviation of the wavefront normal from the
@@ -259,6 +180,9 @@ class StraightRayTracer(TomographyTask):
 		tmin = float(tmin)
 		tracer = self.tracer
 
+		# Update the slowness image for the tracer
+		tracer.set_slowness(s)
+
 		# Compute the corrective factor for each (t, r) pair
 		ivals = { }
 		for t, r in self.trpairs:
@@ -267,8 +191,8 @@ class StraightRayTracer(TomographyTask):
 
 			try:
 				# Try to find the compensated times
-				tc, ts = tracer.trace(si, src, rcv, 
-							intonly=True, mode='straight')
+				tc, ts = tracer.trace(src, rcv, fresnel=0,
+						intonly=True, mode='straight')
 				# Check the time for sanity
 				if not ts >= tc >= tmin * vt:
 					raise ValueError('Compensated time out of range')
@@ -280,7 +204,7 @@ class StraightRayTracer(TomographyTask):
 		return ivals
 
 	def lsmr(self, s, epochs=1, coleq=False, tmin=0., chambolle=None,
-			mfilter=None, partial_output=None, lsmropts={},
+			postfilter=None, partial_output=None, lsmropts={},
 			omega=1., mindiff=False, save_pathmat=None, save_times=None):
 		'''
 		For each of epochs rounds, compute, using LSMR, a slowness
@@ -311,9 +235,8 @@ class StraightRayTracer(TomographyTask):
 
 		Within each epoch, an update to the slowness image is computed
 		based on the difference between the compensated arrival time
-		produced by self.comptimes(si, tmin) and the actual arrival
-		times in self.atimes, where si is an Interpolator3D returned by
-		calling self.interpolator(s).
+		produced by self.comptimes(s, tmin) and the actual arrival
+		times in self.atimes.
 
 		When mindiff is True, compensated arrival times will be replaced
 		by straight-ray times whenever the straight-ray time is closer
@@ -336,11 +259,11 @@ class StraightRayTracer(TomographyTask):
 		After each epoch, if partial_output is True, a partial solution
 		will be saved by calling
 
-		  self.save(partial_output, s, epoch, mfilter).
+		  self.save(partial_output, s, epoch, postfilter).
 
 		The return value will be the final, perturbed solution. If
-		mfilter is True, the solution will be processed with
-		scipy.ndimage.median_filter before it is written.
+		postfilter is True, the solution s will be processed as
+		postfilter(s) before it is returned.
 
 		If save_pathmat is not None, it should be a string template
 		which will be formatted with
@@ -406,11 +329,8 @@ class StraightRayTracer(TomographyTask):
 		epoch, sol, ltimes = 0, 0, { }
 		ns = s.perturb(sol)
 		while True:
-			# Filter and interpolate image for time compensation
-			nsi = self.interpolator(ns)
-
 			# Adjust RHS times with straight-ray compensation
-			tv = self.comptimes(nsi, tmin)
+			tv = self.comptimes(ns, tmin)
 			# Find RMS arrival-time error for compensated model
 			terr = fsum((v[0] - self.atimes[k])**2
 					for k, v in tv.items())
@@ -515,12 +435,12 @@ class StraightRayTracer(TomographyTask):
 			ns = s.perturb(sol)
 
 			if partial_output:
-				self.save(partial_output, ns, epoch, mfilter)
+				self.save(partial_output, ns, epoch, postfilter)
 
 			epoch += 1
 			if epoch > epochs: break
 
-		if mfilter: ns = parfilter('median_filter', ns, size=mfilter)
+		if postfilter: ns = postfilter(ns)
 		return ns
 
 
@@ -528,12 +448,11 @@ class BentRayTracer(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform bent-ray path tracing.
 	'''
-	def __init__(self, elements, atimes, interpolator, tracer,
-			fresnel=None, comm=MPI.COMM_WORLD, hitmaps=False):
+	def __init__(self, elements, atimes, tracer, fresnel=None,
+				comm=MPI.COMM_WORLD, hitmaps=False):
 		'''
-		Create a worker to do path tracing on the element pairs present
-		in atimes. A slowness map s will be interpolated for the tracer
-		by calling interpolator(s).
+		Create a worker to do path tracing, using the provided tracer,
+		on the element pairs present in atimes.
 
 		If hitmaps is True, every call to self.evaluate will save a
 		copy of the per-voxel hit count and hit density maps in the
@@ -542,10 +461,8 @@ class BentRayTracer(TomographyTask):
 		information.
 		'''
 		# Initialize the data and communicator
-		super(BentRayTracer, self).__init__(elements, atimes, interpolator, comm)
+		super(BentRayTracer, self).__init__(elements, atimes, tracer, comm)
 
-		# Grab a reference to the path tracer
-		self.tracer = tracer
 		# Copy the Fresnel parameter
 		self.fresnel = fresnel
 
@@ -578,18 +495,13 @@ class BentRayTracer(TomographyTask):
 		shares from other MPI ranks in the communicator self.comm using
 		reduction operators.
 
-		For path tracing in self.tracer.trace, the slowness s will be
-		interpolated as si = self.interpolator(s).
-
 		If self.save_hitmaps is True, self.hitmaps will be updated with
 		the hit count and density in a Numpy array of s.shape + (2,),
 		where the counts are stored in [:,:,:,0] and the density is
 		stored in [:,:,:,1].
 		'''
 		rank, size = self.comm.rank, self.comm.size
-
-		# Interpolate the slowness, with optional filtering
-		si = self.interpolator(s)
+		self.tracer.set_slowness(s)
 
 		# The Fresnel wavelength parameter (or None)
 		fresnel = self.fresnel
@@ -607,13 +519,14 @@ class BentRayTracer(TomographyTask):
 		nrows, nskip = 0, 0
 
 		if self.save_hitmaps:
-			hitmaps = np.zeros(si.shape + (2,), dtype=np.float64)
+			hmshape = self.tracer.get_slowness().shape + (2,)
+			hitmaps = np.zeros(hmshape, dtype=np.float64)
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
 			src, rcv = self.elements[t], self.elements[r]
 			try:
-				plens, pint = self.tracer.trace(si, src, rcv, fresnel)
+				plens, pint = self.tracer.trace(src, rcv, fresnel)
 				if not plens or pint <= 0: raise ValueError
 			except (ValueError, TraceError):
 				# Skip invalid or empty paths
@@ -646,7 +559,7 @@ class BentRayTracer(TomographyTask):
 		return f, nrows, gf
 
 	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6, maxstep=None,
-				regularizer=None, mfilter=None, partial_output=None):
+			regularizer=None, postfilter=None, partial_output=None):
 		'''
 		Iteratively compute a slowness image by minimizing the cost
 		functional represented in this BentRayTracer instance and using
@@ -692,15 +605,13 @@ class BentRayTracer(TomographyTask):
 		the value of maxstep. With no maxstep, the BB step size will
 		not be clipped.
 
-		After each round of randomized reconstruction, if mfilter is
-		True, a median filter of size mfilter will be applied to the
-		image before beginning the next round. The argument mfilter can
-		be a scalar or a three-element sequence of positive integers.
+		If postfilter is not None, the value postfilter(s) will be
+		returned in place of the final solution s.
 
 		If partial_output is not None, the current solution s will be
 		saved after every epoch by calling
 
-			self.save(partial_output, s, epoch, mfilter).
+			self.save(partial_output, s, epoch, postfilter).
 		'''
 		# Determine the grid shape
 		gshape = self.tracer.box.ncell
@@ -865,7 +776,7 @@ class BentRayTracer(TomographyTask):
 
 			# Store the partial update if desired
 			if partial_output:
-				self.save(partial_output, s.perturb(x), k, mfilter)
+				self.save(partial_output, s.perturb(x), k, postfilter)
 
 			if converged:
 				if self.isRoot: print('TERMINATE: Convergence achieved')
@@ -883,7 +794,7 @@ class BentRayTracer(TomographyTask):
 		# Update the image
 		sp = s.perturb(x)
 		# Apply a desired filter
-		if mfilter: sp = parfilter('median_filter', sp, size=mfilter)
+		if postfilter: sp = postfilter(sp)
 
 		return sp
 
@@ -1026,19 +937,23 @@ if __name__ == "__main__":
 	if not rank:
 		print(f'Using a total of {timecount} arrival-time measurements')
 
-	interpolator = LinearInterpolator3D if linear else HermiteInterpolator3D
-	interpolator, tfname = makeinterpolator(interpolator, slowdef, tfilter)
+	if tracer.prefilter and not rank:
+		print(f'Will use {tracer.prefilter} as a pre-integral filter')
 
-	if tfname and not rank:
-		print(f'Will use {tfname} as a pre-integral filter')
+	comm = MPI.COMM_WORLD
+
+	if mfilter:
+		filt = parfilter('median_filter', comm)
+		def postfilter(s):
+			return filt(s, size=mfilter)
+	else: postfilter = None
 
 	if not sropts:
 		# Build the cost calculator
-		cshare = BentRayTracer(elements, atimes, interpolator,
-				tracer, fresnel, MPI.COMM_WORLD, hitmaps)
+		cshare = BentRayTracer(elements, atimes, tracer, fresnel, comm, hitmaps)
 
 		# Compute random updates to the image
-		ns = cshare.sgd(slw, mfilter=mfilter,
+		ns = cshare.sgd(slw, postfilter=postfilter,
 				partial_output=partial_output, **bropts)
 
 		# Grab the hitmaps, if they were saved
@@ -1046,8 +961,10 @@ if __name__ == "__main__":
 		except AttributeError: hmaps = None
 	else:
 		# Build the straight-ray tracer
-		cshare = StraightRayTracer(elements, atimes,
-				interpolator, tracer, fresnel, MPI.COMM_WORLD)
+		cshare = StraightRayTracer(elements, atimes, tracer, fresnel, comm)
+
+		if not rank:
+			print('Finished building straight-ray tracer object')
 
 		if hitmaps:
 			# Save the hitmaps
@@ -1062,7 +979,7 @@ if __name__ == "__main__":
 		else: hmaps = None
 
 		# Find the solution
-		ns = cshare.lsmr(slw, mfilter=mfilter,
+		ns = cshare.lsmr(slw, postfilter=postfilter,
 				partial_output=partial_output, **sropts)
 
 	if not rank:

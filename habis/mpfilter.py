@@ -35,61 +35,63 @@ def gathersize(n, nrec, size):
 	return starts, shares
 
 
-def parfilter(name, a, size=None, footprint=None, comm=None, **kwargs):
+def parfilter(name, comm=None):
 	'''
-	In a distributed fashion over the MPI communicator comm, compute
+	For a given named filter, construct a MPI distributed version of the
+	filter that divides the workload along the first axis of the filtered
+	image among all ranks in the MPI communicator comm (MPI.COMM_WORLD by
+	default). The filter must support a "size" or "footprint" argument
+	because distributed slices of the image to be filtered will overlap by
+	half the filter (or footprint) size along the first axis to avoid
+	boundary artifacts that would otherwise result from the slicing.
 
-		b = filter(a, size=size, footprint=footprint, **kwargs),
+	The filter that will be parallelized is selected from scipy.ndimage if
+	such a function exists in that module, or else from pycwp.filter.
 
-	where filter is either f'scipy.ndimage.{name}' or, if no such function
-	exists, f'pycwp.filter.{name}'. If comm is None, mpi4py.MPI.COMM_WORLD
-	will be used by default.
-
-	Distribution of the filter work is done along the first axis of the
-	array to ensure that the local share represents a contiguous memory
-	block.
-
-	The filter must support whichever 'size' or 'footprint' argument is
-	provided. If either argument is "None", that argument is not passed to
-	the filter. At least one of these arguments is required.
+	The return value is a function with the same signature as the original
+	filter. The function will handle distribution of the input array (which
+	should be the entire array on each process) and accumulation of the
+	result (which will be the same array on each process).
 	'''
 	try: filt = getattr(scipy.ndimage, name)
 	except AttributeError:
 		import pycwp.filter
 		filt = getattr(pycwp.filter, name)
 
-	# Determine the necessary overlap in slicing
-	if footprint is not None:
-		footprint = np.asarray(footprint)
-		npad = footprint.shape[0] // 2
-		kwargs['footprint'] = footprint
-	elif size is not None:
-		try: npad = size[0] // 2
-		except TypeError: npad = size // 2
-		kwargs['size'] = size
-	else: raise TypeError('One of "size" or "footprint" is required')
+	from mpi4py import MPI
+	if comm is None: comm = MPI.COMM_WORLD
 
-	# Make sure the array is C-contiguous
-	a = np.asarray(a)
+	def filterfunc(a, size=None, footprint=None, *args, **kwargs):
+		# Determine the necessary overlap in slicing
+		if footprint is not None:
+			footprint = np.asarray(footprint)
+			npad = footprint.shape[0] // 2
+			kwargs['footprint'] = footprint
+		elif size is not None:
+			try: npad = size[0] // 2
+			except TypeError: npad = size // 2
+			kwargs['size'] = size
+		else: raise TypeError('One of "size" or "footprint" is required')
 
-	# Find the local shares in the communicator
-	if comm is None:
-		from mpi4py import MPI
-		comm = MPI.COMM_WORLD
+		# Make sure the array is an array
+		a = np.asarray(a)
 
-	# Pull the local portion with appropriate padding for filtering
-	lidx, hidx = parshare(a.shape[0], npad, comm.rank, comm.size)
+		# Pull the local portion with appropriate padding for filtering
+		lidx, hidx = parshare(a.shape[0], npad, comm.rank, comm.size)
 
-	# Filter and update the local portion of a
-	lfa = filt(a[lidx:hidx], **kwargs)
+		# Filter and update the local portion of a
+		lfa = filt(a[lidx:hidx], **kwargs)
 
-	# Make sure that the output array is compatible
-	b = np.zeros(a.shape[:1] + lfa.shape[1:], dtype=np.float64, order='C')
-	b[lidx:hidx] = lfa
+		# Make sure that the output array is compatible
+		b = np.zeros(a.shape[:1] + lfa.shape[1:], dtype=np.float64, order='C')
+		b[lidx:hidx] = lfa
 
-	# Gather local contributions everywhere
-	nrec = int(np.prod(b.shape[1:]))
-	starts, shares = gathersize(b.shape[0], nrec, comm.size)
-	comm.Allgatherv(MPI.IN_PLACE, [b, shares, starts, MPI.DOUBLE])
+		# Gather local contributions everywhere
+		nrec = int(np.prod(b.shape[1:]))
+		starts, shares = gathersize(b.shape[0], nrec, comm.size)
+		comm.Allgatherv(MPI.IN_PLACE, [b, shares, starts, MPI.DOUBLE])
 
-	return b
+		# Return the entire result
+		return b
+
+	return filterfunc

@@ -22,7 +22,6 @@ from .habiconf import HabisConfigParser, HabisConfigError
 from libc.stdlib cimport rand, RAND_MAX, malloc, free
 
 from pycwp.cytools.boxer import Box3D
-
 from pycwp.cytools.ptutils cimport *
 from pycwp.cytools.boxer cimport Box3D
 from pycwp.cytools.interpolator cimport Interpolator3D
@@ -773,8 +772,8 @@ class PathTracer(object):
 		try: keys = config.keys(psec)
 		except Exception as e: _throw('Unable to read configuration', e)
 
-		extra_keys = keys.difference({'grid', 'ptol', 'atol', 'rtol',
-						'segmax', 'bropts', 'sropts'})
+		extra_keys = keys.difference({'prefilter', 'defval', 'interpolator',
+			'grid', 'ptol', 'atol', 'rtol', 'segmax', 'bropts', 'sropts'})
 		if extra_keys:
 			first_key = next(iter(extra_keys))
 			raise HabisConfigError(f'Unrecognized key {first_key} '
@@ -810,12 +809,24 @@ class PathTracer(object):
 					default={ }, mapper=dict, checkmap=False)
 		except Exception as e: _throw('Invalid optional sropts', e)
 
+		try: defval = config.get(psec, 'defval', mapper=float, default=None)
+		except Exception as e: _throw('Invalid optional defval', e)
+
+		try: interpolator = config.get(psec, 'interpolator')
+		except Exception as e: _throw('Configuration must specify valid interpolator', e)
+
+		try:
+			prefilter = config.get(psec, 'prefilter',
+					default=None, mapper=dict, checkmap=False)
+		except Exception as e: _throw('Invalid optional prefilter', e)
+
 		# Create the instance
-		return cls(lo, hi, ncell, segmax, atol, rtol, ptol, bropts, sropts)
+		return cls(lo, hi, ncell, segmax, atol, rtol, ptol,
+				interpolator, defval, prefilter, bropts, sropts)
 
 
-	def __init__(self, lo, hi, ncell, segmax,
-			atol, rtol, ptol, bropts={ }, sropts={ }):
+	def __init__(self, lo, hi, ncell, segmax, atol, rtol, ptol, interpolator,
+				defval=None, prefilter=None, bropts={ }, sropts={ }):
 		'''
 		Define a grid (lo x hi) subdivided into ncell voxels on which a
 		slowness map should be interpreted, along with options for
@@ -837,6 +848,12 @@ class PathTracer(object):
 		straight-ray tracing. Optional keyword arguments to the method
 		WavefrontNormalIntegrator.pathint may be provided in the
 		dictionary sropts.
+
+		For integration, a 3-D Numpy array is interpolated after an
+		optional prefiltering step according to the function built by
+		self.make_interpolator(interpolator, defval, prefilter). The
+		filter and its name are stored as self.interpolator and
+		self.prefilter, respectively.
 		'''
 		# Define the grid for images
 		self.box = Box3D(lo, hi, ncell)
@@ -850,6 +867,131 @@ class PathTracer(object):
 		# Copy optional argument dicts
 		self.bropts = dict(bropts)
 		self.sropts = dict(sropts)
+
+		# Build the array interpolator
+		intp, fname = self.make_interpolator(interpolator, defval, prefilter)
+		self.interpolator, self.prefilter = intp, fname
+
+		# By default, there is no slowness
+		self._slowness = None
+
+	@staticmethod
+	def make_interpolator(interpolator, defval=None, prefilter=None):
+		'''
+		For the given interpolator, which names an Interpolator3D
+		subclass in the module pycwp.cytools.interpolator, and a
+		pre-filter argument prefilter, return a function that will
+		compute an Interpolator3D for a 3-D Numpy array. The
+		interpolator will have a defval value defval, and prefilter is
+		used to control optional filtering applied before path
+		integrals are evaluated. Also returned is a string indicating
+		the type of pre-filtering selected, or None if prefilter is
+		None.
+
+		If prefilter is not None, it must be a dictionary with a
+		'method' key. The method key is interpreted in one of two ways.
+		If prefilter inclues a 'parfilter' key, the 'method' key will
+		be passed to habis.mpfilter.parfilter to produce a parallel
+		version of the named filter. The value for 'parfilter' can
+		either be True, which will pass None to parfilter as the comm
+		argument, or it can be an MPI communicator object that will be
+		passed as the comm argument.
+
+		Without a 'parfilter' key (or if the 'parfilter' value
+		evaluates to False), the 'method' key represents the name of a
+		filter function in scipy.ndimage or, if none exists there, in
+		pycwp.filter.
+
+		The prefilter dictionary may contain an optional 'args'
+		sequence (default: ()) and an optional 'kwargs' dictionary
+		(default: {}) that will be passed to the filter function. As a
+		convenience, if args is a scalar, it will be wrapped in a
+		tuple.
+
+		If prefilter is None, no pre-filtering is done.
+
+		Hence, a function f returned by this function satisfies:
+
+		* When prefilter is a dictionary,
+
+		  f(s) = interpolator(filter(s, *args, **kwargs), defval),
+
+		  where filter is the function indicated by the 'method' key,
+		  and args and kwargs are associated with respective keys in
+		  prefilter.
+
+		* When prefilter is None, f(s) = interpolator(s, defval).
+		'''
+		# Pull the interpolator by name
+		import pycwp.cytools.interpolator
+		interpolator = getattr(pycwp.cytools.interpolator, interpolator)
+
+		# Read the filter
+		try:
+			tfname = prefilter['method']
+		except KeyError:
+			raise KeyError('Dict "prefilter" must contain "method" key')
+		except TypeError:
+			if prefilter is not None:
+				raise TypeError('Argument "prefilter" must be None or a dictionary')
+			# With no prefilter, just build the interpolator
+			def filterfunc(s):
+				return interpolator(s, defval)
+			tfname = None
+		else:
+			# Check for positional arguments
+			args = prefilter.get('args', ())
+
+			# Check for keyword arguments
+			kwargs = prefilter.get('kwargs', { })
+
+			pcomm = prefilter.get('parfilter', False)
+
+			if pcomm:
+				from .mpfilter import parfilter
+				if pcomm is True:
+					filt = parfilter(tfname)
+					tfname = f'parfilter({tfname})'
+				else:
+					filt = parfilter(tfname, comm=pcomm)
+					tfname = f'parfilter({tfname}, comm={pcomm})'
+			else:
+				try:
+					import scipy.ndimage
+					filt = getattr(scipy.ndimage, tfname)
+					tfname = f'scipy.ndimage.{tfname}'
+				except (AttributeError, ImportError):
+					import pycwp.filter
+					filt = getattr(pycwp.filter, tfname)
+					tfname = f'pycwp.filter.{tfname}'
+
+			try: len(args)
+			except TypeError: args = (args,)
+
+			def filterfunc(s):
+				# Do the filtering before
+				ns = filt(s, *args, **kwargs)
+				return interpolator(ns, defval)
+
+		return filterfunc, tfname
+
+
+	def set_slowness(self, s):
+		'''
+		If s is not None, store self.interpolator(s) as the slowness
+		model through which self.trace will evaluate path integrals.
+
+		If s is None, remove the stored interpolator.
+		'''
+		if s is None: self._slowness = None
+		else: self._slowness = self.interpolator(s)
+
+
+	def get_slowness(self):
+		'''
+		Return a reference to the stored slowness.
+		'''
+		return self._slowness
 
 
 	def pathmap(self, points, fresnel=0):
@@ -907,12 +1049,13 @@ class PathTracer(object):
 		return { k: fsum(v) for k, v in plens.items() }
 
 
-	def trace(self, si, src, rcv, fresnel=0, intonly=False, mode='bent'):
+	def trace(self, src, rcv, fresnel=0, intonly=False, mode='bent'):
 		'''
-		Given an map si (an Interpolator3D instance), a source with
-		world coordinates src and a receiver with world coordinates
-		rcv, compute a path integral from src to rcv using, when mode
-		is 'bent',
+		Through a slowness model assigned by a prior call to
+		self.set_slowness, trace a path integral
+		Given a 3-D Numpy array s, a source with world coordinates src
+		and a receiver with world coordinates rcv, compute a path
+		integral from src to rcv using, when mode is 'bent',
 
 		  PathIntegrator(si).minpath(gs, gr, self.nmax, self.atol,
 			self.rtol, self.ptol, self.box.cell, **self.bropts),
@@ -922,8 +1065,12 @@ class PathTracer(object):
 		  WavefrontNormalIntegrator(si).pathint(gs, gr,
 			self.atol, self.rtol, self.box.cell, **self.sropts),
 
-		where gs and gr are grid coordinates of src and rcv,
-		respectively, according to self.box.cart2cell.
+		where si is the interpolator returned by self.get_slowness, and
+		gs and gr are grid coordinates of src and rcv, respectively,
+		according to self.box.cart2cell.
+
+		If self.get_slowness() returns None, this method will fail with
+		a TypeError.
 
 		Note that, in 'straight' mode, the parameters self.ptol and
 		self.nmax have no significance.
@@ -954,6 +1101,11 @@ class PathTracer(object):
 		Any Exceptions raised by WavefrontNormalIntegrator.pathint or
 		PathIntegrator.minpath will not be caught by this method.
 		'''
+		# Grab the interpolator
+		si = self.get_slowness()
+		if si is None:
+			raise TypeError('Call set_slowness() before calling trace()')
+
 		# Build the integrator for the image and verify shape
 		mode = str(mode).lower()
 		if mode == 'bent': integrator = PathIntegrator(si)
@@ -1099,6 +1251,6 @@ def srcompensate(trpairs, elements, Box3D bx, Interpolator3D si, long N):
 			gval += gwt * ndl * sv
 			gsval += gwt * sv
 			lu = ru
-		results.append((L * kval, L * ksval, pt2tup(dl), 
+		results.append((L * kval, L * ksval, pt2tup(dl),
 			pt2tup(ln), L * abs(gval - kval), L * abs(gsval - ksval)))
 	return results
