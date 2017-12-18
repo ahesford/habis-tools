@@ -299,6 +299,19 @@ class HabisConfigParser(object):
 		return optargs
 
 
+	def keys(self, section):
+		'''
+		Return the set of keys provided in the named section of the
+		configuration.
+		'''
+		try:
+			sec = self._config[section]
+		except KeyError:
+			raise HabisNoSectionError('The section %s does not exist' % section)
+
+		return set(sec.keys())
+
+
 	def get(self, section, option, *args, **kwargs):
 		'''
 		Return the value associated with the given option in the given

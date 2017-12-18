@@ -110,6 +110,7 @@ ctypedef struct WaveNormIntContext:
 	point a, b, h
 	long nmax, n, cycles, bad_resets
 	WNErrCode custom_retcode
+	double normwt
 	double *normals
 
 class TraceError(Exception): pass
@@ -121,7 +122,6 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	instance, compensating the integral by tracking the wavefront normal.
 	'''
 	cdef readonly Interpolator3D data
-	cdef public double normwt
 
 	@classmethod
 	def errmsg(cls, IntegrableStatus code, WNErrCode subcode):
@@ -139,7 +139,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			}.get(subcode, 'Unknown error')
 
 
-	def __init__(self, Interpolator3D data, double normwt=1.0):
+	def __init__(self, Interpolator3D data):
 		'''
 		Create a new WavefrontNormalIntegrator to evaluate integrals
 		through the interpolated function represented by data.
@@ -150,9 +150,6 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		compensation.
 		'''
 		self.data = data
-		if normwt < 0 or normwt > 1:
-			raise ValueError('Value of normwt must be in range [0, 1]')
-		self.normwt = normwt
 
 	@cython.boundscheck(False)
 	@cython.wraparound(False)
@@ -225,7 +222,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 
 		# Update the wavefront normal
 		# TODO: Should this be gf at refu instead of u?
-		nrm = axpy(self.normwt * L * (u - refu) / dot(ba, refnrm), gf, refnrm)
+		nrm = axpy(wctx.normwt * L * (u - refu) / dot(ba, refnrm), gf, refnrm)
 		rn = ptnrm(nrm)
 		if almosteq(rn, 0.0):
 			wctx.custom_retcode = WNErrCode.NORMAL_VANISHES
@@ -257,13 +254,15 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
-	def pathint(self, a, b, double atol, double rtol,
-			h=1.0, unsigned int ncache=512):
+	def pathint(self, a, b, double atol, double rtol, h=1.0,
+			double normwt=1.0, unsigned int ncache=512):
 		'''
 		Given a 3-D path from point a to point b, in grid coordinates,
 		use an adaptive Gauss-Kronrod quadrature of order 15 to
 		integrate the image associated with self.data along the path,
 		with a correction based on tracking of wavefront normals.
+		The correction term will be scaled by the value of normwt,
+		which must be nonnegative.
 
 		The argument h may be a scalar float or a 3-D sequence of
 		floats that defines the grid spacing in world Cartesian
@@ -311,6 +310,10 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			if nh != 3:
 				raise ValueError('Argument "h" must be a scalar or 3-sequence')
 			ctx.h.x, ctx.h.y, ctx.h.z = float(h[0]), float(h[1]), float(h[2])
+
+		if normwt < 0:
+			raise ValueError('Argument "normwt" must be nonnegative')
+		ctx.normwt = normwt
 
 		# Storage for normal tracking
 		ctx.nmax = ncache
@@ -746,15 +749,17 @@ class PathTracer(object):
 
 		'segmax' (default: 256):
 		'ptol' (default: 1e-3):
-		'itol' (default: 1e-5):
+		'atol' (default: 1e-6):
+		'rtol' (default: 1e-4):
 
 		  Floats that specify values for corresponding PathTracer init
 		  arguments.
 
-		'optimizer' (default: { }):
+		'bropts' (default: { }):
+		'sropts' (default: { }):
 
-		  A dictionary that provides keyword arguments to the method
-		  pycwp.cytool.sinterpolator.Interpolator3D.minpath.
+		  Dictionaries that provide keyword arguments for corresponding
+		  PathTracer init arguments.
 		'''
 
 		# Use this section for path tracing
@@ -763,6 +768,17 @@ class PathTracer(object):
 		def _throw(msg, e):
 			errmsg = msg + ' in [' + psec + ']'
 			raise HabisConfigError.fromException(errmsg, e)
+
+		# Verify that no extra configuration options are specified
+		try: keys = config.keys(psec)
+		except Exception as e: _throw('Unable to read configuration', e)
+
+		extra_keys = keys.difference({'grid', 'ptol', 'atol', 'rtol',
+						'segmax', 'bropts', 'sropts'})
+		if extra_keys:
+			first_key = next(iter(extra_keys))
+			raise HabisConfigError(f'Unrecognized key {first_key} '
+						f'in configuration section [{psec}]')
 
 		try:
 			grid = config.get(psec, 'grid', mapper=dict, checkmap=False)
@@ -775,126 +791,103 @@ class PathTracer(object):
 		try: ptol = config.get(psec, 'ptol', mapper=float, default=1e-3)
 		except Exception as e: _throw('Invalid optional ptol', e)
 
-		try:
-			itol = config.getlist(psec, 'itol',
-					mapper=float, default=1e-5, checkmap=False)
-		except Exception as e: _throw('Invalid optional itol', e)
+		try: atol = config.get(psec, 'atol', mapper=float, default=1e-6)
+		except Exception as e: _throw('Invalid optional atol', e)
+
+		try: rtol = config.get(psec, 'rtol', mapper=float, default=1e-4)
+		except Exception as e: _throw('Invalid optional atol', e)
 
 		try: segmax = config.get(psec, 'segmax', mapper=int, default=256)
 		except Exception as e: _throw('Invalid optional segmax', e)
 
 		try:
-			optargs = config.get(psec, 'optimizer',
+			bropts = config.get(psec, 'bropts',
 					default={ }, mapper=dict, checkmap=False)
-		except Exception as e: _throw('Invalid optional optimizer', e)
+		except Exception as e: _throw('Invalid optional bropts', e)
+
+		try:
+			sropts = config.get(psec, 'sropts',
+					default={ }, mapper=dict, checkmap=False)
+		except Exception as e: _throw('Invalid optional sropts', e)
 
 		# Create the instance
-		return cls(lo, hi, ncell, segmax, itol, ptol, optargs)
+		return cls(lo, hi, ncell, segmax, atol, rtol, ptol, bropts, sropts)
 
 
-	def __init__(self, lo, hi, ncell, segmax, itol, ptol, optargs={ }):
+	def __init__(self, lo, hi, ncell, segmax,
+			atol, rtol, ptol, bropts={ }, sropts={ }):
 		'''
 		Define a grid (lo x hi) subdivided into ncell voxels on which a
 		slowness map should be interpreted, along with options for
-		tracing optimal paths through the (variable) slowness.
+		tracing straight-ray or bent-ray paths through slowness models.
 
-		The parameters segmax, ptol, itol are stored to be passed as
-		the nmax, itol and ptol arguments, respectively, to the method
-		pycwp.cytools.interpolator.Interpolator3D.minpath for an
-		instance of Interpolator3D passed to a later call to the method
-		self.pathtrace. The optargs dictionary holds additonal keyword
-		arguments to be passed to minpath.
+		The parameters atol and rtol specify, respectively, absolute
+		and relative integration tolerances for both straight-ray and
+		bent-ray integration methods.
+
+		For bent-ray tracing tracing, PathIntegrator.minpath is used to
+		find an optimal path. The parameters segmax and ptol are passed
+		to that method as the respective arguments nmax and ptol.
+		Optional keyword arguments to PathIntegrator.minpath may be
+		provided in the dictionary bropts.
+
+		For straight-ray tracing, WavefrontNormalIntegrator.pathint is
+		used to compute compensated and uncompensated straight-ray
+		integrals. The segmax and ptol parameters have no effect for
+		straight-ray tracing. Optional keyword arguments to the method
+		WavefrontNormalIntegrator.pathint may be provided in the
+		dictionary sropts.
 		'''
 		# Define the grid for images
 		self.box = Box3D(lo, hi, ncell)
 
-		# Copy adaptive parameters
+		# Copy integration parameters
 		self.ptol = float(ptol)
-		# Treat integration tolerance as a list, if possible
-		try: self.itol = [ float(iv) for iv in itol ]
-		except TypeError: self.itol = [ float(itol), 0. ]
-		if len(self.itol) != 2:
-			raise ValueError('Parameter "itol" must be scalar or length-2 sequence')
+		self.atol = float(atol)
+		self.rtol = float(rtol)
 		self.nmax = int(segmax)
 
-		# Copy the optimization arguments
-		self.optargs = dict(optargs)
+		# Copy optional argument dicts
+		self.bropts = dict(bropts)
+		self.sropts = dict(sropts)
 
 
-	def trace(self, si, src, rcv, fresnel=0, intonly=False):
+	def pathmap(self, points, fresnel=0):
 		'''
-		Given an interpolatored slowness map si (as a 3-D Numpy array
-		or pycwp.cytools.interpolator.Interpolator3D), a source with
-		world coordinates src and a receiver with world coordinates
-		rcv, trace an optimum path from src to rcv using
+		For an L-by-3 array (or compatible sequence) or points in world
+		coordinates, march the path through self.box to produce and
+		return a map (i, j, k) -> L, where (i, j, k) is a cell index in
+		self.box and L is the accumulated length of the path defined by
+		the points.
 
-		  PathIntegrator(si).minpath(gs, gr, self.nmax,
-				self.itol[0], self.itol[1], self.ptol, 
-				self.box.cell, **self.optargs),
-
-		where gs and gr are grid coordinates of src and rcv,
-		respectively, according to self.box.cart2cell.
-
-		If fresnel is a positive numeric value, rays will be expanded
-		into ellipsoids that represent the first Fresnel zone for a
-		dominant wavelength specified as the value of fresnel, in the
-		same units as self.box.cell.
-
-		If intonly is True, only the integral of the slowness over the
-		optimum path will be returned. Otherwise, the optimum path will
-		be marched through self.box to produce a map (i, j, k) -> L,
-		where (i, j, k) is a cell index in self.box and L is the
-		accumulated length of the optimum path through that cell. The
-		return value in this case will be (pathmap, pathint), where
-		pathmap is this cell-to-length map and pathint is the
-		integrated slowness over the optimum path.
-
-		Any Exceptions raised by PathIntegrator.minpath will not be
-		caught by this method.
+		If fresnel is nonzero, it must be positive and will define the
+		radius of the Fresnel ellipsoid (possibly bent, if points
+		contains more than two points) into which the path will be
+		expanded.
 		'''
-		box = self.box
+		fresnel = float(fresnel or 0)
+		if fresnel < 0:
+			raise ValueError('Argument "fresnel" must be nonnegative')
 
-		# Build the integrator for the image and verify shape
-		integrator = PathIntegrator(si)
-		if integrator.data.shape != box.ncell:
-			raise ValueError('Shape of si must be %s' % (box.ncell,))
+		points = np.asarray(points, dtype=np.float64)
+		if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] < 2:
+			raise ValueError('Argument "points" must have shape (L, 3), L >= 2')
 
-		# Convert world coordinates to grid coordinates
-		gsrc = box.cart2cell(*src)
-		grcv = box.cart2cell(*rcv)
-
-		# Use preconfigured options to evaluate minimum path
-		popt, pint = integrator.minpath(gsrc, grcv, self.nmax,
-				self.itol[0], self.itol[1], self.ptol,
-				box.cell, raise_on_fail=True, **self.optargs)
-
-		# If only the integral is desired, just return it
-		if intonly and fresnel <= 0: return pint
-
-		# Convert path to world coordinates for marching
-		points = np.array([box.cell2cart(*p) for p in popt])
-
-		if (fresnel or 0) > 0:
+		if fresnel:
 			# Trace the Fresnel zone through the box
-			plens = box.fresnel(points, fresnel)
+			plens = self.box.fresnel(points, fresnel)
 
-			# Compute the total length of the path
+			# Compute the total path length
 			tlen = fsum(norm(r - l) for r, l in zip(points, points[1:]))
 
 			# Convert Fresnel-zone weights to integral contributions
 			wtot = fsum(plens.values())
-			plens = { k: tlen * v / wtot for k, v in plens.items() }
+			return { k: tlen * v / wtot for k, v in plens.items() }
 
-			# Reintegrate over Fresnel path
-			pint = fsum(v * si.evaluate(*k, grad=False)
-					for k, v in plens.items())
-
-			return pint if intonly else (plens, pint)
-
-		marches = box.raymarcher(points)
-
-		# Make sure single-segment march still a list
+		# March the points, ensure single-segment march still a list
+		marches = self.box.raymarcher(points)
 		if points.shape[0] < 3: marches = [marches]
+
 		# Accumulate the length of each path in each cell
 		plens = { }
 		for (st, ed), march in zip(zip(points, points[1:]), marches):
@@ -911,7 +904,102 @@ class PathTracer(object):
 
 		# Accumulate the contributions to each cell
 		# Return the path map and the path-length integral
-		return { k: fsum(v) for k, v in plens.items() }, pint
+		return { k: fsum(v) for k, v in plens.items() }
+
+
+	def trace(self, si, src, rcv, fresnel=0, intonly=False, mode='bent'):
+		'''
+		Given an map si (an Interpolator3D instance), a source with
+		world coordinates src and a receiver with world coordinates
+		rcv, compute a path integral from src to rcv using, when mode
+		is 'bent',
+
+		  PathIntegrator(si).minpath(gs, gr, self.nmax, self.atol,
+			self.rtol, self.ptol, self.box.cell, **self.bropts),
+
+		or, when mode is 'straight',
+
+		  WavefrontNormalIntegrator(si).pathint(gs, gr,
+			self.atol, self.rtol, self.box.cell, **self.sropts),
+
+		where gs and gr are grid coordinates of src and rcv,
+		respectively, according to self.box.cart2cell.
+
+		Note that, in 'straight' mode, the parameters self.ptol and
+		self.nmax have no significance.
+
+		In 'bent' mode, the path integral is a scalar value: the
+		integral from src to rcv through an optimized path. If fresnel
+		is a positive numeric value, rays in 'bent' mode will be
+		expanded into ellipsoids that represent the first Fresnel zone
+		for a dominant wavelength specified as the value of fresnel, in
+		the same units as self.box.cell.
+
+		In 'straight' mode, when fresnel is zero, the path integral is
+		a 2-tuple (c, s), where c is the wavefront-compensated path
+		integral and s is the uncompensated straight-ray integral.
+		Because compensated integrals are incompatible with Fresnel
+		zones, the the path integral for 'straight' mode when fresnel
+		is nonzero is a scalar value that represents the integral from
+		src to rcv over the straight Fresnel ellipsoid.
+
+		If intonly is True, only the path integral(s) will be returned.
+		Otherwise, the path will be marched through self.box to produce
+		a map (i, j, k) -> L, where (i, j, k) is a cell index in
+		self.box and L is the accumulated length of the optimum path
+		through that cell. The return value in this case will be
+		(pathmap, pathint), where pathmap is this cell-to-length map
+		and pathint is the single-value or double-value path integral.
+
+		Any Exceptions raised by WavefrontNormalIntegrator.pathint or
+		PathIntegrator.minpath will not be caught by this method.
+		'''
+		# Build the integrator for the image and verify shape
+		mode = str(mode).lower()
+		if mode == 'bent': integrator = PathIntegrator(si)
+		elif mode == 'straight': integrator = WavefrontNormalIntegrator(si)
+		else: raise ValueError('Argument "mode" must be "bent" or "straight"')
+
+		box = self.box
+		if integrator.data.shape != box.ncell:
+			raise ValueError('Shape of si must be %s' % (box.ncell,))
+
+		# Convert world coordinates to grid coordinates
+		gsrc = box.cart2cell(*src)
+		grcv = box.cart2cell(*rcv)
+
+		fresnel = max(fresnel or 0, 0)
+
+		if mode == 'bent':
+			# Use the bent-ray tracer to find an optimal path
+			points, pint = integrator.minpath(gsrc, grcv,
+					self.nmax, self.atol, self.rtol, self.ptol,
+					box.cell, raise_on_fail=True, **self.bropts)
+			# Convert path to world coordinates for marching
+			points = np.array([box.cell2cart(*p) for p in points])
+		else:
+			# Do path integration only without Fresnel zones
+			if not fresnel:
+				pint = integrator.pathint(gsrc, grcv, self.atol,
+						self.rtol, box.cell, **self.sropts)
+			else: pint = None
+			# Straight path just has a start and end
+			points = np.array([src, rcv], dtype=np.float64)
+
+		# If only the integral is desired, just return it
+		if intonly and not fresnel: return pint
+
+		# Trace the path for returning
+		plens = self.pathmap(points, fresnel)
+
+		if fresnel:
+			# Reintegrate over Fresnel path
+			pint = fsum(v * si.evaluate(*k, grad=False)
+						for k, v in plens.items())
+
+			return pint if intonly else (plens, pint)
+
+		return plens, pint
 
 
 @cython.cdivision(True)

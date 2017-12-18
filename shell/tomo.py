@@ -33,7 +33,7 @@ from pycwp.cytools.regularize import epr, totvar, tikhonov
 from pycwp.iterative import lsmr
 from pycwp.cytools.boxer import Segment3D
 
-from habis.pathtracer import PathTracer, WavefrontNormalIntegrator, TraceError
+from habis.pathtracer import PathTracer, TraceError
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
 from habis.formats import loadmatlist as ldmats, savez_keymat
@@ -112,7 +112,7 @@ class TomographyTask(object):
 	tomographic reconstructions. Each instances takes responsibility for a
 	set of arrival-time measurements provided to it.
 	'''
-	def __init__(self, elements, atimes, interpolator, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, interpolator, tracer, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker that collaborates with other ranks in the given
 		MPI communicator comm to compute tomographic images. Elements
@@ -124,6 +124,9 @@ class TomographyTask(object):
 		computing arrival-time path integrals), the interpolation will
 		be done by calling interpolator(s).
 
+		Path integrals (either bent- or straight-ray, with or without
+		compensation) will be evaluated with the PathTracer tracer.
+
 		Any arrival times corresponding to a (t, r) pair for which
 		elements[t] or elements[r] is not defined, or for which t == r,
 		will be discarded.
@@ -131,8 +134,9 @@ class TomographyTask(object):
 		if not callable(interpolator):
 			raise ValueError('Argument "interpolator" must be callable')
 
-		# Record the interpolator
+		# Record the interpolator and tracer
 		self.interpolator = interpolator
+		self.tracer = tracer
 
 		# Record the communicator
 		self.comm = comm
@@ -192,27 +196,25 @@ class StraightRayTracer(TomographyTask):
 	A subclass of TomographyTask to perform straight-ray path tracing.
 	'''
 	def __init__(self, elements, atimes, interpolator,
-			box, fresnel=None, comm=MPI.COMM_WORLD):
+			tracer, fresnel=None, comm=MPI.COMM_WORLD):
 		'''
 		Create a worker for straight-ray tomography on the element
-		pairs present in atimes. The imaging grid is represented by the
-		Box3D box.
+		pairs present in atimes.
 
 		If Fresnel is not None, it should be a positive floating-point
 		value. In this case, rays are represented as ellipsoids that
 		embody the first Fresnel zone for a principal wavelength of
-		fresnel (in units that match the units of box.cell).
+		fresnel (in units that match the units of tracer.box.cell).
 
-		For time compensation, slowness s will be interpolated by
+		For time compensation, a slowness s will be interpolated by
 		calling interpolator(s).
 		'''
 		# Initialize the data and communicator
 		super(StraightRayTracer, self).__init__(elements,
-							atimes, interpolator, comm)
+					atimes, interpolator, tracer, comm)
 
-		# Grab a reference to the box
-		self.box = box
-		ncell = self.box.ncell
+		# Figure out the grid dimensions
+		ncell = tracer.box.ncell
 
 		# Build the path-length matrix and RHS vector
 		indptr = [ 0 ]
@@ -221,22 +223,11 @@ class StraightRayTracer(TomographyTask):
 		self.trpairs = [ ]
 
 		for i, ((t, r), v) in enumerate(sorted(self.atimes.items())):
-			# March straight through the grid
-			seg = Segment3D(self.elements[t], self.elements[r])
-			# Compute the total segment length
-			if not fresnel:
-				# Build a simple row of the path-length matrix
-				path = self.box.raymarcher(seg)
-				for cidx, (s, e) in path.items():
-					data.append(seg.length * (e - s))
-					indices.append(np.ravel_multi_index(cidx, ncell))
-			else:
-				# Build a row based on the first Fresnel zone
-				hits = self.box.fresnel(seg, fresnel)
-				htot = fsum(iter(hits.values()))
-				for cidx, ll in hits.items():
-					data.append(seg.length * ll / htot)
-					indices.append(np.ravel_multi_index(cidx, ncell))
+			src, rcv = self.elements[t], self.elements[r]
+			plens = tracer.pathmap((src, rcv), fresnel)
+			for cidx, l in plens.items():
+				data.append(l)
+				indices.append(np.ravel_multi_index(cidx, ncell))
 			indptr.append(len(indices))
 			self.trpairs.append((t, r))
 
@@ -244,7 +235,7 @@ class StraightRayTracer(TomographyTask):
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def comptimes(self, si, normwt=1., tmin=0., **kwargs):
+	def comptimes(self, si, tmin=0.):
 		'''
 		Compute compensated and straight-ray arrival times for all
 		transmit-receive pairs in self.atimes through the medium
@@ -252,41 +243,32 @@ class StraightRayTracer(TomographyTask):
 
 		The compensated time adjusts the arrival-time with a factor
 		that accounts for deviation of the wavefront normal from the
-		straight path.
-
-		The argument normwt is passed as the "normwt" argument to the
-		WavefrontNormalIntegrator constructor.
+		straight path. Times are evalauted with self.tracer.trace in
+		'straight' mode.
 
 		The argument tmin should be a float such that any path with an
 		actual arrival time T and a compensated arrival time Tc that
 		fails to satisfy Tc >= tmin * T will be excluded from the
 		output.
 
-		The remaining keyword arguments kwargs are passed to the method
-		WavefrontNormalIntegrator.pathint to control the corrective
-		terms. The keyword "h" is forbidden.
-
 		The return value is a map from transmit-receive index pairs to
 		pairs of compensated and uncompensated straight-ray arrival
 		times. If a path integral fails for some transmit-receive pair,
 		it will not be included in the map.
 		'''
-		# Build the integrator
-		integrator = WavefrontNormalIntegrator(si, normwt=normwt)
-
 		tmin = float(tmin)
+		tracer = self.tracer
 
 		# Compute the corrective factor for each (t, r) pair
-		cell = self.box.cell
 		ivals = { }
 		for t, r in self.trpairs:
 			vt = self.atimes[t,r]
-			tx = bx.cart2cell(*self.elements[t])
-			rx = bx.cart2cell(*self.elements[r])
+			src, rcv = self.elements[t], self.elements[r]
 
 			try:
-				# Try to find the compensated straight-ray time
-				tc, ts = integrator.pathint(tx, rx, h=cell, **kwargs)
+				# Try to find the compensated times
+				tc, ts = tracer.trace(si, src, rcv, 
+							intonly=True, mode='straight')
 				# Check the time for sanity
 				if not ts >= tc >= tmin * vt:
 					raise ValueError('Compensated time out of range')
@@ -297,7 +279,7 @@ class StraightRayTracer(TomographyTask):
 
 		return ivals
 
-	def lsmr(self, s, epochs=1, coleq=False, pathopts={}, chambolle=None,
+	def lsmr(self, s, epochs=1, coleq=False, tmin=0., chambolle=None,
 			mfilter=None, partial_output=None, lsmropts={},
 			omega=1., mindiff=False, save_pathmat=None, save_times=None):
 		'''
@@ -306,7 +288,7 @@ class StraightRayTracer(TomographyTask):
 		implicit in this StraightRayTracer instance. The solution is
 		represented as a perturbation to the slowness s, an instance of
 		habis.slowness.Slowness or its descendants, defined on the grid
-		self.box.
+		self.tracer.box.
 
 		If coleq is True, the columns of each path-length operator will
 		be scaled so that they all have unity norm. The value of coleq
@@ -329,9 +311,9 @@ class StraightRayTracer(TomographyTask):
 
 		Within each epoch, an update to the slowness image is computed
 		based on the difference between the compensated arrival time
-		produced by self.comptimes(si, **pathopts) and the actual
-		arrival times in self.atimes, where si is an Interpolator3D
-		returned by calling self.interpolator(s).
+		produced by self.comptimes(si, tmin) and the actual arrival
+		times in self.atimes, where si is an Interpolator3D returned by
+		calling self.interpolator(s).
 
 		When mindiff is True, compensated arrival times will be replaced
 		by straight-ray times whenever the straight-ray time is closer
@@ -385,7 +367,7 @@ class StraightRayTracer(TomographyTask):
 			# Make sure non-root tasks are always silent
 			lsmropts['show'] = False
 
-		ncell = self.box.ncell
+		ncell = self.tracer.box.ncell
 
 		# Set a default for Boolean coleq
 		if coleq is True: coleq = 1e-3
@@ -428,7 +410,7 @@ class StraightRayTracer(TomographyTask):
 			nsi = self.interpolator(ns)
 
 			# Adjust RHS times with straight-ray compensation
-			tv = self.comptimes(nsi, **pathopts)
+			tv = self.comptimes(nsi, tmin)
 			# Find RMS arrival-time error for compensated model
 			terr = fsum((v[0] - self.atimes[k])**2
 					for k, v in tv.items())
@@ -1065,7 +1047,7 @@ if __name__ == "__main__":
 	else:
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes,
-				interpolator, tracer.box, fresnel, MPI.COMM_WORLD)
+				interpolator, tracer, fresnel, MPI.COMM_WORLD)
 
 		if hitmaps:
 			# Save the hitmaps
