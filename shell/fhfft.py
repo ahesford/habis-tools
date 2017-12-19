@@ -319,7 +319,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	outrows = [wset.tx2row(i) for i in outidx.values()]
 
 	if dofht:
-		if not fht.ispow2(gsize):
+		if gsize < 1 or (gsize & (gsize - 1)):
 			raise ValueError('Hadamard transform length must be a power of 2')
 
 		if signs is not None:
