@@ -17,7 +17,20 @@ from habis.habiconf import HabisConfigError, HabisConfigParser, matchfiles
 from habis.formats import savetxt_keymat, loadmatlist
 
 def usage(progname):
-	print('USAGE: %s <configuration>' % progname, file=sys.stderr)
+	print(f'USAGE: {progname} <configuration>', file=sys.stderr)
+
+
+def excludetimes(atimes, groups, groupsize):
+	'''
+	For a keymap atimes that maps element indices to round-trip arrival
+	times, return a similar keymap with all elements excluded that satisfy,
+	for an index i, (i // groupsize) in set(int(g) for g in groups).
+	'''
+	if int(groupsize) != groupsize:
+		raise ValueError('Value of groupsize must be an integer')
+	groupsize = int(groupsize)
+	groups = set(int(g) for g in groups)
+	return { k: v for k, v in atimes.items() if (k // groupsize) in groups }
 
 
 def getreflpos(args):
@@ -111,112 +124,95 @@ def trilaterationEngine(config):
 	'''
 	tsec = 'trilateration'
 	msec = 'measurement'
-	try:
-		# Try to grab the input time files
-		timefiles = matchfiles(config.getlist(tsec, 'timefile'))
-	except Exception as e:
-		err = 'Configuration must specify timefile in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
+
+	def _throw(e, msg, sec=tsec):
+		raise HabisConfigError.fromException(f'{msg} in section [{sec}]', e)
+
+	# Input time files
+	try: timefiles = matchfiles(config.getlist(tsec, 'timefile'))
+	except Exception as e: _throw(e, 'Configuration must specify timefile')
+
+	# Nominal element files
+	try: inelements = matchfiles(config.getlist(tsec, 'inelements'))
+	except Exception as e: _throw(e, 'Configuration must specify inelements')
+
+	# Initial guess for reflector positions
+	try: guessfile = config.get(tsec, 'guessfile')
+	except Exception as e: _throw(e, 'Configuration must specify guessfile')
+
+	# Reflector output file
+	try: outreflector = config.get(tsec, 'outreflector')
+	except Exception as e: _throw(e, 'Configuration must specify outreflector')
+
+	try: outelements = config.get(tsec, 'outelements', default=None)
+	except Exception as e: _throw(e, 'Invalid specification of optional outelements')
 
 	try:
-		# Try to grab the nominal element files
-		inelements = matchfiles(config.getlist(tsec, 'inelements'))
-	except Exception as e:
-		err = 'Configuration must specify inelements in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	# Grab the initial guess for reflector positions
-	try:
-		guessfile = config.get(tsec, 'guessfile')
-	except Exception as e:
-		err = 'Configuration must specify guessfile in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	# Grab the reflector output file
-	try:
-		outreflector = config.get(tsec, 'outreflector')
-	except Exception as e:
-		err = 'Configuration must specify outreflector in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		outelements = config.get(tsec, 'outelements', default=None)
-	except Exception as e:
-		err = 'Invalid specification of optional outelements in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Grab the number of processes to use (optional)
+		# Number of processes to use (optional)
 		nproc = config.get('general', 'nproc', mapper=int,
 				failfunc=process.preferred_process_count)
 	except Exception as e:
-		err = 'Invalid specification of optional nproc in [general]'
-		raise HabisConfigError.fromException(err, e)
+		_throw(e, 'Invalid specification of optional nproc', 'general')
 
 	try:
 		# Grab the sound speed and radius
 		c = config.get(msec, 'c', mapper=float)
 		radius = config.get(msec, 'radius', mapper=float)
 	except Exception as e:
-		err = 'Configuration must specify c and radius in [%s]' % msec
-		raise HabisConfigError.fromException(err, e)
+		_throw(e, 'Configuration must specify c and radius', msec)
+
+	# Convergence tolerance
+	try: tol = config.get(tsec, 'tolerance', mapper=float, default=1e-6)
+	except Exception as e: _throw(e, 'Invalid specification of optional tolerance')
+
+	# Determine whether variable sound speeds are allowed
+	try: optc = config.get(tsec, 'optc', mapper=bool, default=False)
+	except Exception as e: _throw(e, 'Invalid specification of optional optc')
+
+	# Determine whether variable target radii are allowed
+	try: optr = config.get(tsec, 'optr', mapper=bool, default=False)
+	except Exception as e: _throw(e, 'Invalid specification of optional optr')
 
 	try:
-		# Grab the convergence tolerance
-		tol = config.get(tsec, 'tolerance', mapper=float, default=1e-6)
-	except Exception as e:
-		err = 'Invalid specification of optional tolerance in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Determine whether variable sound speeds are allowed
-		optc = config.get(tsec, 'optc', mapper=bool, default=False)
-	except Exception as e:
-		err = 'Invalid specification of optional optc in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Determine whether variable target radii are allowed
-		optr = config.get(tsec, 'optr', mapper=bool, default=False)
-	except Exception as e:
-		err = 'Invalid specification of optional optr in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Pull the facet (coplanar element groups) size
+		# Facet (coplanar element groups) size
 		fctsize = config.get(tsec, 'fctsize', mapper=int, default=1)
 		if fctsize < 1: raise ValueError('fctsize must be a positive integer')
-	except Exception as e:
-		err = 'Invalid specification of optional fctsize in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
+	except Exception as e: _throw(e, 'Invalid specification of optional fctsize')
+
+	# Maximum iteration count
+	try: maxiter = config.get(tsec, 'maxiter', mapper=int, default=1)
+	except Exception as e: _throw(e, 'Invalid specification of optional maxiter')
+
+	# Itereation stop distance
+	try: stopdist = config.get(tsec, 'stopdist', mapper=float, default=0)
+	except Exception as e: _throw(e, 'Invalid specification of optional stopdist')
 
 	try:
-		# Pull the maximum iteration count
-		maxiter = config.get(tsec, 'maxiter', mapper=int, default=1)
-	except Exception as e:
-		err = 'Invalid specification of optional maxiter in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Pull the itereation stop distance
-		stopdist = config.get(tsec, 'stopdist', mapper=float, default=0)
-	except Exception as e:
-		err = 'Invalid specification of optional stopdist in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
-
-	try:
-		# Pull the weight for coplanarity constraints
+		# Weight for coplanarity constraints
 		planewt = config.get(tsec, 'planewt', mapper=float, default=1.0)
 		if planewt < 0: raise ValueError('planewt must be nonnegative')
-	except Exception as e:
-		err = 'Invalid specification of optional planewt in [%s]' % tsec
-		raise HabisConfigError.fromException(err, e)
+	except Exception as e: _throw(e, 'Invalid specification of optional planewt')
+
+	try:
+		# Exclusion list and group size
+		exclusions = config.get(tsec, 'exclusions',
+					mapper=dict, default=None, checkmap=False)
+	except Exception as e: _throw(e, 'Invalid specification of optional exclusions')
 
 	# Accumulate all element coordinates and arrival times
 	eltpos = loadmatlist(inelements)
 	times = { k[0]: v
 			for k, v in loadmatlist(timefiles, nkeys=2).items()
 			if k[0] == k[1] }
+
+	# Exclude elements if desired
+	if exclusions:
+		otlen = len(times)
+		times = excludetimes(times, **exclusions)
+		ntlen = len(times)
+		if otlen != ntlen:
+			print(f'Exclusion criteria eliminate {otlen - ntlen} elements')
+
 	# Only consider elements in both sets
 	elements = sorted(set(eltpos).intersection(times))
 

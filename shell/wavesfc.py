@@ -62,8 +62,15 @@ def wavesfcEngine(config):
 	try:
 		# Use the reflector radius for missing arrival-time values
 		usemiss = config.get(wsection, 'usemiss', mapper=bool, default=False)
-	except Eception as e:
+	except Exception as e:
 		err = 'Invalid specification of optional usemiss in [%s]' % wsection
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		# Use the reflector radius if it is larger than time-imputed radius
+		maxrad = config.get(wsection, 'maxrad', mapper=bool, default=False)
+	except Exception as e:
+		err = 'Invalid specification of optional maxrad in [%s]' % wsection
 		raise HabisConfigError.fromException(err, e)
 
 	# Read the element positions and backscatter arrival times
@@ -111,6 +118,8 @@ def wavesfcEngine(config):
 				# Use default radius or skip missing value
 				if usemiss: ds = rad
 				else: continue
+			else:
+				if maxrad: ds = max(rad, ds)
 
 			# Valid points will be inside segment or opposite reflector
 			if ds <= ll:
