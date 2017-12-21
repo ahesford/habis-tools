@@ -254,7 +254,7 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
 	def pathint(self, a, b, double atol, double rtol, h=1.0,
-			double normwt=1.0, unsigned int ncache=512):
+			double normwt=1.0, unsigned int ncache=512, int reclimit=-1):
 		'''
 		Given a 3-D path from point a to point b, in grid coordinates,
 		use an adaptive Gauss-Kronrod quadrature of order 15 to
@@ -283,6 +283,10 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		path) at point a. If this reset occurs after early cache values
 		have been discarded, accuracy may suffer and a warning will be
 		printed. Increase the size of ncache to mitigate this issue.
+
+		The value of reclimit, when nonnegative, limits the number of
+		times the path will be subdivided to seek convergence of the
+		path integral. If reclimit is negative, no limit applies.
 
 		The return value is a tuple (I1, I2), where I1 is the
 		compensated integral and I2 is the uncompensated straight-ray
@@ -325,7 +329,8 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		else: ctx.normals = <double *>NULL
 
 		# Integrate and free normal storage
-		rcode = self.gausskron(ivals, 2, atol, rtol, 0., 1., <void *>(&ctx))
+		rcode = self.gausskron(ivals, 2, atol, rtol,
+				0., 1., reclimit, <void *>(&ctx))
 		free(ctx.normals)
 
 		if rcode != IntegrableStatus.OK:
@@ -507,7 +512,7 @@ cdef class PathIntegrator(Integrable):
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
 	def pathint(self, points, double atol, double rtol,
-			h=1.0, bint grad=False, bint gk=False):
+			h=1.0, bint grad=False, bint gk=False, int reclimit=-1):
 		'''
 		Given control points specified as rows of an N-by-3 array of
 		grid coordinates, use an adaptive quadrature to integrate the
@@ -536,6 +541,10 @@ cdef class PathIntegrator(Integrable):
 		to compute path integrals. Otherwise, adaptive Simpson
 		quadrature (which re-uses function evaluations at sub-interval
 		endpoints and may be more efficient) will be used.
+
+		The value of reclimit, when nonnegative, limits the number of
+		times the path will be subdivided to seek convergence of the
+		path integral. If reclimitis negative, no limit applies.
 
 		If the second dimension of points does not have length three,
 		or if any control point falls outside the interpolation grid,
@@ -620,12 +629,14 @@ cdef class PathIntegrator(Integrable):
 				if rcode != IntegrableStatus.OK:
 					errmsg = self.errmsg(rcode)
 					raise ValueError('Integrand evaluation failed with message "%s"' % (errmsg,))
-				rcode = self.simpson(results, nval, atol, rtol, <void *>(&ctx), ends)
+				rcode = self.simpson(results, nval, atol, rtol,
+						reclimit, <void *>(&ctx), ends)
 				if rcode != IntegrableStatus.OK:
 					errmsg = self.errmsg(rcode)
 					raise ValueError('Simpson integration failed with message "%s"' % (errmsg,))
 			else:
-				rcode = self.gausskron(results, nval, atol, rtol, 0., 1., <void *>(&ctx))
+				rcode = self.gausskron(results, nval, atol, rtol,
+						0., 1., reclimit, <void *>(&ctx))
 				if rcode != IntegrableStatus.OK:
 					errmsg = self.errmsg(rcode)
 					raise ValueError('Gauss-Kronrod integration failed with message "%s"' % (errmsg,))
