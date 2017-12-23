@@ -952,8 +952,12 @@ class Waveform(object):
 		else:
 			# Shifted window will wrap; manually unwrap
 			data = np.zeros((nsamp,), dtype=dtype)
-			idxmap = [i % nsamp for i in range(nstart, nend)]
-			data[idxmap] = self._data
+			# Start of old data moves to right part of signal
+			nright = nsamp - nstart
+			data[-nright:] = self._data[:nright]
+			# End of old data moves to left part of signal
+			nleft = nend - nsamp
+			data[:nleft] = self._data[-nleft:]
 			shwave.setsignal(data, 0)
 
 		return shwave
