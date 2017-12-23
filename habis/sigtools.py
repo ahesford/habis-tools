@@ -7,15 +7,22 @@ Routines for manipulating HABIS signals.
 
 import numpy as np, math
 import collections
-from numpy import fft, linalg as nla
+from numpy import linalg as nla
 from scipy import linalg as la
 from scipy.signal import hilbert
 from scipy.stats import linregress
+from scipy.fftpack.helper import next_fast_len
 from operator import itemgetter, add
 from itertools import groupby
 
-from pycwp import cutil, mio, signal, stats
+try:
+	import pyfftw
+except ImportError:
+	from numpy import fft
+else:
+	fft = pyfftw.interfaces.numpy_fft
 
+from pycwp import cutil, mio, signal, stats
 
 def _valley(lpk, hpk):
 	'''
@@ -823,7 +830,7 @@ class Waveform(object):
 		Oversample the waveform by an (integer) factor n.
 		'''
 		s, l = self.datawin
-		l2 = cutil.ceilpow2(l)
+		l2 = next_fast_len(l)
 
 		# Compute the FFT of the (padded) data window
 		ssig = self.fft((s, l2)).getsignal()
@@ -977,12 +984,12 @@ class Waveform(object):
 	def xcorr(self, ref, osamp=1):
 		'''
 		Perform cyclic cross-correlation of self and ref using DFTs. If
-		osamp is provided, it must be a nonnegative power of two that
+		osamp is provided, it must be a nonnegative regular number that
 		specifies an oversampling rate for the signal. Sample index I
 		at the input sampling rate corresponds to index I * osamp at
 		the output sampling rate.
 
-		All transforms are always rounded to a power of two. The
+		All transforms are always rounded to a regular number. The
 		cross-correlation signal will contain only the nonzero portion
 		of the cross-correlation (self.nsamp + ref.nsamp - 1 samples),
 		interpolated according to the oversampling rate.
@@ -992,8 +999,8 @@ class Waveform(object):
 		'''
 		if osamp < 1:
 			raise ValueError('Oversampling factor must be at least unity')
-		if cutil.ceilpow2(osamp) != osamp:
-			raise ValueError('Oversampling factor must be a power of 2')
+		if next_fast_len(osamp) != osamp:
+			raise ValueError('Oversampling factor must be a regular number')
 
 		# Find the data windows that will be convolved
 		sstart, slength = self.datawin
@@ -1005,7 +1012,7 @@ class Waveform(object):
 			rstart, rlength = ref.datawin
 
 		# Find the necessary padding for convolution
-		npad = cutil.ceilpow2(slength + rlength - 1)
+		npad = next_fast_len(slength + rlength - 1)
 		# Find the oversampled convolution length
 		nint = osamp * npad
 
