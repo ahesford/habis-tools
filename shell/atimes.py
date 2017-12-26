@@ -14,12 +14,18 @@ from pycwp import process, stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat, loadmatlist, savez_keymat
-from habis.sigtools import Waveform
+from habis.sigtools import Waveform, Window
 
 
 def usage(progname):
 	print(f'USAGE: {progname} <configuration>', file=sys.stderr)
 
+def tr2rt(x):
+	'''
+	For a tuple x, return (x[1], x[0]). No sanity checks are made to ensure
+	that x can be indexed or that x has at least two indices.
+	'''
+	return (x[1], x[0])
 
 def finddelays(nproc=1, *args, **kwargs):
 	'''
@@ -99,37 +105,284 @@ def finddelays(nproc=1, *args, **kwargs):
 	return delays
 
 
-def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
+def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	'''
-	Given a datafile containing a habis.formats.WaveformSet, perform
-	cross-correlation on every stride-th waveform, starting at index start,
-	to identify the delay of the received waveform relative to a reference
-	according to
+	For the signal sig, isolate a peak by calling
 
-		wave = datafile.getwaveform(i, j, maptids=True)
-		delay = wave.delay(reference, osamp=osamp) + datafile.f2c.
+		sig.isolatepeak(exd, **kwargs),
 
-	The addition of datafile.f2c adjusts all delays to a common base time.
+	were exd is nearmap[key] - f2c if such a value exists, or else is
+	neardefault - f2c when neardefault is numeric and None when neardefault
+	is None.
 
-	The index (i,j) of the WaveformSet is determined by an optional keyword
-	argument 'elmap'. When accessing waveforms for delay analysis, the
-	transmit element j is mapped to an appropriate transmission number
-	according to any transmit-group configuration specified in the
-	WaveformSet. Thus, either all transmit elements j must have
-	corresponding receive-channel records in the WaveformSet file, an
-	explicit group map must be provided (with the optional kwarg 'groupmap'
-	described below), or the file must specify no transmit-group
-	configuration (i.e., transmissions must be stored in element order).
+	A ValueError will be raised if a peak cannot be isolated.
+	'''
+	try: exd = nearmap[key] - f2c
+	except KeyError:
+		if neardefault is None: exd = None
+		else: exd = neardefault - f2c
 
-	The reference waveform is read from reffile using the method
-	habis.sigtools.Waveform.fromfile.
+	return sig.isolatepeak(exd, **kwargs)
+
+
+def getimertime(sig, threshold=1, **kwargs):
+	'''
+	For the signal sig, compute the IMER function
+
+		imer = sig.imer(**kwargs)
+
+	and return the index of the first sample of imer that is at least as
+	large as threshold * mean(imer).
+
+	An IndexError will be raised if a suitable index cannot be identified.
+	'''
+	if threshold < 0: raise ValueError('IMER threshold must be positive')
+
+	# Compute the IMER function and its mean
+	imer = sig.imer(**kwargs).getsignal(sig.datawin, forcecopy=False)
+	mval = threshold * np.mean(imer)
+
+	# Detect and flip negative peaks
+	if mval < 0:
+		imer = -imer
+		mval = -mval
+
+	try: dl = np.nonzero(imer >= mval)[0][0]
+	except IndexError: raise IndexError('Unable to find IMER threshold crossing')
+
+	# Linearly interpolate within the interval, if possible
+	try:
+		v0, v1 = imer[dl-1:dl+1]
+	except (ValueError, IndexError):
+		pass
+	else:
+		if v0 != v1: dl += (mval - v1) / (v1 - v0)
+
+	return dl + sig.datawin.start
+
+
+def applywindow(sig, key, f2c=0, map={ }, default=None, **kwargs):
+	'''
+	For a given signal sig, search for a given window map[key]. The map
+	should provide values of the form (start, length) that are suitable to
+	pass as the first argument to Waveform.window.
+
+	If map[key] does not exist, the default window given by default (if it
+	is not None) will be used. The default value can be anything suitable
+	as the first argument of Waveform.window. As a special case, if default
+	is a dictionary and contains the 'relative' key, the value of that key
+	will be passed as the 'relative' keyword argument to Waveform.window.
+
+	If map[key] = (start, length) is found, or if the default value is of
+	the form (start, length), the actual window (start - f2c, length) will
+	be used. If default is a dictionary that contains the 'relative' key,
+	the values will not be modified. Otherwise, if default is a dictionary
+	that does not contain the 'relative' key, values corresponding to keys
+	'start' or 'end' (if they exist) will be adjusted by subtracting f2c.
+
+	If map[key] does not exist and default is not specified, no window will
+	be applied, and the returned signal will be identical to sig.
+
+	If a window is identified (either from map[key] or default), the return
+	value will be
+
+		sig.window(window, **kwargs)
+
+	where, if 'relative' was specified as a key in 'default' as a
+	dictionary, the value of 'relative' will be added to kwargs.
+	'''
+	try:
+		start, length = map[key]
+		win = { 'start': start, 'length': length }
+	except KeyError:
+		if not default: return sig
+
+		# Make a copy of a dictionary default
+		if hasattr(default, 'keys'):
+			win = dict(default)
+		else:
+			start, length = default
+			win = { 'start': start, 'length': length }
+
+	try:
+		relative = win.pop('relative')
+	except KeyError:
+		# For absolute iwndows, adjust start and end wrt f2c
+		try: v = max(win['start'] - f2c, 0)
+		except KeyError: pass
+		else: win['start'] = v
+
+		try: v = max(win['end'] - f2c, 0)
+		except KeyError: pass
+		else: win['end'] = v
+	else:
+		kwargs['relative'] = relative
+
+	return sig.window(win, **kwargs)
+
+
+def wavegen(data, elmap, osamp=1, neighbors={ },
+		bandpass=None, window=None, start=0, stride=1):
+	'''
+	For a WaveformSet data and a map from receive indices to lists of
+	transmit indices elmap, yield a (t, r) tuple and corresponding Waveform
+	object for (t, r) pairs represented in elmap. The yield order will
+	be sorted primarily by receive index and secondarily by transmit index.
+	Of the (t, r) pairs available in data, every stride-th waveform,
+	starting with the start-th waveform, will be yielded.
+
+	If neighbors is not empty, it should map element indices to a
+	collection of neighboring elements. (The neighbor collection for each
+	key index is assumed to contain the key index, whether or not it
+	actually does. Thus, an element's neighborhood always includes itself.)
+	In this case, the Waveform for each (t, r) pair is actually an average
+	of all Waveforms, aligned with an oversampling rate osamp, from each
+	transmit index in the neighborhood of t to each receive index in the
+	neighborhood of r. The average will be aligned (again with an
+	oversampling rate of osamp) to the original waveform for pair (t, r),
+	so the first arrival of the average should be close to the first
+	arrival for the original waveform if the waveforms are well behaved.
+
+	If bandpass is not None, it should be a dictionary suitable for passing
+	as keyword arguments (**bandpass) to Waveform.bandpass for each
+	waveform pulled from data prior to further processing.
+
+	If window is not None, it should be a dictionary suitable for passing
+	as keyword arguments (**window) to applywindow. The first three
+	arguments to applywindow are provided by this function and should not
+	appear in the window dictionary.
+	'''
+	# Build a list of neighborhoods over which waveforms will be averaged
+	neighborhoods = defaultdict(set)
+	rxelts = set(data.rxidx)
+	txelts = set(data.txidx)
+	emptyset = set()
+
+	for r in rxelts.intersection(elmap):
+		# Build a local neighborhood around the receive pair
+		lrn = {r}.union(neighbors.get(r, emptyset))
+		for t in txelts.intersection(elmap[r]):
+			# Build a local neighborhood around the transmit pair
+			ltn = {t}.union(neighbors.get(t, emptyset))
+			# Record the neighborhood for this (t, r) pair
+			neighborhoods[t,r].update((tt, rr) for tt in ltn for rr in lrn)
+
+	# Sort desired arrival times by r-t, pull local share
+	trpairs = set(sorted(neighborhoods, key=tr2rt)[start::stride])
+	# Only local neighborhoods are needed
+	neighborhoods = { k: neighborhoods[k] for k in trpairs }
+
+	# Build a map from elements to dependent neighborhoods
+	nbrdeps = defaultdict(set)
+	for nh, trpairs in neighborhoods.items():
+		for tr in trpairs: nbrdeps[tr].add(nh)
+
+	# Strip elmap to contain only locally required pairs
+	elmap = defaultdict(list)
+	for t, r in nbrdeps: elmap[r].append(t)
+
+	# Keep track of running averages for active (t, r) pairs as (wave, count, datawin)
+	averages = { }
+
+	# Cache a receive-channel record for faster access
+	hdr, wforms, tmap = None, None, None
+
+	# Process waveforms in order, with transmit index varying most rapidly
+	for tid, rid in sorted(nbrdeps, key=tr2rt):
+		if not hdr or hdr.idx != rid:
+			# Pull transmit waveforms in order
+			elm = sorted(elmap[rid])
+			# Map transmit indices to desired rows
+			tmap = { t: i for i, t in enumerate(elm) }
+
+			# Pull out the desired transmit rows for this receive channel
+			try:
+				hdr, wforms = data.getrecord(rid, tid=elm,
+						dtype=np.float32, maptids=True)
+			except KeyError:
+				raise KeyError(f'Unable to load Rx {rid}, Tx {elm}')
+
+		# Grab the signal as a Waveform
+		sig = Waveform(data.nsamp, wforms[tmap[tid]], hdr.win.start)
+
+		if bandpass:
+			# Remove DC bias to reduce Gibbs phenomenon
+			sig.debias()
+			# Bandpass and crop to original data window
+			sig = sig.bandpass(**bandpass).window(sig.datawin)
+
+		# Apply a window before alignment, if desired
+		if window: sig = applywindow(sig, (tid,rid), data.f2c, **window)
+
+		# Update averages for all neighborhoods containing this pair
+		for nbr in nbrdeps[tid,rid]:
+			try:
+				# Pull an existing running average
+				avg, count, dwin = averages[nbr]
+			except KeyError:
+				# No running average; start one
+				avg = sig
+				count = 1
+				dwin = None
+			else:
+				# If this pair is central, align average to its wave
+				# Otherwise, align this wave to existing average
+				if (tid,rid) == nbr:
+					avg = sig + avg.aligned(sig, osamp=osamp)
+				else: avg += sig.aligned(avg, osamp=osamp)
+				count += 1
+
+			# If this signal is the key for this neighborhood, copy datawin
+			if (tid, rid) == nbr: dwin = sig.datawin
+
+			# Just update an incomplete neighborhood and move on
+			if count < len(neighborhoods[nbr]):
+				averages[nbr] = avg, count, dwin
+				continue
+
+			# If neighborhood is complete, 
+			averages.pop(nbr, None)
+
+			if count > 1:
+				# Adding multiple signals may change data window
+				if dwin is not None: avg = avg.window(dwin)
+				# Convert multi-signal sum to an average
+				avg /= count
+
+			# Yield the average waveform
+			yield nbr, avg
+
+
+def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
+	'''
+	Given a datafile containing a habis.formats.WaveformSet, find arrival
+	times using cross-correlation or IMER for waveforms returned by
+
+	  wavegen(data, elmap, osamp, start=start, stride=stride, **exargs),
+
+	where data is the WaveformSet encoded in datafile, elmap is provided by
+	an optional keyword argument described below, and exargs is a subset of
+	kwargs as described below.
+
+	When accessing waveforms for delay analysis, the transmit element j is
+	mapped to an appropriate transmission number according to any
+	transmit-group configuration specified in the WaveformSet. Thus, either
+	all transmit elements j must have corresponding receive-channel records
+	in the WaveformSet file, an explicit group map must be provided (with
+	the optional keyword argument groupmap described below), or the file
+	must specify no transmit-group configuration (i.e., transmissions must
+	be stored in element order).
+
+	For arrival times determined from cross-correlation, a reference
+	waveform (as habis.sigtools.Waveform) is read from reffile. For IMER
+	arrival times, reffile is ignored.
 
 	The return value is a 2-tuple containing, first, a dictionary that maps
 	a (t,r) transmit-receive index pair to an adjusted delay in samples;
 	and, second, a dictionary that maps reasons for skipping waveforms to
 	the number of waveforms skipped for that reason.
 
-	The optional kwargs are parsed for the following keys:
+	Optional keyword arguments include:
 
 	* flipref: A Boolean (default: False) that, when True, causes the
 	  refrence waveform to be negated when read.
@@ -146,42 +399,6 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  by amplitude (e.g., minsnr, thresholds in peaks) should be altered to
 	  account for the squared amplitudes.
 
-	* bandpass: A dictionary of keyword arguments passed to
-	  habis.sigtools.Waveform.bandpass() that will filter each waveform
-	  prior to further processing.
-
-	* delaycache: A map from transmit-receive element pairs (t, r) to a
-	  precomputed delay d. If a value exists for a given pair (t, r), the
-	  precomputed value will be used in favor of explicit computation.
-
-	* window: A map that defines the windowing of signals. Keys in the
-	  window map may be:
-
-	  - map: A map from transmit-receive pairs (j,i) to a (start, length)
-	    tuple that defines the window to apply to waveform (i,j) in the
-	    WaveformSet. The start and length should be specified in samples,
-	    with start relative to 0 f2c.
-
-	  - default: A map that contains exactly two of the keys 'start',
-	    'length' or 'end' describing window parameters (in samples) to
-	    apply to any waveform not identified explicitly in the above map.
-	    The map may also contain an optional 'relative' key with an
-	    associated value of either 'signal' or 'datawin'. If 'relative' is
-	    not specified, the window start and end are relative to 0 f2c, so
-	    the applied window is actually
-
-	      start -> start - datafile.f2c
-	      end   -> end - datafile.f2c
-
-	    If 'relative' is specified, the 'start' and 'end' parameters of the
-	    window are not adjusted and the value of the 'relative' key is
-	    passed as the 'relative' keyword argument to Waveform.window.
-
-	  - tails: A value passed to the 'tails' argument of the method
-	    Waveform.window(), and is either 1) an integer half-width of a Hann
-	    window applied to each side, or 2) a list consisting of the
-	    concatenation of the start-side and end-side window profiles.
-
 	* minsnr: A sequence (mindb, noisewin) used to define the minimum
 	  acceptable SNR in dB (mindb) by comparing the peak signal amplitude
 	  to the minimum standard deviation over a sliding window of width
@@ -189,48 +406,33 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  optional window. Delays will not be calculated for signals fail to
 	  exceed the minimum threshold.
 
-	* peaks: A kwargs map to be passed to Waveform.isolatepeak for every
-	  waveform. The map must not contain the 'index' keyword. Two
-	  additional keys may be provided:
-
-	  - nearmap: A map from transmit-receive indices (j,i) to expected
-	    round-trip delays (in samples, relative to 0 f2c). A waveform (i,j)
-	    will use the value (nearmap[j,i] - datafile.f2c), if it exists, as
-	    the 'index' argument to Waveform.isolatepeak.
-
-	  - neardefault: A scalar default value to use as an expected
-	    round-trip delay (in samples, relative to 0 f2c). Thus, if the
-	    value nearmap[j,i] does not exist for some waveform (i,j) in the
-	    WaveformSet, the value (nearmap[j,i] - datafile.f2c) will be used
-	    as the 'index' argument to Waveform.isolatepeak.
-
-	  If no nearmap or neardefault value can be identified, the index will
-	  be 'None' to isolate the dominant peak.
+	* peaks: A dictionary suitable for passing as keyword arguments
+	  (**peaks) to the isolatepeak function, excluding the first three
+	  arguments.
 
 	  *** NOTE: peak windowing is done after overall windowing and after
 	  possible exclusion by minsnr. ***
 
 	* groupmap: A map from global element indices to (local index,
 	  group index) tuples that will be assigned to the "groupmap" property
-	  of the loaded WaveformSet. As part of the property assignment, the
-	  groupmap is checked for consistency with receive-channel records in
-	  the WaveformSet. Assigning the groupmap property allows (and is
-	  required for) specification of transmit channels that are not present
-	  in the WaveformSet as receive-channel records.
+	  of the loaded WaveformSet. Assigning the groupmap property allows
+	  (and is required for) specification of transmit channels that are not
+	  present in the WaveformSet as receive-channel records.
 
 	* elmap: A map, or a list of maps, from desired receive element
 	  indices to one or more transmit indices for which arrival times
 	  should be computed. If this parameter is a list of maps, the actual
 	  map will be the union of all maps. Any map can also be specified by
-	  the magic strings 'backscatter', interpreted as
+	  the magic string 'backscatter', interpreted as
 
-	  	{ i: [i] for i in datafile.rxidx },
-
-	  or 'block', interpreted as
-
-		{ i: list(datafile.rxidx) for i in datafile.rxidx }.
+	  	{ i: [i] for i in datafile.rxidx }.
 
 	  The default map is 'backscatter'.
+
+	* delaycache: A map from transmit-receive element pairs (t, r) to a
+	  precomputed delay d. If a value exists for a given pair (t, r) in the
+	  WaveformSet and the element map, the precomputed value will be used
+	  in favor of explicit computation. 
 
 	* queue: If not none, the return values are passed as an argument to
 	  queue.put().
@@ -244,12 +446,19 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	  Estimates of energy leaks ignore any fractional parts of arrival
 	  times. Energy leaks are estimated after any bandpass filtering or
 	  windowing. Estimates never consider peak isolation.
-	'''
-	# Pull a copy of the IMER configuration, if it exists
-	imer = dict(kwargs.pop('imer', ()))
 
+	* imer: A dictionary to provide all but the first argument of
+	  getimertime. If this is provided, getimertime will be used instead of
+	  (optional) peak isolation and cross-correlation to determine an
+	  arrival time.
+
+	Any unspecified keyword arguments are passed to wavegen.
+	'''
 	# Read the data and reference
 	data = WaveformSet.fromfile(datafile)
+
+	# Pull a copy of the IMER configuration, if it exists
+	imer = dict(kwargs.pop('imer', ()))
 
 	# Read the reference if IMER times are not desired
 	if not imer: ref = Waveform.fromfile(reffile)
@@ -284,90 +493,33 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	elmap = kwargs.pop('elmap', 'backscatter')
 	if isinstance(elmap, str): elmap = [elmap]
 
-	if not hasattr(elmap, 'items'):
+	try: elmap.items
+	except AttributeError:
 		# Merge a collection of maps
-		dmap = defaultdict(list)
+		dmap = defaultdict(set)
 		for en, elm in enumerate(elmap):
 			if isinstance(elm, str):
 				elm = elm.strip().lower()
 				if elm == 'backscatter':
-					elm = { i: [i] for i in data.rxidx }
-				elif elm == 'block':
-					elm = { i: list(data.rxidx) for i in data.rxidx }
-				else:
-					raise ValueError("Invalid magic element map specified '%s'" % elm)
-
-			try: keys = elm.keys()
-			except TypeError: raise TypeError('Invalid element map (index %d)' % en)
-
-			for k in keys:
-				# v may be a collection or a scalar
-				v = elm[k]
-				try: dmap[k].extend(v)
-				except TypeError: dmap[k].append(v)
-
-		# Replace the map
-		elmap = dict(dmap)
-		del dmap
-
-	try: keys = elmap.keys()
-	except TypeError: raise TypeError('Invalid element map')
-
-	# Flatten and sort the element map into a sorted list for striding
-	ellst = [ ]
-	rxelts = set(data.rxidx)
-	txelts = set(data.txidx)
-
-	for k in sorted(keys):
-		# Ignore receive elements not in this file
-		if k not in rxelts: continue
-
-		# v is either a collection or a scalar
-		v = elmap[k]
-
-		# Build a sorted list of desired transmit elements in this file
-		try: s = sorted(sv for sv in set(v) if sv in txelts)
-		except TypeError: s = [v] if v in txelts else []
-
-		# Store the flattened pair list
-		ellst.extend((k, sv) for sv in s)
-		# Write the trimmed, sorted list back to the map
-		elmap[k] = s
+					elm = { i: {i} for i in data.rxidx }
+				else: raise ValueError(f'Invalid magic element map "{elm}"')
+			try:
+				for k, v in elm.items():
+					# v may be a collection or a scalar
+					try: dmap[k].update(v)
+					except TypeError: dmap[k].add(v)
+			except (TypeError, AttributeError):
+				raise TypeError(f'Invalid element map (index {en})')
+		elmap = dmap
+	else:
+		# Copy the elmap, converting the transmit collections to sets
+		elmap = { k: set(v) for k, v in elmap.items() }
 
 	# Unpack minimum SNR requirements
 	minsnr, noisewin = kwargs.pop('minsnr', (None, None))
 
-	# Pull a copy of the windowing configuration
-	window = dict(kwargs.pop('window', ()))
-
-	# Make sure a per-channel map and empty default window exist
-	window.setdefault('map', { })
-	window.setdefault('default', { })
-
-	# Determine the relative mode in the default window
-	if window['default']:
-		relative = window['default'].pop('relative', None)
-		if not relative:
-			# Compensate start and end for f2c in absolute windows
-			try: v = max(window['default']['start'] - data.f2c, 0)
-			except KeyError: pass
-			else: window['default']['start'] = v
-
-			try: v = max(window['default']['end'] - data.f2c, 0)
-			except KeyError: pass
-			else: window['default']['end'] = v
-		else:
-			# Move 'relative' argument to top-level map
-			window['relative'] = relative
-
-	bandpass = kwargs.pop('bandpass', None)
-
 	# Pull the optional peak search criteria
 	peaks = dict(kwargs.pop('peaks', ()))
-
-	if peaks:
-		nearmap = peaks.pop('nearmap', { })
-		neardefault = peaks.pop('neardefault', None)
 
 	# Determine whether to allow negative correlations
 	negcorr = kwargs.pop('negcorr', False)
@@ -378,116 +530,63 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 	# Grab an optional result queue
 	queue = kwargs.pop('queue', None)
 
-	if len(kwargs):
-		raise TypeError("Unrecognized keyword argument '%s'" %  (next(iter(kwargs.keys())),))
-
-	# Compute the strided results
+	# Pre-populate cached values and restrict elmap to needed pairs
 	result = { }
+	relmap = defaultdict(set)
+	rxelts = set(data.rxidx)
+	txelts = set(data.txidx)
+	for r in rxelts.intersection(elmap):
+		for t in txelts.intersection(elmap[r]):
+			try: result[t,r] = delaycache[t,r]
+			except KeyError: relmap[r].add(t)
+	elmap = relmap
 
-	# Cache a receive-channel record for faster access
-	hdr, wforms, tmap = None, None, None
+	# Only keep a local portion of cached values
+	result = { k: result[k] for k in sorted(result)[start::stride] }
 
 	numneg = 0
 	skipped = defaultdict(int)
+	skipped['cached'] = len(result)
 
-	for rid, tid in ellst[start::stride]:
-		try:
-			# Use a cahced value if possible
-			result[(tid, rid)] = delaycache[(tid, rid)]
-			skipped['cached'] += 1
-			continue
-		except KeyError: pass
-
-		if not hdr or hdr.idx != rid:
-			# Pull out the desired transmit rows for this receive channel
-			try:
-				hdr, wforms = data.getrecord(rid, tid=elmap[rid],
-						dtype=np.float32, maptids=True)
-			except KeyError:
-				raise KeyError('Unable to load Rx %d, Tx %s' % (rid, elmap[rid]))
-			# Map transmit indices to desired rows
-			tmap = dict(reversed(j) for j in enumerate(elmap[rid]))
-
-		# Grab the signal as a Waveform
-		sig = Waveform(data.nsamp, wforms[tmap[tid]], hdr.win.start)
-
-		if bandpass:
-			# Remove DC bias to reduce Gibbs phenomenon
-			sig.debias()
-			# Bandpass and crop to original data window
-			sig = sig.bandpass(**bandpass).window(sig.datawin)
-
-		if window:
-			wargs = { }
-			try: wargs['tails'] = window['tails']
-			except KeyError: pass
-
-			try:
-				# Check for mapped value
-				swin = window['map'][tid,rid]
-			except KeyError:
-				# Look for a default value
-				swin = window.get('default', None)
-				try: wargs['relative'] = window['relative']
-				except KeyError: pass
-			else:
-				# Compensate data f2c in mapped value
-				swin = (swin[0] - data.f2c, swin[1])
-
-			# Apply a desired window
-			if swin: sig = sig.window(swin, **wargs)
-
-		if eleak:
-			# Calculate cumulative energy in unwindowed waveform
-			cenergy = sig.getsignal(sig.datawin, forcecopy=False)
-			cenergy = np.cumsum(cenergy**2)
-
+	# Process waveforms (possibly averages) as generated
+	for key, avg in wavegen(data, elmap, osamp,
+			start=start, stride=stride, **kwargs):
 		# Square the signal if desired
-		if signsquare: sig = sig.signsquare()
+		if signsquare: avg = avg.signsquare()
 
 		if minsnr is not None and noisewin is not None:
-			if sig.snr(noisewin, rolling=True) < minsnr:
+			if avg.snr(noisewin, rolling=True) < minsnr:
 				skipped['low-snr'] += 1
 				continue
 
+		if eleak:
+			# Calculate cumulative energy in unwindowed waveform
+			cenergy = avg.getsignal(avg.datawin, forcecopy=False)
+			cenergy = np.cumsum(cenergy**2)
+
 		if imer:
+			# Compute IMER time
+			try: dl = getimertime(avg, **imer)
 			# Compute IMER and its mean
-			smsig = sig.imer(**imer).getsignal(sig.datawin, forcecopy=False)
-			smlev = np.mean(smsig)
-			if smlev < 0:
-				smlev = -smlev
-				smsig = -smsig
-			# Find the first point where IMER breaks the mean
-			try: dl = np.nonzero(smsig >= smlev)[0][0]
 			except IndexError:
 				skipped['failed-IMER'] += 1
 				continue
-			if dl > 0:
-				# Linearly interpolate in the interval if possible
-				v0, v1 = smsig[dl - 1], smsig[dl]
-				if v0 != v1: dl += (smlev - v1) / (v1 - v0)
-			dl += sig.datawin.start
 		else:
 			if peaks:
-				# Isolate peak nearest expected location (if one exists)
-				try: exd = nearmap[tid,rid] - data.f2c
-				except KeyError:
-					if neardefault is None: exd = None
-					else: exd = neardefault - data.f2c
-				try: sig = sig.isolatepeak(exd, **peaks)[0]
+				try: avg = isolatepeak(avg, key, data.f2c, **peaks)
 				except ValueError:
 					skipped['missing-peak'] += 1
 					continue
 
 			# Compute and record the delay
-			dl = sig.delay(ref, osamp, negcorr)
+			dl = avg.delay(ref, osamp, negcorr)
 			if negcorr:
 				if dl[1] < 0: numneg += 1
 				dl = dl[0]
 
 		if eleak:
 			# Evaluate leaked energy
-			ssamp = int(dl) - sig.datawin.start - 1
+			ssamp = int(dl) - avg.datawin.start - 1
 			if not 0 <= ssamp < len(cenergy):
 				skipped['out-of-bounds'] += 1
 				continue
@@ -495,7 +594,7 @@ def calcdelays(datafile, reffile, osamp, start=0, stride=1, **kwargs):
 				skipped['leaky'] += 1
 				continue
 
-		result[(tid, rid)] = dl + data.f2c
+		result[key] = dl + data.f2c
 
 	if negcorr and numneg:
 		print(f'{numneg} waveforms matched with negative cross-correlations')
@@ -586,16 +685,21 @@ def atimesEngine(config):
 		# Wrap a single value as a 1-element list
 		if isinstance(elmap, str): elmap = [elmap]
 
-		# A map should not be further touched, but a list needs loading
 		# A simple string is either a magic key or a key matrix
-		if not hasattr(elmap, 'keys'):
-			def loader(e):
-				if e.startswith('magic:'): return e[6:]
-				return loadkeymat(e, dtype=int)
-			elmap = [ loader(e) for e in elmap ]
-		kwargs['elmap'] = elmap
+		def loader(e):
+			if e.startswith('magic:'): return e[6:]
+			return loadkeymat(e, dtype=int, scalar=False)
+		kwargs['elmap'] = [ loader(e) for e in elmap ]
 	except Exception as e:
 		err = 'Invalid specification of optional elmap in [%s]' % asec
+		raise HabisConfigError.fromException(err, e)
+
+	try:
+		neighbors = config.get(asec, 'neighbors', default=None)
+		if neighbors:
+			kwargs['neighbors'] = loadkeymat(neighbors, dtype=int)
+	except Exception as e:
+		err = 'Invalid specification of optional neighbors in [%s]' % asec
 		raise HabisConfigError.fromException(err, e)
 
 	try:
@@ -724,7 +828,8 @@ def atimesEngine(config):
 		times[target] = dict()
 
 		dltype = 'IMER' if kwargs.get('imer', None) else 'cross-correlation'
-		print(f'Finding {dltype} delays for {target} ({len(datafiles)} files)')
+		ftext = 'files' if len(datafiles) != 1 else 'file'
+		print(f'Finding {dltype} delays for {target} ({len(datafiles)} {ftext})')
 
 		for (dfile, dlayfile) in zip(datafiles, delayfiles):
 			kwargs['cachefile'] = dlayfile
