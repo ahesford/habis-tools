@@ -15,6 +15,11 @@ from itertools import repeat
 from collections import OrderedDict, defaultdict, namedtuple
 from functools import reduce
 
+import warnings
+
+# Warnings related to WaveformSet I/O
+class WaveformSetIOWarning(UserWarning): pass
+
 def _strict_int(x):
 	ix = int(x)
 	if ix != x:
@@ -1016,7 +1021,8 @@ class WaveformSet(object):
 		f.close()
 
 
-	def load(self, f):
+	def load(self, f, allow_duplicates=False,
+			skip_zero_length=True, warn_on_error=True):
 		'''
 		Associate the WaveformSet object with the data in f, a file-
 		like object or string specifying a file name. If f is a file-
@@ -1029,6 +1035,27 @@ class WaveformSet(object):
 
 		Each block of waveform data is memory-mapped from the source
 		file. This mapping is copy-on-write; changes do not persist.
+
+		If allow_duplicates is False, file parsing will halt the first
+		time a header is encounted for a receive-channel index
+		previously encountered in the file. If allow_duplicates is
+		True, each receive-channel record will replace any previously
+		encountered records for the same channel index.
+
+		Records for which the data block has zero length will be read
+		but not stored in the WaveformSet object if skip_zero_length is
+		True; if it is False, the empty record will be stored.
+
+		** NOTE: If allow_duplicates is False, encountering multiple
+		records for the same receive-channel index will terminate even
+		if one or more of the duplicate records has zero length and
+		skip_zero_length is True.
+
+		It is an error if the number of parsed receive-channel records
+		does not equal the number of records enconcoded in the file
+		header. If warn_on_error is True, this error will cause a
+		warning to be issued. Otherwise, a ValueError will be raised in
+		case this error is encountered.
 		'''
 		# Open the file if it is not open
 		if isinstance(f, str):
@@ -1116,6 +1143,10 @@ class WaveformSet(object):
 		# ignore any group spec in the receive-channel headers
 		usegrps = (self.txgrps is not None)
 
+		# Keep track of duplicate records, if necessary
+		if not allow_duplicates:
+			encountered = set()
+
 		# Parse through the specified number of receive records
 		while True:
 			if minor == 2:
@@ -1145,6 +1176,15 @@ class WaveformSet(object):
 			# Build the channel header
 			hdr = (idx, (px, py, pz), (ws, wl), txgrp)
 
+			if not allow_duplicates:
+				if idx in encountered:
+					msg = f'Parsing terminated at duplicate record {idx}'
+					warnings.warn(WaveformSetIOWarning(msg))
+					# Avoid detecting junk after duplicate header
+					fsrec = f.tell()
+					break
+				encountered.add(idx)
+
 			# Determine the shape of the waveform
 			waveshape = (ntx, wl)
 			# Determine the start and end of waveform data block
@@ -1154,20 +1194,23 @@ class WaveformSet(object):
 				wavemap = np.ndarray(waveshape, dtype=dtype,
 						buffer=buf, order='C', offset=fsmap)
 			except TypeError: break
-			# Add the record to the set
-			self.setrecord(hdr, wavemap, copy=False)
-			# Skip to the next header
-			f.seek(fsmap + wavemap.nbytes)
+
+			if not skip_zero_length or wavemap.nbytes != 0:
+				# Add the record to the set
+				self.setrecord(hdr, wavemap, copy=False)
+				# Skip to the next header
+				f.seek(fsmap + wavemap.nbytes)
+
 			# Update the offset of the next record
 			fsrec = f.tell()
 
-		import warnings
-
 		if f.tell() != fsrec:
-			warnings.warn('Junk at end of file')
+			warnings.warn(WaveformSetIOWarning('Junk at end of file'))
 
 		if nrx and self.nrx != nrx:
-			raise ValueError('Header specifies %d records, but read %d' % (nrx, self.nrx))
+			err = f'Header specifies {nrx} records, but read {self.nrx}'
+			if warn_on_error: warnings.warn(WaveformSetIOWarning(err))
+			else: raise ValueError(err)
 
 
 	@property
