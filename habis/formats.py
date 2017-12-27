@@ -1724,7 +1724,7 @@ class WaveformSet(object):
 		'''
 		# Handle a single-integer index
 		try: len(key)
-		except TypeError: return self.getrecord(rid)
+		except TypeError: return self.getrecord(key)
 
 		# Split two-integer indices
 		try: rid, tid = key

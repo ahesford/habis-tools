@@ -260,10 +260,10 @@ def wavegen(data, elmap, osamp=1, neighbors={ },
 
 	for r in rxelts.intersection(elmap):
 		# Build a local neighborhood around the receive pair
-		lrn = {r}.union(neighbors.get(r, emptyset))
+		lrn = {r}.union(neighbors.get(r, emptyset)).intersection(rxelts)
 		for t in txelts.intersection(elmap[r]):
 			# Build a local neighborhood around the transmit pair
-			ltn = {t}.union(neighbors.get(t, emptyset))
+			ltn = {t}.union(neighbors.get(t, emptyset)).intersection(txelts)
 			# Record the neighborhood for this (t, r) pair
 			neighborhoods[t,r].update((tt, rr) for tt in ltn for rr in lrn)
 
