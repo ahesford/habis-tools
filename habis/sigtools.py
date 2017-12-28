@@ -942,19 +942,25 @@ class Waveform(object):
 			return self.shift(delay, **shargs)
 
 
-	def shift(self, d, dtype=None):
+	def shift(self, d, dtype=None, cyclic=False):
 		'''
-		Return a copy of the waveform cyclically shifted by a number of
-		(optionally fractional) samples d using a spectral multiplier.
-		Positive shifts correspond to delays (i.e., the signal moves
-		right). The shifted signal is converted to the specified dtype,
+		Return a copy of the waveform shifted to the right by d, a
+		(possibly negative and possibly fractional) number of samples,
+		using a spectral multiplier.
+
+		The shifted signal is converted to the specified dtype,
 		if provided; otherwise the shifted signal is of the same type
 		as the original.
 
 		Fourier transforms are always computed over the entire signal.
+
+		If cyclic is False, portions of the signal that would shift
+		outside of the window [0, self.nsamp) (i.e., portions that
+		would wrap in a cyclic shift) are truncated. Otherwise, a
+		cyclic shift is performed.
 		'''
 		# Try using the faster integer shift if possible
-		try: return self.__intshift(d, dtype)
+		try: return self._intshift(d, dtype, cyclic)
 		except TypeError: pass
 
 		# Determine whether the FFT will be R2C or C2C
@@ -962,6 +968,10 @@ class Waveform(object):
 		ifftfunc = fft.irfft if r2c else fft.ifft
 
 		n = self.nsamp
+
+		if not -n < d < n:
+			# Signal is entirely shifted out of range
+			return Waveform(n)
 
 		fsig = self.fft().getsignal(forcecopy=False)
 		nsig = len(fsig)
@@ -977,16 +987,34 @@ class Waveform(object):
 		if dtype is None: dtype = self.dtype
 		ssig = ifftfunc(fsig * sh, n).astype(dtype)
 
+		# Truncate wrapped portions, if desired
+		if not cyclic:
+			d = int(d)
+			if d >= 0:
+				ssig = ssig[d:]
+				start = d
+			else:
+				ssig = ssig[:d]
+				start = 0
+		else: start = 0
+
 		# Return a copy of the shifted signal
-		return Waveform(self.nsamp, ssig, 0)
+		return Waveform(n, ssig, start)
 
 
-	def __intshift(self, d, dtype=None):
+	def _intshift(self, d, dtype=None, cyclic=False):
 		'''
 		Perform an integer shift without spectral manipulations by
 		rewrapping data windows.
+
+		If cyclic is False, portions of the shifted signal that would
+		fall outside of the range [0, self.nsamp) will be truncated;
+		otherwise, the signal is shifted cyclically.
 		'''
-		if int(d) != d: raise TypeError('Shift amount must be an integer')
+		if int(d) != d:
+			raise TypeError('Shift amount must be an integer')
+
+		d = int(d)
 		dwin = self.datawin
 		nsamp = self.nsamp
 
@@ -996,27 +1024,35 @@ class Waveform(object):
 		# Any shift of a zero waveform is just a zero waveform
 		if dwin.length == 0: return shwave
 
-		if dtype is None: dtype = self.dtype
-
-		# Wrap the shifted start into the waveform window
-		nstart = int(dwin.start + d) % nsamp
-		nend = nstart + dwin.length
-
-		if nend <= nsamp:
-			# If the shifted data window fits, no need to rewrap
-			# Use astype to force a copy of the data
-			data = self._data.astype(dtype)
-			shwave.setsignal(data, nstart)
+		if not cyclic:
+			try: wst, dst, length = cutil.overlap((0, nsamp), dwin.shift(d))
+			except TypeError: return shwave
+			
+			data = self._data[dst:dst+length]
+			if dtype is not None: data = data.astype(dtype)
+			
+			shwave.setsignal(data, wst)
 		else:
-			# Shifted window will wrap; manually unwrap
-			data = np.zeros((nsamp,), dtype=dtype)
-			# Start of old data moves to right part of signal
-			nright = nsamp - nstart
-			data[-nright:] = self._data[:nright]
-			# End of old data moves to left part of signal
-			nleft = nend - nsamp
-			data[:nleft] = self._data[-nleft:]
-			shwave.setsignal(data, 0)
+			# Wrap shifted waveform into window
+			nstart = (dwin.start + d) % nsamp
+			nend = nstart + dwin.length
+
+			if dtype is None: dtype = self._data.dtype
+
+			if nend <= nsamp:
+				# Window will not wrap
+				data = self._data.astype(dtype)
+				shwave.setsignal(data, nstart)
+			else:
+				# Manually wrap the window
+				data = np.zeros((nsamp,), dtype=dtype)
+				# Start of old data moves to right part of signal
+				nright = nsamp - nstart
+				data[-nright:] = self._data[:nright]
+				# End of old data moves to left part of signal
+				nleft = nend - nsamp
+				data[:nleft] = self._data[-nleft:]
+				shwave.setsignal(data, 0)
 
 		return shwave
 
@@ -1045,8 +1081,8 @@ class Waveform(object):
 
 	def xcorr(self, ref, osamp=1):
 		'''
-		Perform cyclic cross-correlation of self and ref using DFTs. If
-		osamp is provided, it must be a nonnegative regular number that
+		Perform cross-correlation of self and ref using DFTs. If osamp
+		is provided, it must be a nonnegative regular number that
 		specifies an oversampling rate for the signal. Sample index I
 		at the input sampling rate corresponds to index I * osamp at
 		the output sampling rate.
@@ -1123,7 +1159,7 @@ class Waveform(object):
 		ssamp += osamp * (sstart - rstart)
 		xcwave.setsignal(csig, 0)
 		# Use the Waveform object to shift the convolution into place
-		return xcwave if ssamp == 0 else xcwave.shift(ssamp)
+		return xcwave if ssamp == 0 else xcwave._intshift(ssamp, cyclic=True)
 
 
 	def delay(self, ref, osamp=1, window=None, negcorr=False, wrapneg=False):
