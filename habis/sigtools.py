@@ -613,23 +613,81 @@ class Waveform(object):
 			return signal
 
 
-	def extremum(self, mx=True):
+	def extremum(self, mx=True, window=None):
 		'''
 		Return a pair (v, i) such that v = self[i] is the maximum (when
 		mx is True) or the minimum (when mx is False) value in the
 		Waveform. If there are multiple occurrences of the extremum,
 		the first occurrence is returned.
+
+		If window is not None, it should be a sequence (start, length)
+		or a Window object that indicates that starting index and
+		length of the window over which the extremum will be sought.
+		The length must be nonnegative, but the start can be any
+		integer, with (start % self.nsamp) representing the actual
+		starting sample. An interval that runs off the end of the
+		signal wraps around to the beginning.
+
+		If window is a tuple rather than a Window object, the start and
+		length values will be truncated to integers.
 		'''
+		# Process limits
+		wrapwin = None
+
+		if window is None:
+			window = (0, self._nsamp)
+		else:
+			start, length = window
+			start = int(start) % self._nsamp
+			if length < 0:
+				raise ValueError('Window length must be nonnegative')
+
+			if length >= self._nsamp:
+				window = (0, self._nsamp)
+			else:
+				end = start + int(length)
+				if end > self._nsamp:
+					window = (start, self._nsamp - start)
+					wrapwin = (0, end - self._nsamp)
+				else: window = (start, end - start)
+
+		dwin = (self._datastart, len(self._data))
+		# With no data, there is no extremum; pick first sample
+		if dwin[1] < 1: return (0, 0)
+
+		expair = None
+		sgn = 1 if mx else -1
+
+		# Find overlap between interval and data in first window
 		try:
-			# Find the maximum index and value
-			i = self._data.argmax() if mx else self._data.argmin()
-			v = self._data[i]
-		except (TypeError, AttributeError):
-			# If there is no data, the maximum is just 0
-			return (0, 0)
+			dst, wst, length = cutil.overlap(dwin, window)
+		except TypeError:
+			pass
+		else:
+			# Find extremum in relevant interval
+			data = self._data[dst:dst+length]
+			i = data.argmax() if mx else data.argmin()
+			v = data[i]
+			expair = v, i + dst
+
+		# Find overlap between interval and data in wrapped window
+		try:
+			# This will raise TypeError if wrapwin is None
+			dst, wst, length = cutil.overlap(dwin, wrapwin)
+		except TypeError:
+			pass
+		else:
+			data = self._data[dst:dst+length]
+			i = data.argmax() if mx else data.argmin()
+			v = data[i]
+			# Update extremum of record if appropriate
+			if not expair or sgn * v > sgn * expair[0]: expair = v, i + dst
+
+		# If there is no extremum, the value and index are just 0
+		if not expair: return (0, 0)
 
 		# Offset the index by the start of the data window
-		return v, i + self._datastart
+		return expair[0], expair[1] + self._datastart
 
 
 	def window(self, window, tails=0, relative=None):
@@ -859,13 +917,13 @@ class Waveform(object):
 		shift() and delay(), which are passed as appropriate.
 		'''
 		# Build the optional arguments to shift() and delay()
-		shargs = {key: kwargs[key]
-				for key in ['dtype'] if key in kwargs}
-		deargs = {key: kwargs[key]
-				for key in ['osamp', 'negcorr', 'wrapneg'] if key in kwargs}
+		shargs = { 'dtype' }
+		shargs = { key: kwargs.pop(key) for key in shargs.intersection(kwargs) }
+		deargs = { 'osamp', 'wrapneg', 'window' }
+		deargs = { key: kwargs.pop(key) for key in deargs.intersection(kwargs) }
 
-		if deargs.get('negcorr', False):
-			raise ValueError('Convenience alignment not supported for negcorr=True')
+		if kwargs:
+			raise TypeError(f'Unsupported keyword argument "{next(iter(kwargs))}"')
 
 		# Find the necessary delay
 		try:
@@ -1068,11 +1126,17 @@ class Waveform(object):
 		return xcwave if ssamp == 0 else xcwave.shift(ssamp)
 
 
-	def delay(self, ref, osamp=1, negcorr=False, wrapneg=False):
+	def delay(self, ref, osamp=1, window=None, negcorr=False, wrapneg=False):
 		'''
 		Find the sample offset that maximizes self.xcorr(ref, osamp).
 		This is interpreted as the delay, in samples, necessary to
 		cyclically shift ref to align the signal with self.
+
+		If window is None, it should be a window suitable for passing
+		to self.extremum that will be used to limit the search region
+		of the cross-correlation. The start and length of the window
+		should be specified as if osamp were unity; they will be scaled
+		by osamp by this routine.
 
 		If negcorr is True, return a tuple (d, s), where d is the
 		sample offset that maximizes the absolute value of the cross-
@@ -1083,7 +1147,7 @@ class Waveform(object):
 		positive delays within the reference window.
 		'''
 		# Ensure that the reference has a sample length
-		try: _ = ref.nsamp
+		try: ref.nsamp
 		except AttributeError: ref = type(self)(signal=ref)
 
 		# Compute the cross-correlation
@@ -1092,12 +1156,16 @@ class Waveform(object):
 		# If the correlation is explicitly zero, the delay is 0
 		if xcorr.datawin.length == 0: return 0
 
+		if window is not None:
+			wst, wln = window
+			window = (wst * osamp, wln * osamp)
+
 		# Find the point of maximal correlation
 		if negcorr:
-			t = abs(xcorr).extremum(mx=True)[1]
+			t = abs(xcorr).extremum(mx=True, window=window)[1]
 			# Determine the sign of the correlation
 			s = int(math.copysign(1., xcorr[t]))
-		else: t = xcorr.extremum(mx=True)[1]
+		else: t = xcorr.extremum(mx=True, window=window)[1]
 
 		# Unwrap negative values and scale by the oversampling rate
 		if t >= osamp * self.nsamp: t -= xcorr.nsamp
@@ -1148,7 +1216,7 @@ class Waveform(object):
 		moving average is not well defined for the first (avgwin - 1)
 		samples; these undefined values will be replaced by the nearest
 		valid average.
-		
+
 		The return value of self.mer must return two valid MERs or a
 		ValueError will be raised.
 
@@ -1179,7 +1247,7 @@ class Waveform(object):
 	def mer(self, erpow=3, sigpow=3, *args, raw=False, **kwargs):
 		'''
 		For the energy ratio(s) returned by the call
-		
+
 			self.enratio(*args, **kwargs),
 
 		compute the modified energy ratio, which is
