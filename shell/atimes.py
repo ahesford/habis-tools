@@ -887,6 +887,12 @@ if __name__ == '__main__':
 		usage(sys.argv[0])
 		sys.exit(1)
 
+	try: import pyfftw
+	except ImportError: pass
+	else:
+		pyfftw.interfaces.cache.enable()
+		pyfftw.interfaces.cache.set_keepalive_time(60.0)
+
 	# Call the calculation engine
 	try: atimesEngine(config)
 	except Exception as e:
