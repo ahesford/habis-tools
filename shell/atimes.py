@@ -6,11 +6,13 @@
 import sys, itertools, numpy as np, os
 import multiprocessing, queue as pyqueue
 
+from numpy.linalg import norm
+
 from collections import OrderedDict, defaultdict
 
 from shlex import split as shsplit
 
-from pycwp import process, stats
+from pycwp import process, stats as stats
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat, loadmatlist, savez_keymat
@@ -32,21 +34,17 @@ def finddelays(nproc=1, *args, **kwargs):
 	Distribute, among nproc processes, delay analysis for waveforms using
 	calcdelays(). All *args and **kwargs, are passed to calcdelays on each
 	participating process. This function explicitly sets the "queue",
-	"start", "stride", and "delaycache" arguments of calcdelays, so *args
+	"rank", "grpsize", and "delaycache" arguments of calcdelays, so *args
 	and **kwargs should not contain these values.
 
 	The delaycache argument is built from an optional file specified in
 	cachefile, which should be a map from transmit-receive pair (t, r) to a
 	precomputed delay, loadable with habis.formats.loadkeymat.
 	'''
-	if 'queue' in kwargs:
-		raise TypeError("Invalid keyword argument 'queue'")
-	if 'stride' in kwargs:
-		raise TypeError("Invalid keyword argument 'stride'")
-	if 'start' in kwargs:
-		raise TypeError("Invalid keyword argument 'start'")
-	if 'delaycache' in kwargs:
-		raise TypeError("Invalid keyword argument 'delaycache'")
+	forbidden = { 'queue', 'rank', 'grpsize', 'delaycache' }
+	forbidden.intersection_update(kwargs)
+	if forbidden:
+		raise TypeError("Forbidden argument '{next(iter(forbidden))}'")
 
 	cachefile = kwargs.pop('cachefile', None)
 
@@ -60,19 +58,19 @@ def finddelays(nproc=1, *args, **kwargs):
 
 	# Extend the kwargs to include the result queue
 	kwargs['queue'] = queue
-	# Extend the kwargs to include the stride
-	kwargs['stride'] = nproc
+	# Extend the kwargs to include the group size
+	kwargs['grpsize'] = nproc
 
-	# Keep track of skipped waveforms
-	skipped = defaultdict(int)
+	# Keep track of waveform statistics
+	stats = defaultdict(int)
 
 	# Spawn the desired processes to perform the cross-correlation
 	with process.ProcessPool() as pool:
 		for i in range(nproc):
 			# Pick a useful process name
 			procname = process.procname(i)
-			# Add the start index to the kwargs
-			kwargs['start'] = i
+			# Add the group rank to the kwargs
+			kwargs['rank'] = i
 			# Extend kwargs to contain the queue (copies kwargs)
 			pool.addtask(target=calcdelays, name=procname, args=args, kwargs=kwargs)
 
@@ -86,16 +84,18 @@ def finddelays(nproc=1, *args, **kwargs):
 			else:
 				delays.update(results[0])
 				for k, v in results[1].items():
-					if v: skipped[k] += v
+					if v: stats[k] += v
 				responses += 1
 
 		pool.wait()
 
-	if skipped:
+	if stats:
 		print(f'For file {os.path.basename(args[0])} '
 				f'({len(delays)} identfied times):')
-		for k, v in skipped.items():
-			if v: print(f'    Skipped {v} {k} waveforms')
+		for k, v in sorted(stats.items()):
+			if v:
+				wfn = 'waveforms' if v > 1 else 'waveform'
+				print(f'  {v} {k} {wfn}')
 
 	if len(delays):
 		# Save the computed delays, if desired
@@ -221,27 +221,25 @@ def applywindow(sig, key, f2c=0, map={ }, default=None, **kwargs):
 	return sig.window(win, **kwargs)
 
 
-def wavegen(data, elmap, osamp=1, neighbors={ },
-		bandpass=None, window=None, start=0, stride=1):
+def wavegen(data, elmap, neighbors={ },
+		bandpass=None, window=None, rank=0, grpsize=1):
 	'''
-	For a WaveformSet data and a map from receive indices to lists of
-	transmit indices elmap, yield a (t, r) tuple and corresponding Waveform
-	object for (t, r) pairs represented in elmap. The yield order will
-	be sorted primarily by receive index and secondarily by transmit index.
-	Of the (t, r) pairs available in data, every stride-th waveform,
-	starting with the start-th waveform, will be yielded.
+	From a WaveformSet data and a map from receive indices to lists of
+	transmit indices elmap, yield a (t, r) tuple, corresponding Waveform
+	object and a set of (t,r) pairs in the neighborhood of each yielded
+	waveform.
 
-	If neighbors is not empty, it should map element indices to a
-	collection of neighboring elements. (The neighbor collection for each
-	key index is assumed to contain the key index, whether or not it
-	actually does. Thus, an element's neighborhood always includes itself.)
-	In this case, the Waveform for each (t, r) pair is actually an average
-	of all Waveforms, aligned with an oversampling rate osamp, from each
-	transmit index in the neighborhood of t to each receive index in the
-	neighborhood of r. The average will be aligned (again with an
-	oversampling rate of osamp) to the original waveform for pair (t, r),
-	so the first arrival of the average should be close to the first
-	arrival for the original waveform if the waveforms are well behaved.
+	The neighborhood of each waveform is defined by the map neighbors,
+	which (if not empty) should map each element index to a collection of
+	neighboring elements. (The neighbor collection for each index is always
+	assumed to contain that index, whether or not the collection includes
+	it.) A neighborhood of a pair (t, r) consists of all pairs in the cross
+	product of the neighbrhoods of t and r, respectively.
+
+	The yield order will be sorted primarily by receive index and
+	secondarily by transmit index of each parsed waveform. Of the (t, r)
+	pairs available in data, a local share for the given process rank in a
+	process group of size grpsize will be yielded.
 
 	If bandpass is not None, it should be a dictionary suitable for passing
 	as keyword arguments (**bandpass) to Waveform.bandpass for each
@@ -267,8 +265,13 @@ def wavegen(data, elmap, osamp=1, neighbors={ },
 			# Record the neighborhood for this (t, r) pair
 			neighborhoods[t,r].update((tt, rr) for tt in ltn for rr in lrn)
 
+	ntr = len(neighborhoods)
+	share, srem = ntr // grpsize, ntr % grpsize
+	start = rank * share + min(rank, srem)
+	if rank < srem: share += 1
+
 	# Sort desired arrival times by r-t, pull local share
-	trpairs = set(sorted(neighborhoods, key=tr2rt)[start::stride])
+	trpairs = set(sorted(neighborhoods, key=tr2rt)[start:start+share])
 	# Only local neighborhoods are needed
 	neighborhoods = { k: neighborhoods[k] for k in trpairs }
 
@@ -278,11 +281,8 @@ def wavegen(data, elmap, osamp=1, neighbors={ },
 		for tr in trpairs: nbrdeps[tr].add(nh)
 
 	# Strip elmap to contain only locally required pairs
-	elmap = defaultdict(list)
-	for t, r in nbrdeps: elmap[r].append(t)
-
-	# Keep track of running averages for active (t, r) pairs as (wave, count, datawin)
-	averages = { }
+	elmap = defaultdict(set)
+	for t, r in nbrdeps: elmap[r].add(t)
 
 	# Cache a receive-channel record for faster access
 	hdr, wforms, tmap = None, None, None
@@ -314,51 +314,16 @@ def wavegen(data, elmap, osamp=1, neighbors={ },
 		# Apply a window before alignment, if desired
 		if window: sig = applywindow(sig, (tid,rid), data.f2c, **window)
 
-		# Update averages for all neighborhoods containing this pair
-		for nbr in nbrdeps[tid,rid]:
-			try:
-				# Pull an existing running average
-				avg, count, dwin = averages[nbr]
-			except KeyError:
-				# No running average; start one
-				avg = sig
-				count = 1
-				dwin = None
-			else:
-				# If this pair is central, align average to its wave
-				# Otherwise, align this wave to existing average
-				if (tid,rid) == nbr:
-					avg = sig + avg.aligned(sig, osamp=osamp)
-				else: avg += sig.aligned(avg, osamp=osamp)
-				count += 1
-
-			# If this signal is the key for this neighborhood, copy datawin
-			if (tid, rid) == nbr: dwin = sig.datawin
-
-			# Just update an incomplete neighborhood and move on
-			if count < len(neighborhoods[nbr]):
-				averages[nbr] = avg, count, dwin
-				continue
-
-			# If neighborhood is complete, 
-			averages.pop(nbr, None)
-
-			if count > 1:
-				# Adding multiple signals may change data window
-				if dwin is not None: avg = avg.window(dwin)
-				# Convert multi-signal sum to an average
-				avg /= count
-
-			# Yield the average waveform
-			yield nbr, avg
+		# Yield the pair, waveform, and neighborhood
+		yield (tid, rid), sig, nbrdeps[tid,rid]
 
 
-def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
+def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 	'''
 	Given a datafile containing a habis.formats.WaveformSet, find arrival
 	times using cross-correlation or IMER for waveforms returned by
 
-	  wavegen(data, elmap, osamp, start=start, stride=stride, **exargs),
+	  wavegen(data, elmap, rank=rank, grpsize=grpsize, **exargs),
 
 	where data is the WaveformSet encoded in datafile, elmap is provided by
 	an optional keyword argument described below, and exargs is a subset of
@@ -379,8 +344,8 @@ def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
 
 	The return value is a 2-tuple containing, first, a dictionary that maps
 	a (t,r) transmit-receive index pair to an adjusted delay in samples;
-	and, second, a dictionary that maps reasons for skipping waveforms to
-	the number of waveforms skipped for that reason.
+	and, second, a dictionary that maps stat groups to counts of waveforms
+	that match the stats.
 
 	Optional keyword arguments include:
 
@@ -452,6 +417,27 @@ def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
 	  (optional) peak isolation and cross-correlation to determine an
 	  arrival time.
 
+	* elements: If not None, an N-by-3 array or a map from element indices
+	  to coordinates. If wavegen returns a neighborhood of more than one
+	  transmit-receive pair for any arrival time, the element coordinates
+	  will be used to find an optimal (in the least-squares sense) slowness
+	  to predict arrivals observed in the neighborhood.
+
+	  If an arrival-time measurement for the "key" pair in a measurement
+	  neighborhood is available and average slowness imputed by this
+	  arrival time falls within 1.5 IQR of the average slowness values for
+	  all pairs in the neighborhood, or if the neighborhood consists of
+	  only the key measurement pair, the arrival time for the "key" pair is
+	  used without modification.
+
+	  If the arrival time for a key pair is missing from the neighborhood,
+	  or falls outside of 1.5 IQR, the arrival time for the key pair will
+	  be the optimum slowness value for the neighborhood multiplied by the
+	  propagation distance for the pair.
+
+	  Element coordinates are required if wavegen returns neighborhoods of
+	  more than one member.
+
 	Any unspecified keyword arguments are passed to wavegen.
 	'''
 	# Read the data and reference
@@ -461,7 +447,9 @@ def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
 	imer = dict(kwargs.pop('imer', ()))
 
 	# Read the reference if IMER times are not desired
-	if not imer: ref = Waveform.fromfile(reffile)
+	if not imer:
+		if reffile is None: raise ValueError('Must specify reffile or imer')
+		ref = Waveform.fromfile(reffile)
 	else: ref = None
 	# Negate the reference, if appropriate
 	if kwargs.pop('flipref', False) and ref is not None: ref = -ref
@@ -530,6 +518,9 @@ def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
 	# Grab an optional result queue
 	queue = kwargs.pop('queue', None)
 
+	# Element coordinates, if required
+	elements = kwargs.pop('elements', None)
+
 	# Pre-populate cached values and restrict elmap to needed pairs
 	result = { }
 	relmap = defaultdict(set)
@@ -542,21 +533,21 @@ def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
 	elmap = relmap
 
 	# Only keep a local portion of cached values
-	result = { k: result[k] for k in sorted(result)[start::stride] }
+	result = { k: result[k] for k in sorted(result)[rank::grpsize] }
 
-	numneg = 0
-	skipped = defaultdict(int)
-	skipped['cached'] = len(result)
+	wavestats = defaultdict(int)
+	wavestats['cached'] = len(result)
+
+	grpdelays = defaultdict(dict)
 
 	# Process waveforms (possibly averages) as generated
-	for key, avg in wavegen(data, elmap, osamp,
-			start=start, stride=stride, **kwargs):
+	for key, avg, nbrs in wavegen(data, elmap, rank=rank, grpsize=grpsize, **kwargs):
 		# Square the signal if desired
 		if signsquare: avg = avg.signsquare()
 
 		if minsnr is not None and noisewin is not None:
 			if avg.snr(noisewin, rolling=True) < minsnr:
-				skipped['low-snr'] += 1
+				wavestats['low-snr'] += 1
 				continue
 
 		if eleak:
@@ -569,40 +560,72 @@ def calcdelays(datafile, reffile, osamp=1, start=0, stride=1, **kwargs):
 			try: dl = getimertime(avg, **imer)
 			# Compute IMER and its mean
 			except IndexError:
-				skipped['failed-IMER'] += 1
+				wavestats['failed-IMER'] += 1
 				continue
 		else:
 			if peaks:
 				try: avg = isolatepeak(avg, key, data.f2c, **peaks)
 				except ValueError:
-					skipped['missing-peak'] += 1
+					wavestats['missing-peak'] += 1
 					continue
 
 			# Compute and record the delay
 			dl = avg.delay(ref, osamp, negcorr)
 			if negcorr:
-				if dl[1] < 0: numneg += 1
+				if dl[1] < 0: wavestats['negative-correlated'] += 1
 				dl = dl[0]
 
 		if eleak:
 			# Evaluate leaked energy
 			ssamp = int(dl) - avg.datawin.start - 1
 			if not 0 <= ssamp < len(cenergy):
-				skipped['out-of-bounds'] += 1
+				wavestats['out-of-bounds'] += 1
 				continue
 			elif cenergy[ssamp] >= eleak * cenergy[-1]:
-				skipped['leaky'] += 1
+				wavestats['leaky'] += 1
 				continue
 
-		result[key] = dl + data.f2c
+		# Add the calculated delay to all relevant neighborhoods
+		for nbr in nbrs: grpdelays[nbr][key] = dl + data.f2c
 
-	if negcorr and numneg:
-		print(f'{numneg} waveforms matched with negative cross-correlations')
+	for key, grp in grpdelays.items():
+		# Calculate propagation distances for the neighborhoods
+		pdist = { (t, r): norm(elements[t] - elements[r])
+					for (t, r) in grp if t != r }
+		slw = { (t, r): grp[t,r] / v for (t, r), v in pdist.items() }
 
-	try: queue.put((result, skipped))
+		# Eliminate outliers
+		slw = stats.mask_outliers(slw)
+
+		if key in slw:
+			result[key] = grp[key]
+			wavestats['direct-valid'] += 1
+		elif not slw:
+			wavestats['no-valid-neighbor'] += 1
+			continue
+		else:
+			# Otherwise, find optimum slowness from non-outlier values
+			dx, tx = zip(*((pdist[t,r], grp[t,r]) for t,r in slw))
+			dx = np.asarray(dx)
+			tx = np.asarray(tx)
+
+			# Arrival-time will be inferred; find the propagation distance
+			try:
+				plen = pdist[key]
+			except KeyError:
+				t, r = key
+				try: plen = norm(elements[t] - elements[r])
+				except KeyError:
+					wavestats['unknown-pair'] += 1
+					continue
+
+			result[key] = plen * (tx @ dx) / (dx @ dx)
+			wavestats['neighbor-optimized'] += 1
+
+	try: queue.put((result, wavestats))
 	except AttributeError: pass
 
-	return result, skipped
+	return result, stats
 
 
 def atimesEngine(config):
@@ -618,6 +641,10 @@ def atimesEngine(config):
 
 	kwargs = {}
 
+	def _throw(msg, e, sec=None):
+		if not sec: sec = asec
+		raise HabisConfigError.fromException(f'{msg} in [{sec}]', e)
+
 	try:
 		# Read all target input lists
 		targets = sorted(k for k in config.options(asec) if k.startswith('target'))
@@ -625,58 +652,46 @@ def atimesEngine(config):
 		for target in targets:
 			targetfiles[target] = matchfiles(config.getlist(asec, target))
 			if len(targetfiles[target]) < 1:
-				err = 'Key %s matches no input files' % target
-				raise HabisConfigError(err)
+				raise HabisConfigError(f'Key {target} matches no inputs')
 	except Exception as e:
-		err = 'Configuration must specify at least one unique "target" key in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+		_throw('Configuration must specify at least one unique "target" key', e)
 
 	try:
-		# Grab the reference file
-		reffile = config.get(msec, 'reference')
-	except Exception as e:
-		err = 'Configuration must specify reference in [%s]' % msec
-		raise HabisConfigError.fromException(err, e)
+		efiles = config.getlist(asec, 'elements', default=None)
+		if efiles:
+			efiles = matchfiles(efiles)
+			kwargs['elements'] = loadmatlist(efiles, nkeys=1)
+	except Exception as e: _throw('Invalid optional elements', e)
 
-	try:
-		# Grab the output file
-		outfile = config.get(asec, 'outfile')
-	except Exception as e:
-		err = 'Configuration must specify outfile in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	# Grab the reference file
+	try: reffile = config.get(msec, 'reference', default=None)
+	except Exception as e: _throw('Invalid optional reference', e, msec)
+
+	# Grab the output file
+	try: outfile = config.get(asec, 'outfile')
+	except Exception as e: _throw('Configuration must specify outfile', e)
 
 	try:
 		# Grab the number of processes to use (optional)
 		nproc = config.get('general', 'nproc', mapper=int,
 				failfunc=process.preferred_process_count)
-	except Exception as e:
-		err = 'Invalid specification of optional nproc in [general]'
-		raise HabisConfigError.fromException(err, e)
+	except Exception as e: _throw('Invalid optional nproc', e, 'general')
 
 	try:
 		# Determine the sampling period and a global temporal offset
 		dt = config.get(ssec, 'period', mapper=float)
 		t0 = config.get(ssec, 'offset', mapper=float)
 	except Exception as e:
-		err = 'Configuration must specify period and offset in [%s]' % ssec
-		raise HabisConfigError.fromException(err, e)
+		_throw('Configuration must specify period and offset', e, ssec)
 
-	try:
-		# Override the number of samples in WaveformSets
-		kwargs['nsamp'] = config.get(ssec, 'nsamp', mapper=int)
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional nsamp in [%s]' % ssec
-		raise HabisConfigError.fromException(err, e)
+	# Override the number of samples in WaveformSets
+	try: kwargs['nsamp'] = config.get(ssec, 'nsamp', mapper=int)
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional nsamp', e, ssec)
 
-
-	try:
-		# Determine the oversampling rate to use when cross-correlating
-		osamp = config.get(ssec, 'osamp', mapper=int, default=1)
-	except Exception as e:
-		err = 'Invalid specification of optional osamp in [%s]' % ssec
-		raise HabisConfigError.fromException(err, e)
+	# Determine the oversampling rate to use when cross-correlating
+	try: osamp = config.get(ssec, 'osamp', mapper=int, default=1)
+	except Exception as e: _throw('Invalid optional osamp', e, ssec)
 
 	try:
 		# Determine the map of receive elements to transmit elements
@@ -690,17 +705,13 @@ def atimesEngine(config):
 			if e.startswith('magic:'): return e[6:]
 			return loadkeymat(e, dtype=int, scalar=False)
 		kwargs['elmap'] = [ loader(e) for e in elmap ]
-	except Exception as e:
-		err = 'Invalid specification of optional elmap in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	except Exception as e: _throw('Invalid optional elmap', e)
 
 	try:
 		neighbors = config.get(asec, 'neighbors', default=None)
 		if neighbors:
 			kwargs['neighbors'] = loadkeymat(neighbors, dtype=int)
-	except Exception as e:
-		err = 'Invalid specification of optional neighbors in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	except Exception as e: _throw('Invalid optional neighbors', e)
 
 	try:
 		# Determine a global group mapping to use for transmit row selection
@@ -709,66 +720,38 @@ def atimesEngine(config):
 		# Treat a string groupmap as a file name
 		if isinstance(kwargs['groupmap'], str):
 			kwargs['groupmap'] = loadkeymat(kwargs['groupmap'], dtype=int)
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional groupmap in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional groupmap', e)
 
-	try:
-		# Determine the range of elements to use; default to all (as None)
-		kwargs['minsnr'] = config.getlist(asec, 'minsnr', mapper=int)
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional minsnr in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	# Determine the range of elements to use; default to all (as None)
+	try: kwargs['minsnr'] = config.getlist(asec, 'minsnr', mapper=int)
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional minsnr', e)
 
-	try:
-		# Determine a temporal window to apply before finding delays
-		kwargs['window'] = config.get(asec, 'window')
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional window in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	# Determine a temporal window to apply before finding delays
+	try: kwargs['window'] = config.get(asec, 'window')
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional window', e)
 
-	try:
-		# Determine an energy leakage threshold
-		kwargs['eleak'] = config.get(asec, 'eleak', mapper=float)
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional eleak in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	# Determine an energy leakage threshold
+	try: kwargs['eleak'] = config.get(asec, 'eleak', mapper=float)
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional eleak', e)
 
-	try:
-		# Determine a temporal window to apply before finding delays
-		kwargs['bandpass'] = config.get(asec, 'bandpass')
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional bandpass in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	# Determine a temporal window to apply before finding delays
+	try: kwargs['bandpass'] = config.get(asec, 'bandpass')
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional bandpass', e)
 
-	try:
-		# Determine peak-selection criteria
-		kwargs['peaks'] = config.get(asec, 'peaks')
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional peaks in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
+	# Determine peak-selection criteria
+	try: kwargs['peaks'] = config.get(asec, 'peaks')
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional peaks', e)
 
-	try:
-		# Determine IMER criteria
-		kwargs['imer'] = config.get(asec, 'imer')
-	except HabisNoOptionError:
-		pass
-	except Exception as e:
-		err = 'Invalid specification of optional imer in [%s]' % asec
-		raise HabisConfigError.fromException(err, e)
-
+	# Determine IMER criteria
+	try: kwargs['imer'] = config.get(asec, 'imer')
+	except HabisNoOptionError: pass
+	except Exception as e: _throw('Invalid optional imer', e)
 
 	maskoutliers = config.get(asec, 'maskoutliers', mapper=bool, default=False)
 	optimize = config.get(asec, 'optimize', mapper=bool, default=False)
