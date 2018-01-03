@@ -12,7 +12,7 @@ from collections import OrderedDict, defaultdict
 
 from shlex import split as shsplit
 
-from pycwp import process, stats as stats
+from pycwp import process, stats, cutil
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat, loadmatlist, savez_keymat
@@ -125,7 +125,7 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(exd, **kwargs)
 
 
-def getimertime(sig, threshold=1, **kwargs):
+def getimertime(sig, threshold=1, window=None, **kwargs):
 	'''
 	For the signal sig, compute the IMER function
 
@@ -134,12 +134,30 @@ def getimertime(sig, threshold=1, **kwargs):
 	and return the index of the first sample of imer that is at least as
 	large as threshold * mean(imer).
 
+	If window is None, the whole-signal IMER is searched. Otherwise, window
+	should be a tuple or dictionary that will be convered to a Window
+	object, as Window(**window) if possible or as Window(*window)
+	otherwise, that will be used to limit the averaging and
+	threshold-crossing search.
+
 	An IndexError will be raised if a suitable index cannot be identified.
 	'''
 	if threshold < 0: raise ValueError('IMER threshold must be positive')
 
+	if window is None:
+		dwin = sig.datawin
+	else:
+		try: window = Window(**window)
+		except TypeError: window = window(*window)
+
+		try: dst, wst, dlen = cutil.overlap(sig.datawin, window)
+		except TypeError:
+			raise IndexError('Specific window does not overlap signal data')
+
+		dwin = Window(dst + sig.datawin.start, dlen, nonneg=True)
+
 	# Compute the IMER function and its mean
-	imer = sig.imer(**kwargs).getsignal(sig.datawin, forcecopy=False)
+	imer = sig.imer(**kwargs).getsignal(dwin, forcecopy=False)
 	mval = threshold * np.mean(imer)
 
 	# Detect and flip negative peaks
@@ -158,7 +176,7 @@ def getimertime(sig, threshold=1, **kwargs):
 	else:
 		if v0 != v1: dl += (mval - v1) / (v1 - v0)
 
-	return dl + sig.datawin.start
+	return dl + dwin.start
 
 
 def applywindow(sig, key, f2c=0, map={ }, default=None, **kwargs):
