@@ -125,22 +125,34 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(exd, **kwargs)
 
 
-def getimertime(sig, threshold=1, window=None, **kwargs):
+def getimertime(sig, threshold=1, window=None, breakaway=None, **kwargs):
 	'''
-	For the signal sig, compute the IMER function
-
-		imer = sig.imer(**kwargs)
-
-	and return the index of the first sample of imer that is at least as
-	large as threshold * mean(imer).
+	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
+	and find the index of the first sample that is at least as large as
+	threshold * mean(imer).
 
 	If window is None, the whole-signal IMER is searched. Otherwise, window
 	should be a tuple or dictionary that will be convered to a Window
 	object, as Window(**window) if possible or as Window(*window)
-	otherwise, that will be used to limit the averaging and
-	threshold-crossing search.
+	otherwise, that will be used to limit the evaluation of the mean and
+	the search for a threshold crossing.
 
-	An IndexError will be raised if a suitable index cannot be identified.
+	If a primary crossing is found and breakaway is not None, a secondary
+	search is performed to identify the latest sample in the sub-signal
+	imer[:crossing] for which
+
+		imer[secondary] >= mean(imer[:secondary]) +
+					breakaway * std(imer[:secondary])
+		imer[secondary - 1] < mean(imer[:secondary-1]) +
+					breakaway * std(imer[:secondary-1])
+
+	This search is done using pandas.Series to define expanding windows. If
+	pandas.Series is not importable, or if the search fails to yield a
+	suitable secondary value, the IMER time is the primary crossing.
+	Otherwise, the IMER time will equal the value of secondary.
+
+	An IndexError will be raised if a suitable primary crossing cannot be
+	identified.
 	'''
 	if threshold < 0: raise ValueError('IMER threshold must be positive')
 
@@ -148,7 +160,7 @@ def getimertime(sig, threshold=1, window=None, **kwargs):
 		dwin = sig.datawin
 	else:
 		try: window = Window(**window)
-		except TypeError: window = window(*window)
+		except TypeError: window = Window(*window)
 
 		try: dst, wst, dlen = cutil.overlap(sig.datawin, window)
 		except TypeError:
@@ -156,27 +168,59 @@ def getimertime(sig, threshold=1, window=None, **kwargs):
 
 		dwin = Window(dst + sig.datawin.start, dlen, nonneg=True)
 
-	# Compute the IMER function and its mean
-	imer = sig.imer(**kwargs).getsignal(dwin, forcecopy=False)
-	mval = threshold * np.mean(imer)
+	# Compute the IMER function over the entire signal
+	imer = sig.imer(**kwargs)
 
-	# Detect and flip negative peaks
-	if mval < 0:
-		imer = -imer
-		mval = -mval
+	# Restrict the threshold-crossing search to window of interest
+	imarr = imer.getsignal(dwin, forcecopy=False)
+	mval = threshold * np.mean(imarr)
 
-	try: dl = np.nonzero(imer >= mval)[0][0]
-	except IndexError: raise IndexError('Unable to find IMER threshold crossing')
+	# Find a threshold crossing in the global window
+	try: dl = np.nonzero(imarr >= mval)[0][0] + dwin.start
+	except IndexError: raise IndexError('Primary IMER threshold crossing not found')
 
-	# Linearly interpolate within the interval, if possible
 	try:
-		v0, v1 = imer[dl-1:dl+1]
-	except (ValueError, IndexError):
+		if breakaway is None: raise ImportError('Ignore breakaway search')
+		from pandas import Series
+	except ImportError:
 		pass
 	else:
-		if v0 != v1: dl += (mval - v1) / (v1 - v0)
+		try:
+			swin = Window(start=sig.datawin.start, end=dl, nonneg=True)
+		except ValueError:
+			pass
+		else:
+			# Pull the secondary search signal
+			imarr = imer.getsignal(swin, forcecopy=False)
+			# Build an expanding series and find per-sample baseline
+			ime = Series(imarr).expanding()
+			baseline = ime.mean() + breakaway * ime.std()
 
-	return dl + dwin.start
+			# Latest crossing is first point after last point below baseline
+			try: dls = np.nonzero(imarr < baseline)[0][-1] + 1
+			except IndexError: pass
+			else:
+				if dls < swin.length:
+					# Replace delay with seconary crossing
+					dl = dls + swin.start
+					# Adjust threshold value for later interpolation
+					mval = baseline[dls]
+
+	if dl > 0:
+		# Linearly interpolate within the interval, if possible
+		try:
+			v0 = imer[dl - 1]
+			v1 = imer[dl]
+		except (ValueError, IndexError):
+			pass
+		else:
+			# Verify that interval does not degenerate
+			if v0 != v1:
+				corr = (mval - v1) / (v1 - v0)
+				# Make sure mval is in range [v0, v1]
+				if -1 <= corr <= 0: dl += corr
+
+	return dl
 
 
 def applywindow(sig, key, f2c=0, map={ }, default=None, **kwargs):
@@ -559,43 +603,43 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 	grpdelays = defaultdict(dict)
 
 	# Process waveforms (possibly averages) as generated
-	for key, avg, nbrs in wavegen(data, elmap, rank=rank, grpsize=grpsize, **kwargs):
+	for key, sig, nbrs in wavegen(data, elmap, rank=rank, grpsize=grpsize, **kwargs):
 		# Square the signal if desired
-		if signsquare: avg = avg.signsquare()
+		if signsquare: sig = sig.signsquare()
 
 		if minsnr is not None and noisewin is not None:
-			if avg.snr(noisewin, rolling=True) < minsnr:
+			if sig.snr(noisewin, rolling=True) < minsnr:
 				wavestats['low-snr'] += 1
 				continue
 
 		if eleak:
 			# Calculate cumulative energy in unwindowed waveform
-			cenergy = avg.getsignal(avg.datawin, forcecopy=False)
+			cenergy = sig.getsignal(sig.datawin, forcecopy=False)
 			cenergy = np.cumsum(cenergy**2)
 
 		if imer:
 			# Compute IMER time
-			try: dl = getimertime(avg, **imer)
+			try: dl = getimertime(sig, **imer)
 			# Compute IMER and its mean
 			except IndexError:
 				wavestats['failed-IMER'] += 1
 				continue
 		else:
 			if peaks:
-				try: avg = isolatepeak(avg, key, data.f2c, **peaks)
+				try: sig = isolatepeak(sig, key, data.f2c, **peaks)
 				except ValueError:
 					wavestats['missing-peak'] += 1
 					continue
 
 			# Compute and record the delay
-			dl = avg.delay(ref, osamp, negcorr)
+			dl = sig.delay(ref, osamp, negcorr)
 			if negcorr:
 				if dl[1] < 0: wavestats['negative-correlated'] += 1
 				dl = dl[0]
 
 		if eleak:
 			# Evaluate leaked energy
-			ssamp = int(dl) - avg.datawin.start - 1
+			ssamp = int(dl) - sig.datawin.start - 1
 			if not 0 <= ssamp < len(cenergy):
 				wavestats['out-of-bounds'] += 1
 				continue
