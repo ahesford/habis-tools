@@ -690,6 +690,19 @@ class Waveform(object):
 		return expair[0], expair[1] + self._datastart
 
 
+	def trim(self, start, end=None):
+		'''
+		A convience wrapper that returns the results of
+
+		  self.window({'start': start, 'end': -end}, relative='datawin')
+
+		provided that both start and end are provided. If end is None,
+		end is replaced by start to produce a symmetric window.
+		'''
+		if end is None: end = start
+		return self.window({'start': start, 'end': -end}, relative='datawin')
+
+
 	def window(self, window, tails=0, relative=None):
 		'''
 		Return a windowed copy of the waveform where, outside the
@@ -1240,7 +1253,7 @@ class Waveform(object):
 				self._data * np.abs(self._data), self._datastart)
 
 
-	def imer(self, avgwin, *args, raw=False, **kwargs):
+	def imer(self, avgwin, *args, raw=False, return_all=False, **kwargs):
 		'''
 		For the modified energy ratios returned by the call
 
@@ -1261,15 +1274,27 @@ class Waveform(object):
 		If the keyword-only arugment raw is True, the raw data array,
 		defined over a window self.datawin, will be returned;
 		otherwise, the ratio will be packaged as a new Waveform object.
+
+		If the keyword-only argument return_all is True, the return
+		value will be a dictionary that contains the key 'imer' with
+		the IMER object (a raw array or a Waveform object) as its
+		associated value, plus other key-value pairs that result from
+		the call to self.mer with matching "raw" and "return_all"
+		keyword arguments.
 		'''
 		avgwin = int(avgwin)
 		if avgwin <= 0: raise ValueError('Argument "avgwin" must be nonnegative')
 
 		# Compute the energy ratios
-		ner, fer = self.mer(*args, raw=True, **kwargs)
-		if fer is None:
+		enrs = self.mer(*args, raw=True, return_all=True, **kwargs)
+
+		try:
+			ner = enrs['nmer']
+			fer = enrs['fmer']
+			if fer is None: raise ValueError('No valid far MER')
+		except (KeyError, ValueError):
 			raise ValueError('Call to self.mer(*args, **kwargs) '
-						'must return two ratio arrays')
+						'must return two valid MER sequences')
 
 		# Compute rightward moving average of each signal
 		vld = len(ner) - avgwin
@@ -1278,11 +1303,24 @@ class Waveform(object):
 		fer[avgwin:] = stats.rolling_mean(fer, avgwin)[:vld]
 		fer[:avgwin] = fer[avgwin]
 
-		if raw: return fer - ner
-		else: return Waveform(self.nsamp, fer - ner, self._datastart)
+		# Wrap the IMER in a Waveform if necessary
+		imer = fer - ner
+		if not raw: imer = Waveform(self.nsamp, imer, self._datastart)
+
+		if not return_all: return imer
+
+		rdict = { 'imer': imer }
+
+		if not raw:
+			# Wrap intermediate results in Waveform objects
+			enrs = { k: Waveform(self.nsamp, v, self._datastart)
+					for k, v in enrs.items() }
+
+		enrs['imer'] = imer
+		return enrs
 
 
-	def mer(self, erpow=3, sigpow=3, *args, raw=False, **kwargs):
+	def mer(self, erpow=3, sigpow=3, *args, raw=False, return_all=False, **kwargs):
 		'''
 		For the energy ratio(s) returned by the call
 
@@ -1299,19 +1337,39 @@ class Waveform(object):
 		(or None if the second MER is None), defined over self.datawin,
 		will be returned; otherwise, non-None ratios will be packaged
 		as new Waveform objects.
+
+		If the keyword-only argument return_all is True, the return
+		value will be a dictionary with keys 'ner', 'fer', 'nmer',
+		'fmer', where 'ner' and 'fer' are the near and far energy
+		windows returned by self.enratio (wrapped in Waveform objects
+		if raw is False) and 'nmer' and 'fmer' are, respectively, the
+		associated modified energy ratios.
+
+		If return_all is False, the return value will be a simple tuple
+		of values (nmer, fmer).
 		'''
 		# Compute the energy ratios and raise the powers
 		ner, fer = self.enratio(*args, raw=True, **kwargs)
 		sig = np.abs(self._data)**sigpow
-		ner = ner**erpow * sig
-		if fer is not None: fer = fer**erpow * sig
+		nmer = ner**erpow * sig
+		if fer is not None: fmer = fer**erpow * sig
+		else: fmer = None
 
 		if not raw:
-			ner = Waveform(self.nsamp, ner, self._datastart)
-			if fer is not None:
-				fer = Waveform(self.nsamp, fer, self._datastart)
+			# Wrap raw MER values in Waveform objects
+			nmer = Waveform(self.nsamp, nmer, self._datastart)
+			if fmer is not None:
+				fmer = Waveform(self.nsamp, fmer, self._datastart)
+			if return_all:
+				# Wrap energy ratios in Waveform objects if necessary
+				ner = Waveform(self.nsamp, ner, self._datastart)
+				if fer is not None:
+					fer = Waveform(self.nsamp, fer, self._datastart)
 
-		return ner, fer
+		if not return_all:
+			return nmer, fmer
+
+		return { 'nmer': nmer, 'fmer': fmer, 'ner': ner, 'fer': fer }
 
 
 	def enratio(self, prewin, postwin=None, vpwin=None, *, raw=False):
@@ -1387,14 +1445,12 @@ class Waveform(object):
 		else: fer = None
 
 		if not raw:
-			# Build Waveform objects
+			# Wrap raw energy ratios in Waveform objects
 			ner = Waveform(self.nsamp, ner, self._datastart)
 			if fer is not None:
 				fer = Waveform(self.nsamp, fer, self._datastart)
 
 		return ner, fer
-
-
 
 
 	def isolatepeak(self, index=None, **kwargs):
