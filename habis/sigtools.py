@@ -764,36 +764,38 @@ class Waveform(object):
 		try:
 			# Find overlap between the data and output windows
 			ostart, istart, wlen = cutil.overlap(dwin, window)
-			oend = ostart + wlen
 		except TypeError:
 			# There is no overlap, return an empty signal
 			return Waveform(self.nsamp)
 
-		# Otherwise, copy the signal and zero regions outside window
-		data = self._data.copy()
-		data[:ostart] = 0.
-		data[oend:] = 0.
+		# Otherwise, copy the signal in the new data window
+		data = self._data[ostart:ostart+wlen].copy()
+		ndwin = Window(ostart + dwin.start, wlen)
 
 		# If there are tails, apply them
 		if len(tails) > 0:
-			def tailer(data, dwin, tail, twin):
-				'''Apply the tail to the data'''
-				try:
-					# Find the overlap and apply the tail
-					ostart, istart, wlen = cutil.overlap(dwin, twin)
-					oend, iend = ostart + wlen, istart + wlen
-					data[ostart:oend] *= tail[istart:iend]
-				except TypeError: return
-
 			ltail = len(tails) // 2
 			# Apply the left and right tails in succession
 			lwin = (window.start, ltail)
-			tailer(data, dwin, tails[:ltail], lwin)
+			self._applytails(data, ndwin, tails[:ltail], lwin)
 			rwin = (window.end - ltail, ltail)
-			tailer(data, dwin, tails[ltail:], rwin)
+			self._applytails(data, ndwin, tails[ltail:], rwin)
 
 		# Return a copy of the signal, cropped to the window
-		return Waveform(self.nsamp, data[ostart:oend], dwin.start + ostart)
+		return Waveform(self.nsamp, data, ndwin.start)
+
+
+	@staticmethod
+	def _applytails(data, dwin, tail, twin):
+		'''
+		For a data array that spans the window dwin = (dstart, dlen),
+		and a tail stencil that spans the window twin = (tstart, tlen),
+		scale (in place) the data by the tail in the overlapping
+		region, if any.
+		'''
+		try: ostart, istart, wlen = cutil.overlap(dwin, twin)
+		except TypeError: return
+		data[ostart:ostart+wlen] *= tail[istart:istart+wlen]
 
 
 	def envelope(self):
