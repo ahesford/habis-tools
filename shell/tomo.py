@@ -9,6 +9,8 @@ Perform an arrival-time-tomographic udpate of sound speeds.
 
 import sys, os
 
+import functools
+
 import numpy as np
 from numpy.linalg import norm
 
@@ -30,6 +32,7 @@ from mpi4py import MPI
 
 from pycwp.cytools.regularize import epr, totvar, tikhonov
 from pycwp.iterative import lsmr
+from pycwp import filter as pcwfilter
 
 from habis.pathtracer import PathTracer, TraceError
 
@@ -815,6 +818,9 @@ if __name__ == "__main__":
 		raise HabisConfigError.fromException(err, e)
 
 	rank, size = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
+
+	# Savitzky-Golay coefficients are needed repeatedly; memoize for efficiency
+	pcwfilter.savgol = functools.lru_cache(32)(pcwfilter.savgol)
 
 	# Try to build a tracer from the configuration
 	tracer = PathTracer.fromconf(config)
