@@ -79,12 +79,20 @@ def finddelays(nproc=1, *args, **kwargs):
 		responses = 0
 		while responses < nproc:
 			try: results = queue.get(timeout=0.1)
-			except pyqueue.Empty: pass
+			except pyqueue.Empty:
+				# Loosely join to watch for a dead pool
+				pool.wait(timeout=0.1, limit=1)
+				# If the pool is dead, give up
+				if not pool.unjoined: break
 			else:
 				delays.update(results[0])
 				for k, v in results[1].items():
 					if v: stats[k] += v
 				responses += 1
+
+		if responses != nproc:
+			print(f'WARNING: Proceeding with {responses} of {nproc} '
+					'subprocess results. A subprocess may have died.')
 
 		pool.wait()
 
@@ -96,7 +104,7 @@ def finddelays(nproc=1, *args, **kwargs):
 				wfn = 'waveforms' if v > 1 else 'waveform'
 				print(f'  {v} {k} {wfn}')
 
-	if len(delays):
+	if len(delays) and cachefile:
 		# Save the computed delays, if desired
 		try: savez_keymat(cachefile, delays)
 		except (ValueError, IOError): pass
@@ -380,7 +388,7 @@ def wavegen(data, elmap, neighbors={ },
 			# Bandpass and crop to original data window
 			sig = sig.bandpass(**bandpass).window(sig.datawin)
 
-		# Apply a window before alignment, if desired
+		# Apply a window if desired
 		if window: sig = applywindow(sig, (tid,rid), data.f2c, **window)
 
 		# Yield the pair, waveform, and neighborhood
@@ -654,17 +662,38 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 				wavestats['leaky'] += 1
 				continue
 
-		# Add the calculated delay to all relevant neighborhoods
-		for nbr in nbrs: grpdelays[nbr][key] = dl + data.f2c
+		# Shift delay to global time
+		dl += data.f2c
+
+		if len(nbrs) < 2:
+			# If the element is its own neighborhood, just copy result
+			if key in nbrs: result[key] = dl
+			else: wavestats['invalid-neighborhood'] += 1
+		else:
+			# Results will be optimized from groups of delays
+			for nbr in nbrs: grpdelays[nbr][key] = dl
+
+	if grpdelays and elements is None:
+		raise TypeError('Cannot have neighborhoods when elements is None')
 
 	for key, grp in grpdelays.items():
-		# Calculate propagation distances for the neighborhoods
-		pdist = { (t, r): norm(elements[t] - elements[r])
-					for (t, r) in grp if t != r }
-		slw = { (t, r): grp[t,r] / v for (t, r), v in pdist.items() }
+		if key[0] == key[1] or any(t == r for t, r in grp):
+			raise ValueError('Backscatter neighborhoods not supported')
 
-		# Eliminate outliers
-		slw = stats.mask_outliers(slw)
+		pdist, slw = { }, { }
+		try:
+			# Find distances and speeds for neighborhoods
+			for (t, r), dl in grp.items():
+				v = norm(elements[t] - elements[r])
+				pdist[t,r] = v
+				slw[t,r] = dl / v
+		except (KeyError, IndexError):
+			# Either coordinates or a delay do not exist for
+			wavestats['unknown-pair'] += 1
+			continue
+
+		# Eliminate outliers based on slowness; discard slowness values
+		slw = set(stats.mask_outliers(slw))
 
 		if key in slw:
 			result[key] = grp[key]
@@ -684,7 +713,7 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 			except KeyError:
 				t, r = key
 				try: plen = norm(elements[t] - elements[r])
-				except KeyError:
+				except (KeyError, IndexError):
 					wavestats['unknown-pair'] += 1
 					continue
 
