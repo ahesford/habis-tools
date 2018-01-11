@@ -18,7 +18,6 @@ from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigPars
 from habis.formats import WaveformSet, loadkeymat, loadmatlist, savez_keymat
 from habis.sigtools import Waveform, Window
 
-
 def usage(progname):
 	print(f'USAGE: {progname} <configuration>', file=sys.stderr)
 
@@ -125,7 +124,7 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(exd, **kwargs)
 
 
-def getimertime(sig, threshold=1, window=None, breakaway=None, **kwargs):
+def getimertime(sig, threshold=1, window=None, equalize=True, breakaway=None, **kwargs):
 	'''
 	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
 	and find the index of the first sample that is at least as large as
@@ -137,19 +136,21 @@ def getimertime(sig, threshold=1, window=None, breakaway=None, **kwargs):
 	otherwise, that will be used to limit the evaluation of the mean and
 	the search for a threshold crossing.
 
+	If equalize is True, the signal is equalized by dividing by the peak
+	envelope amplitude within the desired window prior to any IMER search.
+
 	If a primary crossing is found and breakaway is not None, a secondary
-	search is performed to identify the latest sample in the sub-signal
-	imer[:crossing] for which
+	search is performed to identify the latest sample of the IMER function
+	before the primary crossing that crosses the secondary threshold
 
-		imer[secondary] >= mean(imer[:secondary]) +
-					breakaway * std(imer[:secondary])
-		imer[secondary - 1] < mean(imer[:secondary-1]) +
-					breakaway * std(imer[:secondary-1])
+		secthresh = mean(imer[:secondary]) +
+				breakaway * std(imer[:secondary]),
 
+	where secondary is the index being tested for a secondary crossing.
 	This search is done using pandas.Series to define expanding windows. If
-	pandas.Series is not importable, or if the search fails to yield a
-	suitable secondary value, the IMER time is the primary crossing.
-	Otherwise, the IMER time will equal the value of secondary.
+	a suitable secondary value is found, the IMER time is replaced by the
+	secondary threshold crossing. Note that secondary search is not bound
+	by any provided window.
 
 	An IndexError will be raised if a suitable primary crossing cannot be
 	identified.
@@ -157,68 +158,74 @@ def getimertime(sig, threshold=1, window=None, breakaway=None, **kwargs):
 	if threshold < 0: raise ValueError('IMER threshold must be positive')
 
 	if window is None:
-		dwin = sig.datawin
+		dstart, dlen = sig.datawin
 	else:
 		try: window = Window(**window)
 		except TypeError: window = Window(*window)
 
-		try: dst, wst, dlen = cutil.overlap(sig.datawin, window)
+		try: dstart, _, dlen = cutil.overlap(sig.datawin, window)
 		except TypeError:
 			raise IndexError('Specific window does not overlap signal data')
 
-		dwin = Window(dst + sig.datawin.start, dlen, nonneg=True)
+	if equalize:
+		# Equalize with peak in the desired window
+		if window is None: emax = sig.envelope().extremum()[0]
+		else: emax = sig.window(window).envelope().extremum()[0]
+		sig /= emax
 
-	# Compute the IMER function over the entire signal
-	imer = sig.imer(**kwargs)
+	# Compute the IMER only in the data window
+	imer = sig.imer(raw=True, **kwargs)
 
-	# Restrict the threshold-crossing search to window of interest
-	imarr = imer.getsignal(dwin, forcecopy=False)
-	mval = threshold * np.mean(imarr)
+	# Compute the primary threshold value in the restricted window
+	mval = threshold * np.mean(imer[dstart:dstart+dlen])
 
-	# Find a threshold crossing in the global window
-	try: dl = np.nonzero(imarr >= mval)[0][0] + dwin.start
-	except IndexError: raise IndexError('Primary IMER threshold crossing not found')
+	# Find the first crossing of the IMER function
+	try: dl = np.nonzero(imer[dstart:dstart+dlen] >= mval)[0][0] + dstart
+	except IndexError: raise IndexError('Primary IMER crossing not found')
 
-	try:
-		if breakaway is None: raise ImportError('Ignore breakaway search')
-		from pandas import Series
-	except ImportError:
-		pass
-	else:
+	# Store interval limits for later interpolation
+	lval = imer[dl - 1] if dl > 0 else None
+	rval = imer[dl]
+
+	if breakaway is not None and dl > 0:
 		try:
-			swin = Window(start=sig.datawin.start, end=dl, nonneg=True)
-		except ValueError:
+			from pandas import Series
+		except ImportError:
+			raise ImportError('Breakaway searches require pandas.Series')
+		
+		# Truncate secondary search to primary crossing
+		imer = imer[:dl]
+
+		# Build an expanding baseline for crossing up to primary crossing
+		ime = Series(imer).expanding()
+		baseline = ime.mean() + breakaway * ime.std()
+
+		try:
+			# Latest crossing is first point after last below baseline
+			dls = np.nonzero(imer < baseline)[0][-1] + 1
+			# If secondary crossing runs past primary, no more searching
+			if dls >= dl: raise IndexError
+		except IndexError:
 			pass
 		else:
-			# Pull the secondary search signal
-			imarr = imer.getsignal(swin, forcecopy=False)
-			# Build an expanding series and find per-sample baseline
-			ime = Series(imarr).expanding()
-			baseline = ime.mean() + breakaway * ime.std()
+			# Update delay to earlier secondary crossing
+			dl = dls
 
-			# Latest crossing is first point after last point below baseline
-			try: dls = np.nonzero(imarr < baseline)[0][-1] + 1
-			except IndexError: pass
-			else:
-				if dls < swin.length:
-					# Replace delay with seconary crossing
-					dl = dls + swin.start
-					# Adjust threshold value for later interpolation
-					mval = baseline[dls]
+			# Update endpoints of crossing interval
+			rval = imer[dl]
+			lval = imer[dl - 1] if dl > 0 else None
 
-	if dl > 0:
-		# Linearly interpolate within the interval, if possible
-		try:
-			v0 = imer[dl - 1]
-			v1 = imer[dl]
-		except (ValueError, IndexError):
-			pass
-		else:
-			# Verify that interval does not degenerate
-			if v0 != v1:
-				corr = (mval - v1) / (v1 - v0)
-				# Make sure mval is in range [v0, v1]
-				if -1 <= corr <= 0: dl += corr
+			# Threshold is baseline for crossing, if one exists
+			mval = baseline.iloc[dl]
+
+	# Interpolate if possible
+	if rval is not None and lval is not None and rval != lval:
+		corr = (mval - rval) / (rval - lval)
+		# Make sure mval is in the range [lval, rval]
+		if -1 <= corr <= 0: dl += corr
+
+	# Offset IMER with the start of the data window
+	dl += sig.datawin.start
 
 	return dl
 
@@ -608,7 +615,7 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 		if signsquare: sig = sig.signsquare()
 
 		if minsnr is not None and noisewin is not None:
-			if sig.snr(noisewin, rolling=True) < minsnr:
+			if sig.snr(noisewin) < minsnr:
 				wavestats['low-snr'] += 1
 				continue
 
