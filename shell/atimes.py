@@ -132,11 +132,15 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(exd, **kwargs)
 
 
-def getimertime(sig, threshold=1, window=None, equalize=True, breakaway=None, **kwargs):
+def getimertime(sig, threshold=1, window=None, equalize=True,
+		rootmag=False, breakaway=None, **kwargs):
 	'''
 	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
-	and find the index of the first sample that is at least as large as
-	threshold * mean(imer).
+	and find the index of the first sample that is at least as large as:
+
+		threshold * mean(imer), if rootmag is False,
+		threshold * mean(sqrt(abs(imer)))**2, if rootmag is True or 2,
+		threshold * mean(cbrt(abs(imer)))**3, if rootmag is 3.
 
 	If window is None, the whole-signal IMER is searched. Otherwise, window
 	should be a tuple or dictionary that will be convered to a Window
@@ -184,8 +188,18 @@ def getimertime(sig, threshold=1, window=None, equalize=True, breakaway=None, **
 	# Compute the IMER only in the data window
 	imer = sig.imer(raw=True, **kwargs)
 
-	# Compute the primary threshold value in the restricted window
-	mval = threshold * np.mean(imer[dstart:dstart+dlen])
+	# Compute primary threshold value in restricted window
+	ime = imer[dstart:dstart+dlen]
+	if not rootmag:
+		mval = threshold * np.mean(ime)
+	else:
+		if rootmag is True or rootmag == 2:
+			nps, ipw = np.sqrt, 2
+		elif rootmag == 3:
+			nps, ipw = np.cbrt, 3
+		else: raise ValueError('Argument "rootmag" must be True, 2 or 3')
+
+		mval = threshold * np.mean(nps(np.abs(ime)) * np.sign(ime))**ipw
 
 	# Find the first crossing of the IMER function
 	try: dl = np.nonzero(imer[dstart:dstart+dlen] >= mval)[0][0] + dstart
@@ -200,7 +214,7 @@ def getimertime(sig, threshold=1, window=None, equalize=True, breakaway=None, **
 			from pandas import Series
 		except ImportError:
 			raise ImportError('Breakaway searches require pandas.Series')
-		
+
 		# Truncate secondary search to primary crossing
 		imer = imer[:dl]
 
@@ -474,7 +488,7 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 	* delaycache: A map from transmit-receive element pairs (t, r) to a
 	  precomputed delay d. If a value exists for a given pair (t, r) in the
 	  WaveformSet and the element map, the precomputed value will be used
-	  in favor of explicit computation. 
+	  in favor of explicit computation.
 
 	* queue: If not none, the return values are passed as an argument to
 	  queue.put().
