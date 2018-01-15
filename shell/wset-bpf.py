@@ -15,12 +15,12 @@ from habis.sigtools import Waveform
 
 
 def usage(progname, fatal=False):
-	print('USAGE: %s [-r rxlist] [-t txlist] [-z] [-p nprocs] [-n nsamp] [-o outpath] -f <start:end[:tails]> <inputs>' % progname, file=sys.stderr)
+	print('USAGE: %s [-r rxlist] [-t txlist] [-z] [-d datatype] [-p nprocs] [-n nsamp] [-o outpath] -f <start:end[:tails]> <inputs>' % progname, file=sys.stderr)
 	sys.exit(int(fatal))
 
 
-def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
-		nsamp=None, debias=True, start=0, stride=1, lock=None, event=None):
+def wavefilt(infile, filt, outfile, rxchans=None, txchans=None, nsamp=None,
+		debias=True, dtype=None, start=0, stride=1, lock=None, event=None):
 	'''
 	For the habis.formats.WaveformSet object in infile, successively filter
 	all waves received by channels in the sequence rxchans[start::stride]
@@ -56,7 +56,7 @@ def wavefilt(infile, filt, outfile, rxchans=None, txchans=None,
 	receive channels in the output file will be arbitrary.
 	'''
 	# Open the input WaveformSet, then create a corresponding output set
-	wset = WaveformSet.fromfile(infile)
+	wset = WaveformSet.fromfile(infile, force_dtype=dtype)
 	# Attempt to truncate the input signals, if possible
 	if nsamp is not None: wset.nsamp = nsamp
 	if rxchans is None: rxchans = sorted(wset.rxidx)
@@ -140,13 +140,13 @@ def mpwavefilt(nproc, *args, **kwargs):
 
 
 if __name__ == '__main__':
-	outpath, filt = None, None
+	outpath, filt, datatype = None, None, None
 	nprocs = process.preferred_process_count()
 
 	# Optional arguments
 	kwargs = { }
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'ho:f:p:n:r:t:z')
+	optlist, args = getopt.getopt(sys.argv[1:], 'ho:f:d:p:n:r:t:z')
 
 	for opt in optlist:
 		if opt[0] == '-p':
@@ -157,6 +157,8 @@ if __name__ == '__main__':
 			kwargs['nsamp'] = int(opt[1])
 		elif opt[0] == '-o':
 			outpath = opt[1]
+		elif opt[0] == '-d':
+			kwargs['dtype'] = np.dtype(opt[1])
 		elif opt[0] == '-r':
 			kwargs['rxchans'] = numrange(opt[1])
 		elif opt[0] == '-t':

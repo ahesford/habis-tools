@@ -6,7 +6,7 @@ from math import sqrt
 
 from scipy.signal import hilbert
 
-
+import progressbar
 
 from collections import defaultdict
 
@@ -20,7 +20,8 @@ def usage(progname=None, fatal=False):
 	sys.exit(fatal)
 
 
-def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
+def plotframes(output, waves, atimes, dwin=None, 
+		equalize=False, cthresh=None, bitrate=-1):
 	'''
 	Prepare, using the ffmpeg writer in matplotlib.animation, a video in
 	which each frame depicts aligned waveforms received by a common
@@ -48,6 +49,11 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 
 	If dwin is None, the window will be chosen to encompass all data
 	windows in the waves map.
+
+	If equalize is True (or a value greater than 0), each wave group will
+	be equalized by calling eqwavegrps with a value (equalize > 1) for the
+	"individual" argument to the function. The equalization is done after
+	dwin is applied to each waveform.
 	'''
 	import matplotlib as mpl
 	mpl.use('agg')
@@ -96,6 +102,9 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 	# Clip the waveforms to the common data window
 	waves = { k: [ w.window(dwin) for w in v ] for k, v in waves.items() }
 
+	# Equalize the waveforms if desired
+	if equalize: waves = eqwavegrps(waves, equalize > 1)
+
 	# Set the amplitude limits
 	pkamps = [ w.envelope().extremum()[0] for v in waves.values() for w in v ]
 	if cthresh is None: vmax = np.max(pkamps)
@@ -116,6 +125,8 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 		ax.set_ylabel('Amplitude', fontsize=14)
 		ax.grid(True)
 
+		bar = progressbar.ProgressBar(max_value=len(waves))
+
 		for i, (pair, wlist) in enumerate(sorted(waves.items())):
 			# Update the line data
 			for l, w in zip(lines, wlist):
@@ -134,7 +145,9 @@ def plotframes(output, waves, atimes, dwin=None, cthresh=None, bitrate=-1):
 
 			# Capture the frame
 			writer.grab_frame()
-			if not i % 50: print('Stored frame %s' % (pair,))
+			bar.update(i)
+
+		bar.update(len(waves))
 
 
 def plotwaves(output, waves, atimes=None, mtime=None,
@@ -344,32 +357,52 @@ def shiftgrps(wavegrps, atimes):
 		# Build the new list of shifted waves
 		wavegrps[t,r] = [ waves[0] ]
 		wavegrps[t,r].extend(wf.shift(atlist[0] - atv)
-					for wv, atv in zip(waves[1:], atlist[1:]))
+					for wf, atv in zip(waves[1:], atlist[1:]))
 
 	return wavegrps
 
 
-def eqwavegrps(wavegrps):
+def eqwavegrps(wavegrps, individual=False):
 	'''
 	In a mapping wavegrps as returned by getwavegrps, scale the peak
-	amplitude of each waveform wavegrps[t,r][i] by the inverse of the
-	maximum peak amplitude of all waveforms in wavegrps[t,r], unless the
-	maximum value is less than sqrt(sys.float_info.epsilon) times the
-	maximum amplitude across all waveforms in wavegrps.
+	amplitude of each waveform wavegrps[t,r][i] by:
 
-	The shifting is done in place, but wavegrps is also returned.
+	* If individual is False, the maximum peak amplitude of all waveforms
+	  in wavegrps[t,r], or
+
+	* If individual is True, by the waveform's own peak amplitude.
+
+	If the waveform peak amplitude is less than the maximum peak amplitude
+	in all wavegrps time sqrt(sys.float_info.epsilon), that waveform will
+	not be scaled.
+
+	The equalization is done in place, but wavegrps is also returned.
 	'''
 	# Find the peak amplitudes for each group
-	pkamps = { k: max(wf.envelope().extremum()[0] for wf in v) 
+	pkamps = { k: [wf.envelope().extremum()[0] for wf in v]
 			for k, v in wavegrps.items() }
 
-	# Find low-amplitude threshold
-	minamp = max(pkamps.values()) * sqrt(sys.float_info.epsilon)
+	minamp = sqrt(sys.float_info.epsilon)
 
-	# Equalize the waveforms in each group, if desired
-	for k, pamp in pkamps.items():
-		if pamp < minamp: continue
-		for v in wavegrps[k]: v /= pamp
+	if not individual:
+		# Reduce all peak amplitudes to one per group
+		pkamps = { k: max(v) for k, v in pkamps.items() }
+		
+		# Find low-amplitude threshold
+		minamp *= max(pkamps.values())
+
+		# Equalize the waveforms in each group, if desired
+		for k, pamp in pkamps.items():
+			if pamp < minamp: continue
+			for v in wavegrps[k]: v /= pamp
+	else:
+		# Find the low-amplitude threshold
+		minamp *= max(max(v) for v in pkamps.values())
+
+		for k, pamp in pkamps.items():
+			for i, v in enumerate(pamp):
+				if v < minamp: continue
+				wavegrps[k][i] /= v
 
 	return wavegrps
 
@@ -390,7 +423,7 @@ def getwavegrps(infiles, nsamp=None):
 	wavegrps = defaultdict(list)
 
 	for infile in sorted(infiles):
-		wset = WaveformSet.fromfile(infile)
+		wset = WaveformSet.fromfile(infile, force_dtype='float64')
 		f2c = wset.f2c
 
 		if wset.ntx != 1 or wset.nrx != 1:
@@ -428,7 +461,7 @@ def getwave(infile, nsamp=None):
 
 	An IOError will be raised if the file contains more than one waveform.
 	'''
-	wset = WaveformSet.fromfile(infile)
+	wset = WaveformSet.fromfile(infile, force_dtype='float64')
 	f2c = wset.f2c
 
 	if wset.ntx != 1 or wset.nrx != 1:
@@ -457,7 +490,7 @@ if __name__ == '__main__':
 	freq = 20.
 	hidewf = False
 	bitrate = -1
-	equalize = False
+	equalize = 0
 
 	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:mle')
 
@@ -483,7 +516,7 @@ if __name__ == '__main__':
 		elif opt[0] == '-m':
 			hidewf = True
 		elif opt[0] == '-e':
-			equalize = True
+			equalize += 1
 		else:
 			usage(fatal=True)
 
@@ -522,12 +555,8 @@ if __name__ == '__main__':
 		if atimes:
 			wavegrps = shiftgrps(wavegrps, atimes)
 			print('Shifted waveform groups')
-		# Equalize waveforms as desired
-		if equalize:
-			wavegrps = eqwavegrps(wavegrps)
-			print('Equalized waveform groups')
 		print('Storing waveform video to file', imgname)
-		plotframes(imgname, wavegrps, atimes, dwin, cthresh, bitrate)
+		plotframes(imgname, wavegrps, atimes, dwin, equalize, cthresh, bitrate)
 	else:
 		# Load the waveforms
 		waves = dict(getwave(inf, nsamp) for inf in infiles)

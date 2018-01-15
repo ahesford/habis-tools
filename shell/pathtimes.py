@@ -93,6 +93,8 @@ def tracetimes(tracer, s, elements, targets, trlist,
 
 		if not quiet: bar.update(i)
 
+	if not quiet: bar.update(nrec)
+
 	return times
 
 if __name__ == '__main__':

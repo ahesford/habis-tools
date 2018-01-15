@@ -1021,7 +1021,7 @@ class WaveformSet(object):
 		f.close()
 
 
-	def load(self, f, allow_duplicates=False,
+	def load(self, f, force_dtype=None, allow_duplicates=False,
 			skip_zero_length=True, warn_on_error=True):
 		'''
 		Associate the WaveformSet object with the data in f, a file-
@@ -1035,6 +1035,10 @@ class WaveformSet(object):
 
 		Each block of waveform data is memory-mapped from the source
 		file. This mapping is copy-on-write; changes do not persist.
+
+		If force_dtype is not None, and the data type of records stored
+		in the file is not equal to force_dtype, each record block will
+		be converted to the data type in the datatype argument.
 
 		If allow_duplicates is False, file parsing will halt the first
 		time a header is encounted for a receive-channel index
@@ -1083,6 +1087,11 @@ class WaveformSet(object):
 		typecode = funpack('<2s')[0]
 		dtype = np.dtype(self.typecodes[typecode])
 
+		if force_dtype is not None:
+			# Force a dtype conversion, if necessary
+			force_dtype = np.dtype(force_dtype)
+			if force_dtype == dtype: force_dtype = None
+
 		# Clear the record array
 		self.clearall()
 
@@ -1090,7 +1099,7 @@ class WaveformSet(object):
 		f2c, nsamp, nrx, ntx = funpack('<4I')
 
 		# Set the file-level parameters
-		self.dtype = dtype
+		self.dtype = force_dtype if force_dtype is not None else dtype
 		self.nsamp = nsamp
 		self.f2c = f2c
 		self.ntx = ntx
@@ -1196,8 +1205,11 @@ class WaveformSet(object):
 			except TypeError: break
 
 			if not skip_zero_length or wavemap.nbytes != 0:
+				if force_dtype is not None:
+					wmap = wavemap.astype(force_dtype)
+				else: wmap = wavemap
 				# Add the record to the set
-				self.setrecord(hdr, wavemap, copy=False)
+				self.setrecord(hdr, wmap, copy=False)
 				# Skip to the next header
 				f.seek(fsmap + wavemap.nbytes)
 
