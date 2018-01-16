@@ -1320,7 +1320,8 @@ class Waveform(object):
 		return enrs
 
 
-	def mer(self, erpow=3, sigpow=3, *args, raw=False, return_all=False, **kwargs):
+	def mer(self, erpow=3, sigpow=3, envelope=False, *args,
+			raw=False, return_all=False, **kwargs):
 		'''
 		For the energy ratio(s) returned by the call
 
@@ -1332,6 +1333,9 @@ class Waveform(object):
 
 		for an energy ratio ER. If the second energy ratio returned by
 		self.enratio is None, the second MER will also be None.
+
+		If envelope is True, abs(self) in the definition of MER is
+		replaced by self.envelope().
 
 		If the keyword-only argument raw is True, the raw data arrays
 		(or None if the second MER is None), defined over self.datawin,
@@ -1350,7 +1354,8 @@ class Waveform(object):
 		'''
 		# Compute the energy ratios and raise the powers
 		ner, fer = self.enratio(*args, raw=True, **kwargs)
-		sig = np.abs(self._data)**sigpow
+		if not envelope: sig = np.abs(self._data)**sigpow
+		else: sig = np.abs(hilbert(self._data))**sigpow
 		nmer = ner**erpow * sig
 		if fer is not None: fmer = fer**erpow * sig
 		else: fmer = None

@@ -133,10 +133,11 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 
 
 def getimertime(sig, threshold=1, window=None, equalize=True,
-		rootmag=False, breakaway=None, **kwargs):
+		rootmag=False, absimer=False, breakaway=None, **kwargs):
 	'''
 	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
-	and find the index of the first sample that is at least as large as:
+	or, if absimer is True, imer = abs(sig.imer(**kwargs)) and find the
+	index of the first sample that is at least as large as:
 
 		threshold * mean(imer), if rootmag is False,
 		threshold * mean(sqrt(abs(imer)))**2, if rootmag is True or 2,
@@ -187,6 +188,9 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 
 	# Compute the IMER only in the data window
 	imer = sig.imer(raw=True, **kwargs)
+
+	# Use the magnitude of IMER if desired
+	if absimer: imer = np.abs(imer)
 
 	# Compute primary threshold value in restricted window
 	ime = imer[dstart:dstart+dlen]
