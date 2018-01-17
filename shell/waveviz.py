@@ -16,7 +16,9 @@ from habis.formats import loadmatlist, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
-	print('USAGE: %s [-b bitrate] [-e] [-m] [-l] [-w s,e] [-a glob[:column]] [-t thresh] [-f freq] [-n nsamp] <imgname> <wavesets>' % progname, file=sys.stderr)
+	print(f'USAGE: {progname} [-b bitrate] [-e] [-m] [-l] '
+			'[-w s,e] [-a glob[:column]] [-t thresh] '
+			'[-f freq] [-n nsamp] <imgname> <wavesets>', file=sys.stderr)
 	sys.exit(fatal)
 
 
@@ -61,9 +63,21 @@ def plotframes(output, waves, atimes, dwin=None,
 	import matplotlib.animation as ani
 
 	# Ensure all data sets are equally sized
-	nsets = max(len(v) for v in waves.values())
-	if any(len(v) != nsets for v in waves.values()):
+	wvit = iter(waves.values())
+	try: nsets = len(next(wvit))
+	except StopIteration: nsets = 0
+	if any(len(v) != nsets for v in wvit):
 		raise ValueError('All waveform lists must be equally sized')
+
+	if nsets < 2 and atimes is not None:
+		atit = iter(atimes.values())
+		try: ntimes = len(next(atit))
+		except StopIteration: ntimes = 0
+		if any(len(v) != ntimes for v in atit):
+			raise ValueError('All arrival time lists must be equally sized')
+	elif atimes is not None:
+		ntimes = 1
+	else: ntimes = 0
 
 	# Prepare the axes for a 1080p frame
 	fig = plt.figure()
@@ -93,8 +107,14 @@ def plotframes(output, waves, atimes, dwin=None,
 		if atimes is not None:
 			# The window is relative to the arrival-time range
 			cpairs = set(waves.keys()).intersection(iter(atimes.keys()))
-			dstart = min(atimes[pair][0] for pair in cpairs)
-			dend = max(atimes[pair][0] for pair in cpairs)
+			if nsets > 1:
+				# With more than one waveform, first time is relevant
+				dstart = min(atimes[pair][0] for pair in cpairs)
+				dend = max(atimes[pair][0] for pair in cpairs)
+			else:
+				# With a single waveform, all times will be shown
+				dstart = min(min(atimes[pair]) for pair in cpairs)
+				dend = max(max(atimes[pair]) for pair in cpairs)
 			dwin = Window(max(0, int(dstart + dwin[0])), end=int(dend + dwin[1]))
 		else:
 			dwin = Window(dwin[0], end=dwin[1])
@@ -113,13 +133,29 @@ def plotframes(output, waves, atimes, dwin=None,
 	# Build the common time axis
 	taxis = np.arange(dwin.start, dwin.end)
 
-	print('Display frame is [%d, %d, %g, %g]' % (dwin.start, dwin.end, -vmax, vmax))
+	print(f'Waveform count: {nsets}; arrival-time count: {ntimes}')
+	print(f'Display frame is [{dwin.start}, {dwin.end}, {-vmax:g}, {vmax:g}]')
 
 	# Create the frames and write the video
 	with writer.saving(fig, output, fig.get_dpi()):
 		# Create the empty plot for efficiency
 		lines = ax.plot(*[[] for i in range(2 * nsets)])
-		apoint, = ax.plot([], [], 'bs')
+
+		# Create empty plots for arrival times, with vertical lines
+		cycler = mpl.rcParams['axes.prop_cycle']()
+
+		# Skip past the number of colors already used
+		for i in range(nsets): next(cycler)
+
+		# Set lines for arrival times, with colors in the cycle
+		apoints, alines = [ ], [ ]
+		for i in range(ntimes):
+			color = next(cycler)['color']
+			apt = ax.plot([], [], linestyle='', marker='o', color=color)
+			apoints.extend(apt)
+			aln = ax.axvline(color=color, linestyle='--')
+			alines.append(aln)
+
 		ax.axis([taxis[0], taxis[-1], -vmax, vmax])
 		ax.set_xlabel('Time, samples', fontsize=14)
 		ax.set_ylabel('Amplitude', fontsize=14)
@@ -134,14 +170,18 @@ def plotframes(output, waves, atimes, dwin=None,
 
 			# Plot an arrival time, if possible
 			try:
-				atelt = int(atimes[pair][0])
-			except (KeyError, TypeError):
-				apoint.set_visible(False)
+				atelts = [int(v) for v in atimes[pair][:ntimes]]
+			except (KeyError, TypeError, IndexError):
+				for apoint in apoints: apoint.set_visible(False)
+				for aline in alines: aline.set_visible(False)
 			else:
-				apoint.set_data([atelt], [wlist[0][atelt]])
-				apoint.set_visible(True)
+				for apt, aln, ate in zip(apoints, alines, atelts):
+					apt.set_data([ate], [wlist[0][ate]])
+					apt.set_visible(True)
+					aln.set_xdata([ate, ate])
+					aln.set_visible(True)
 
-			ax.set_title('Waveform %s' % (pair,), fontsize=14)
+			ax.set_title(f'Waveform {pair}', fontsize=14)
 
 			# Capture the frame
 			writer.grab_frame()
@@ -267,7 +307,7 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	ax[0].set_ylabel('Time, samples', fontsize=16)
 	if atimes is not None:
 		title = 'Waveforms aligned to mean arrival time'
-		if mtime: title += ' (%s samples)' % (mtime,)
+		if mtime: title += f' ({mtime} samples)'
 	else:
 		title = 'Waveforms with natural alignment'
 	ax[0].set_title(title + (' (log magnitude)' if log else ''), fontsize=16)
@@ -299,9 +339,9 @@ def getatimes(atarg, freq=1, scalar=True):
 
 	A glob matching the full name in atarg will first be checked. If no
 	matches exist or the file cannot be opened, and the name
-	constains a suffix of
-	integer indices, a file whose name matches atarg up to the suffix will
-	be checked and the specified column will be pulled.
+	constains a suffix of integer indices, a file whose name matches atarg
+	up to the suffix will be checked and the specified column will be
+	pulled.
 
 	If no suffix is specified, the first column will be pulled.
 
@@ -314,6 +354,15 @@ def getatimes(atarg, freq=1, scalar=True):
 	try:
 		# Try to load the file with the full name
 		atmap = loadmatlist(atarg, scalar=False, nkeys=2, forcematch=True)
+
+		# Find the number of columns
+		ait = iter(atmap.values())
+		try: ncol = len(next(ait))
+		except StopIteration: ncol = 1
+		for v in ait:
+			if ncol != len(v):
+				raise ValueError('Arrival-time file has values of different lengths')
+		acols = list(range(ncol))
 	except IOError as err:
 		atcomps = atarg.split(':')
 		if len(atcomps) < 2: raise err
@@ -321,7 +370,7 @@ def getatimes(atarg, freq=1, scalar=True):
 		acols = [int(av, base=10) for av in atcomps[-1].split(',')]
 		atname = ':'.join(atcomps[:-1])
 		atmap = loadmatlist(atname, scalar=False, nkeys=2, forcematch=True)
-		print('Loading columns %s from arrival-time file %s' % (acols, atname))
+		print(f'Loading columns {acols} from arrival-time file {atname}')
 
 	if scalar:
 		if len(acols) != 1:
@@ -339,7 +388,8 @@ def shiftgrps(wavegrps, atimes):
 	(t, r) pair.
 
 	If atimes[t,r] exists but its length does not match the length of
-	wavegrps[t,r], an IndexError will be raised.
+	wavegrps[t,r], an IndexError will be raised unless the length of
+	wavegrps[t,r] is unity (i.e., no waveforms would be shifted).
 
 	The shifting is done in place, but wavegrps is also returned.
 	'''
@@ -351,8 +401,9 @@ def shiftgrps(wavegrps, atimes):
 		try: atlist = atimes[t,r]
 		except KeyError: continue
 
-		if len(atlist) != len(waves):
-			raise IndexError('Length of arrival-time list does not match length of wave-group list for pair %s' % ((t,r),))
+		if len(waves) > 1 and len(atlist) != len(waves):
+			raise IndexError('Length of arrival-time list does not match '
+					f'length of wave-group list for pair {(t,r)}')
 
 		# Build the new list of shifted waves
 		wavegrps[t,r] = [ waves[0] ]
@@ -427,7 +478,7 @@ def getwavegrps(infiles, nsamp=None):
 		f2c = wset.f2c
 
 		if wset.ntx != 1 or wset.nrx != 1:
-			raise IOError('Input %s must contain a single waveform' % (infile,))
+			raise IOError(f'Input {infile} must contain a single waveform')
 
 		rx = wset.rxidx[0]
 		tx = next(wset.txidx)
@@ -465,7 +516,7 @@ def getwave(infile, nsamp=None):
 	f2c = wset.f2c
 
 	if wset.ntx != 1 or wset.nrx != 1:
-		raise IOError('Input %s must contain a single waveform' % (infile,))
+		raise IOError(f'Input {infile} must contain a single waveform')
 
 	rx = wset.rxidx[0]
 	tx = next(wset.txidx)
