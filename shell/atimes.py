@@ -76,14 +76,16 @@ def finddelays(nproc=1, *args, **kwargs):
 		pool.start()
 
 		# Wait for all processes to respond
-		responses = 0
+		responses, deadpool = 0, False
 		while responses < nproc:
 			try: results = queue.get(timeout=0.1)
 			except pyqueue.Empty:
 				# Loosely join to watch for a dead pool
 				pool.wait(timeout=0.1, limit=1)
-				# If the pool is dead, give up
-				if not pool.unjoined: break
+				if not pool.unjoined:
+					# Note a dead pool, give read one more try
+					if deadpool: break
+					else: deadpool = True
 			else:
 				delays.update(results[0])
 				for k, v in results[1].items():
