@@ -134,8 +134,8 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(exd, **kwargs)
 
 
-def getimertime(sig, threshold=1, window=None, equalize=True,
-		rootmag=False, absimer=False, breakaway=None, **kwargs):
+def getimertime(sig, threshold=1, window=None, equalize=True, rootmag=False,
+		absimer=False, breakaway=None, breaklen=None, **kwargs):
 	'''
 	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
 	or, if absimer is True, imer = abs(sig.imer(**kwargs)) and find the
@@ -158,14 +158,14 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	search is performed to identify the latest sample of the IMER function
 	before the primary crossing that crosses the secondary threshold
 
-		secthresh = mean(imer[:secondary]) +
-				breakaway * std(imer[:secondary]),
+		secthresh = mean(imer[secstart:secondary]) +
+				breakaway * std(imer[secstart:secondary]),
 
-	where secondary is the index being tested for a secondary crossing.
-	This search is done using pandas.Series to define expanding windows. If
-	a suitable secondary value is found, the IMER time is replaced by the
-	secondary threshold crossing. Note that secondary search is not bound
-	by any provided window.
+	where secondary is the index being tested for a secondary crossing and
+	secstart is 0 if breaklen is None and (secondary - breaklen) otherwise.
+	This search is done using pandas.Series to define expanding or rolling
+	windows. If a suitable secondary crossing is found, the IMER time is
+	replaced by the secondary crossing.
 
 	An IndexError will be raised if a suitable primary crossing cannot be
 	identified.
@@ -224,27 +224,32 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 		# Truncate secondary search to primary crossing
 		imer = imer[:dl]
 
-		# Build an expanding baseline for crossing up to primary crossing
-		ime = Series(imer).expanding()
-		baseline = ime.mean() + breakaway * ime.std()
+		# Build a baseline for crossing up to primary crossing
+		if breaklen: ime = Series(imer).rolling(breaklen, min_periods=1)
+		else: ime = Series(imer).expanding(min_periods=1)
+		baseline = (ime.mean() + breakaway * ime.std()).values
+
+		# Limit leading edge of IMER and baseline to start of window
+		imer = imer[dstart:]
+		baseline = baseline[dstart:]
 
 		try:
 			# Latest crossing is first point after last below baseline
 			dls = np.nonzero(imer < baseline)[0][-1] + 1
 			# If secondary crossing runs past primary, no more searching
-			if dls >= dl: raise IndexError
+			if dls + dstart >= dl: raise IndexError
 		except IndexError:
 			pass
 		else:
-			# Update delay to earlier secondary crossing
-			dl = dls
+			# Establish the new threshold from crossing
+			mval = baseline[dls]
 
 			# Update endpoints of crossing interval
-			rval = imer[dl]
-			lval = imer[dl - 1] if dl > 0 else None
+			rval = imer[dls]
+			lval = imer[dls - 1] if dls > 0 else None
 
-			# Threshold is baseline for crossing, if one exists
-			mval = baseline.iloc[dl]
+			# Shift delay to start of data window
+			dl = dls + dstart
 
 	# Interpolate if possible
 	if rval is not None and lval is not None and rval != lval:
@@ -687,7 +692,9 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 
 		if len(nbrs) < 2:
 			# If the element is its own neighborhood, just copy result
-			if key in nbrs: result[key] = dl
+			if key in nbrs:
+				wavestats['sole-valid'] += 1
+				result[key] = dl
 			else: wavestats['invalid-neighborhood'] += 1
 		else:
 			# Results will be optimized from groups of delays
@@ -717,28 +724,8 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 
 		if key in slw:
 			result[key] = grp[key]
-			wavestats['direct-valid'] += 1
-		elif not slw:
-			wavestats['no-valid-neighbor'] += 1
-			continue
-		else:
-			# Otherwise, find optimum slowness from non-outlier values
-			dx, tx = zip(*((pdist[t,r], grp[t,r]) for t,r in slw))
-			dx = np.asarray(dx)
-			tx = np.asarray(tx)
-
-			# Arrival-time will be inferred; find the propagation distance
-			try:
-				plen = pdist[key]
-			except KeyError:
-				t, r = key
-				try: plen = norm(elements[t] - elements[r])
-				except (KeyError, IndexError):
-					wavestats['unknown-pair'] += 1
-					continue
-
-			result[key] = plen * (tx @ dx) / (dx @ dx)
-			wavestats['neighbor-optimized'] += 1
+			wavestats['valid-in-neighborhood'] += 1
+		else: wavestats['outlier'] += 1
 
 	try: queue.put((result, wavestats))
 	except AttributeError: pass
