@@ -134,16 +134,21 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(exd, **kwargs)
 
 
-def getimertime(sig, threshold=1, window=None, equalize=True, rootmag=False,
+def getimertime(sig, threshold=1, window=None, equalize=True, rmsavg=None,
 		absimer=False, breakaway=None, breaklen=None, **kwargs):
 	'''
 	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
 	or, if absimer is True, imer = abs(sig.imer(**kwargs)) and find the
 	index of the first sample that is at least as large as:
 
-		threshold * mean(imer), if rootmag is False,
-		threshold * mean(sqrt(abs(imer)))**2, if rootmag is True or 2,
-		threshold * mean(cbrt(abs(imer)))**3, if rootmag is 3.
+		threshold * mean(imer), if rmsgap is None, or else
+		threshold * sqrt(RMS * max(abs(imer))),
+
+	where RMS is the RMS value of the IMER function from the beginning of
+	time to the sample argmax(abs(imer)) - int(rmsavg). If the RMS window
+	is not well defined (i.e., the value of rmsavg moves the end of the
+	window before the start of the IMER data window), the threshold search
+	will proceed as if rmsavg were None.
 
 	If window is None, the whole-signal IMER is searched. Otherwise, window
 	should be a tuple or dictionary that will be convered to a Window
@@ -196,16 +201,20 @@ def getimertime(sig, threshold=1, window=None, equalize=True, rootmag=False,
 
 	# Compute primary threshold value in restricted window
 	ime = imer[dstart:dstart+dlen]
-	if not rootmag:
-		mval = threshold * np.mean(ime)
-	else:
-		if rootmag is True or rootmag == 2:
-			nps, ipw = np.sqrt, 2
-		elif rootmag == 3:
-			nps, ipw = np.cbrt, 3
-		else: raise ValueError('Argument "rootmag" must be True, 2 or 3')
+	mval = None
 
-		mval = threshold * np.mean(nps(np.abs(ime)) * np.sign(ime))**ipw
+	if rmsavg is not None:
+		# Find peak location and end of RMS interval
+		pk = np.argmax(np.abs(ime))
+		rmend = pk + dstart - int(rmsavg)
+		if rmend > 0:
+			# Find RMS value for all time to start of gap
+			rmsval = np.sqrt(np.mean(imer[:rmend]**2))
+			# Compute compromise threshold
+			mval = threshold * np.sqrt(np.abs(ime[pk]) * rmsval)
+
+	# Default threshold when rmsavg is None or no RMS baseline can be found
+	if mval is None: mval = threshold * np.mean(ime)
 
 	# Find the first crossing of the IMER function
 	try: dl = np.nonzero(imer[dstart:dstart+dlen] >= mval)[0][0] + dstart
