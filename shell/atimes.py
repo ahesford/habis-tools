@@ -173,15 +173,25 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	windows. If a suitable secondary crossing is found, the IMER time is
 	replaced by the secondary crossing.
 
+	The breaklen argument is ignored if breakaway is None.
+
 	If a primary crossing is found and merpeak is True, the IMER time will
-	be replaced by the earliest time of a near-MER peak that is at least as
-	large as the value of the near-MER function at the primary crossing. If
-	merpeak is a numeric value, it will be interpreted as an integer and
+	be replaced by the location a peak in the near-MER function at least as
+	large as the value of the near-MER function at the primary IMER
+	crossing and subject to the following rules:
+
+	* If any suitably high near-MER peaks occur before the primary IMER
+	  crossing, the highest such peak will be selected, otherwise,
+
+	* If all suitably high near-MER peaks occur no earlier than the primary
+	  IMER crossing, the earliest such peak will be selected.
+	
+	If merpeak is a numeric value, it will be interpreted as an integer and
 	the near-MER function will be smoothed with a rolling average of that
 	many points prior to the peak search. The smoothing will be performed
 	with pandas.Series.
 
-	The "merpeak" and "breakaway" options are mutually exclusive.
+	The merpeak and breakaway options are mutually exclusive.
 
 	An IndexError will be raised if a suitable primary crossing cannot be
 	identified.
@@ -214,6 +224,8 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 		except TypeError:
 			raise IndexError('Specific window does not overlap signal data')
 
+	dend = dstart + dlen
+
 	if equalize:
 		# Equalize with peak in the desired window
 		if window is None: emax = sig.envelope().extremum()[0]
@@ -230,7 +242,7 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	if absimer: imer = np.abs(imer)
 
 	# Compute primary threshold value in restricted window
-	ime = imer[dstart:dstart+dlen]
+	ime = imer[dstart:dend]
 	mval = None
 
 	if rmsavg is not None:
@@ -247,7 +259,7 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	if mval is None: mval = threshold * np.mean(ime)
 
 	# Find the first crossing of the IMER function
-	try: dl = np.nonzero(imer[dstart:dstart+dlen] >= mval)[0][0] + dstart
+	try: dl = np.nonzero(imer[dstart:dend] >= mval)[0][0] + dstart
 	except IndexError: raise IndexError('Primary IMER crossing not found')
 
 	# Store interval limits for later interpolation
@@ -294,14 +306,29 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 			nmer = nme.mean().values
 		# Find the NMER level at the IMER crossing
 		nmval = nmer[dl]
-		# Find all NMER peaks at least as large as reference level
-		nmer = nmer[dstart:dstart+dlen]
-		nmpks = [pk for pk in signal.findpeaks(nmer) if pk['peak'][1] >= nmval]
-		if nmpks:
-			# Find earliest peak
-			pk = min(nmpks, key=lambda pk: pk['peak'][0])['peak'][0]
-			dl = pk + dstart
-			# Do not interpolate with merpeaks
+		# Find high-enough peaks in window, sort by index
+		nmpeaks = sorted(pk['peak']
+				for pk in signal.findpeaks(nmer[dstart:dend])
+					if pk['peak'][1] > nmval)
+		# Find the preferred NMER peak, walking in increasing index order
+		bestpk = None
+		for idx, height in nmpeaks:
+			# Shift peak to position within data window
+			idx = idx + dstart
+			if idx < dl:
+				# For peaks before crossing, pick highest one
+				if not bestpk or height > bestpk[1]:
+					bestpk = idx, height
+			else:
+				# Passed IMER crossing; use this peak
+				# unless a pre-crossing peak was already found
+				if not bestpk: bestpk = idx, height
+				break
+
+		if bestpk:
+			# Update arrival time to location of preferred peak
+			dl = bestpk[0]
+			# Interpolation with merpeaks is not reasonable
 			mval, lval, rval = None, None, None
 
 	# Interpolate if possible
