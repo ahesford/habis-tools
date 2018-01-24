@@ -12,7 +12,7 @@ from collections import OrderedDict, defaultdict
 
 from shlex import split as shsplit
 
-from pycwp import process, stats, cutil
+from pycwp import process, stats, cutil, signal
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat, loadmatlist, savez_keymat
@@ -134,8 +134,9 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(exd, **kwargs)
 
 
-def getimertime(sig, threshold=1, window=None, equalize=True, rmsavg=None,
-		absimer=False, breakaway=None, breaklen=None, **kwargs):
+def getimertime(sig, threshold=1, window=None, equalize=True,
+		rmsavg=None, absimer=False, merpeak=False,
+		breakaway=None, breaklen=None, **kwargs):
 	'''
 	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
 	or, if absimer is True, imer = abs(sig.imer(**kwargs)) and find the
@@ -172,10 +173,36 @@ def getimertime(sig, threshold=1, window=None, equalize=True, rmsavg=None,
 	windows. If a suitable secondary crossing is found, the IMER time is
 	replaced by the secondary crossing.
 
+	If a primary crossing is found and merpeak is True, the IMER time will
+	be replaced by the earliest time of a near-MER peak that is at least as
+	large as the value of the near-MER function at the primary crossing. If
+	merpeak is a numeric value, it will be interpreted as an integer and
+	the near-MER function will be smoothed with a rolling average of that
+	many points prior to the peak search. The smoothing will be performed
+	with pandas.Series.
+
+	The "merpeak" and "breakaway" options are mutually exclusive.
+
 	An IndexError will be raised if a suitable primary crossing cannot be
 	identified.
 	'''
 	if threshold < 0: raise ValueError('IMER threshold must be positive')
+
+	if merpeak:
+		if breakaway is not None:
+			raise ValueError('Options "merpeak" and '
+					'"breakaway" are mutually exclusive')
+		merpeak = int(merpeak)
+		if merpeak < 1:
+			raise ValueError('Option "merpeak" must be '
+					'Boolean or a positive integer')
+
+	if breakaway is not None or merpeak > 1:
+		try:
+			from pandas import Series
+		except ImportError:
+			raise ImportError('Searches with merkpeak > 1 '
+					'or breakaway require pandas.Series')
 
 	if window is None:
 		dstart, dlen = sig.datawin
@@ -193,8 +220,11 @@ def getimertime(sig, threshold=1, window=None, equalize=True, rmsavg=None,
 		else: emax = sig.window(window).envelope().extremum()[0]
 		sig /= emax
 
-	# Compute the IMER only in the data window
-	imer = sig.imer(raw=True, **kwargs)
+	if merpeak:
+		# Compute the IMER and NMER only in the data window
+		imer = sig.imer(raw=True, return_all=True, **kwargs)
+		imer, nmer = imer['imer'], imer['nmer']
+	else: imer = sig.imer(raw=True, **kwargs)
 
 	# Use the magnitude of IMER if desired
 	if absimer: imer = np.abs(imer)
@@ -224,12 +254,10 @@ def getimertime(sig, threshold=1, window=None, equalize=True, rmsavg=None,
 	lval = imer[dl - 1] if dl > 0 else None
 	rval = imer[dl]
 
-	if breakaway is not None and dl > 0:
-		try:
-			from pandas import Series
-		except ImportError:
-			raise ImportError('Breakaway searches require pandas.Series')
+	# Searches beyond the first sample are useless
+	if dl < 1: return dl + sig.datawin.start
 
+	if breakaway is not None:
 		# Truncate secondary search to primary crossing
 		imer = imer[:dl]
 
@@ -259,6 +287,22 @@ def getimertime(sig, threshold=1, window=None, equalize=True, rmsavg=None,
 
 			# Shift delay to start of data window
 			dl = dls + dstart
+	elif merpeak:
+		if merpeak > 1:
+			# Use rolling-average filter to smooth NMER
+			nme = Series(nmer).rolling(merpeak, center=True, min_periods=1)
+			nmer = nme.mean().values
+		# Find the NMER level at the IMER crossing
+		nmval = nmer[dl]
+		# Find all NMER peaks at least as large as reference level
+		nmer = nmer[dstart:dstart+dlen]
+		nmpks = [pk for pk in signal.findpeaks(nmer) if pk['peak'][1] >= nmval]
+		if nmpks:
+			# Find earliest peak
+			pk = min(nmpks, key=lambda pk: pk['peak'][0])['peak'][0]
+			dl = pk + dstart
+			# Do not interpolate with merpeaks
+			mval, lval, rval = None, None, None
 
 	# Interpolate if possible
 	if rval is not None and lval is not None and rval != lval:
@@ -267,9 +311,7 @@ def getimertime(sig, threshold=1, window=None, equalize=True, rmsavg=None,
 		if -1 <= corr <= 0: dl += corr
 
 	# Offset IMER with the start of the data window
-	dl += sig.datawin.start
-
-	return dl
+	return dl + sig.datawin.start
 
 
 def applywindow(sig, key, f2c=0, map={ }, default=None, **kwargs):

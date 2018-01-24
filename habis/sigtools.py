@@ -1309,8 +1309,6 @@ class Waveform(object):
 
 		if not return_all: return imer
 
-		rdict = { 'imer': imer }
-
 		if not raw:
 			# Wrap intermediate results in Waveform objects
 			enrs = { k: Waveform(self.nsamp, v, self._datastart)
