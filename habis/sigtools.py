@@ -1263,10 +1263,13 @@ class Waveform(object):
 
 			IMER = MA(FER, avgwin) - MA(NER, avgwin),
 
-		where MA is a left-looking moving average of width avgwin. The
+		where MA is a centered moving average of width avgwin. The
 		moving average is not well defined for the first (avgwin - 1)
 		samples; these undefined values will be replaced by the nearest
 		valid average.
+
+		If avgwin is None, 0 or 1, no rolling average will be
+		performed.
 
 		The return value of self.mer must return two valid MERs or a
 		ValueError will be raised.
@@ -1282,8 +1285,10 @@ class Waveform(object):
 		the call to self.mer with matching "raw" and "return_all"
 		keyword arguments.
 		'''
-		avgwin = int(avgwin)
-		if avgwin <= 0: raise ValueError('Argument "avgwin" must be nonnegative')
+		avgwin = int(avgwin or 0)
+		if not 0 <= avgwin < self.datawin.length:
+			raise ValueError('Argument "avgwin" must be None, or an '
+					'integer in range [0, self.datawin.length)')
 
 		# Compute the energy ratios
 		enrs = self.mer(*args, raw=True, return_all=True, **kwargs)
@@ -1296,12 +1301,17 @@ class Waveform(object):
 			raise ValueError('Call to self.mer(*args, **kwargs) '
 						'must return two valid MER sequences')
 
-		# Compute rightward moving average of each signal
-		vld = len(ner) - avgwin
-		ner[avgwin:] = stats.rolling_mean(ner, avgwin)[:vld]
-		ner[:avgwin] = ner[avgwin]
-		fer[avgwin:] = stats.rolling_mean(fer, avgwin)[:vld]
-		fer[:avgwin] = fer[avgwin]
+		# Compute centered moving average of each signal
+		if avgwin > 1:
+			vld = len(ner) - avgwin
+			ast = avgwin // 2
+			aed = ast + vld
+			ner[ast:aed] = stats.rolling_mean(ner, avgwin)[:vld]
+			ner[:ast] = ner[ast]
+			ner[aed:] = ner[aed - 1]
+			fer[ast:aed] = stats.rolling_mean(fer, avgwin)[:vld]
+			fer[:ast] = fer[ast]
+			fer[aed:] = fer[aed - 1]
 
 		# Wrap the IMER in a Waveform if necessary
 		imer = fer - ner
