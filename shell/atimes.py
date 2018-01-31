@@ -124,6 +124,9 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 	neardefault - f2c when neardefault is numeric and None when neardefault
 	is None.
 
+	Only the first return value of sig.isolatepeak (the isolated signal) is
+	returned.
+
 	A ValueError will be raised if a peak cannot be isolated.
 	'''
 	try: exd = nearmap[key] - f2c
@@ -131,7 +134,7 @@ def isolatepeak(sig, key, f2c=0, nearmap={ }, neardefault=None, **kwargs):
 		if neardefault is None: exd = None
 		else: exd = neardefault - f2c
 
-	return sig.isolatepeak(exd, **kwargs)
+	return sig.isolatepeak(exd, **kwargs)[0]
 
 
 def getimertime(sig, threshold=1, window=None, equalize=True,
@@ -750,7 +753,7 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 					continue
 
 			# Compute and record the delay
-			dl = sig.delay(ref, osamp, negcorr)
+			dl = sig.delay(ref, osamp=osamp, negcorr=negcorr)
 			if negcorr:
 				if dl[1] < 0: wavestats['negative-correlated'] += 1
 				dl = dl[0]
