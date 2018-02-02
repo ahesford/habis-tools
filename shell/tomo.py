@@ -171,9 +171,9 @@ class StraightRayTracer(TomographyTask):
 		'straight' mode.
 
 		The argument tmin should be a float such that any path with an
-		actual arrival time T and a compensated arrival time Tc that
-		fails to satisfy Tc >= tmin * T will be excluded from the
-		output.
+		uncompensated straight-ray arrival time Ts and a compensated
+		arrival time Tc that fails to satisfy Ts >= Tc >= tmin * Ts
+		will be excluded from the output.
 
 		The return value is a map from transmit-receive index pairs to
 		pairs of compensated and uncompensated straight-ray arrival
@@ -189,7 +189,6 @@ class StraightRayTracer(TomographyTask):
 		# Compute the corrective factor for each (t, r) pair
 		ivals = { }
 		for t, r in self.trpairs:
-			vt = self.atimes[t,r]
 			src, rcv = self.elements[t], self.elements[r]
 
 			try:
@@ -197,7 +196,7 @@ class StraightRayTracer(TomographyTask):
 				tc, ts = tracer.trace(src, rcv, fresnel=0,
 						intonly=True, mode='straight')
 				# Check the time for sanity
-				if not ts >= tc >= tmin * vt:
+				if not ts >= tc >= tmin * ts:
 					raise ValueError('Compensated time out of range')
 			except ValueError: continue
 
