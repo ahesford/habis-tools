@@ -159,7 +159,7 @@ class StraightRayTracer(TomographyTask):
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def comptimes(self, s, tmin=0.):
+	def comptimes(self, s, tmin=0., bent_fallback=False):
 		'''
 		Compute compensated and straight-ray arrival times for all
 		transmit-receive pairs in self.atimes through the medium
@@ -174,6 +174,10 @@ class StraightRayTracer(TomographyTask):
 		uncompensated straight-ray arrival time Ts and a compensated
 		arrival time Tc that fails to satisfy Ts >= Tc >= tmin * Ts
 		will be excluded from the output.
+
+		If bent_fallback is True, a bent-ray trace will be attempted as
+		a substitute for compensated straight-ray times if the value of
+		the compensated straight-ray integral is None.
 
 		The return value is a map from transmit-receive index pairs to
 		pairs of compensated and uncompensated straight-ray arrival
@@ -195,18 +199,24 @@ class StraightRayTracer(TomographyTask):
 				# Try to find the compensated times
 				tc, ts = tracer.trace(src, rcv, fresnel=0,
 						intonly=True, mode='straight')
-				if tc is None or not ts >= tc >= tmin * ts:
+				# If compensated integral fails, try bent-ray tracing
+				if tc is None and bent_fallback:
+					tc = tracer.trace(src, rcv, fresnel=0,
+							intonly=True, mode='bent')
+
+				if not ts >= tc >= tmin * ts:
 					raise ValueError('Compensated time out of range')
-			except ValueError: continue
+			except (ValueError, TraceError): continue
 
 			# Record the times and compensate the RHS
 			ivals[t,r] = (tc, ts)
 
 		return ivals
 
-	def lsmr(self, s, epochs=1, coleq=False, tmin=0., chambolle=None,
-			postfilter=None, partial_output=None, lsmropts={},
-			omega=1., mindiff=False, save_pathmat=None, save_times=None):
+	def lsmr(self, s, epochs=1, coleq=False, tmin=0.,
+			chambolle=None, postfilter=None, partial_output=None,
+			lsmropts={}, omega=1., bent_fallback=False,
+			mindiff=False, save_pathmat=None, save_times=None):
 		'''
 		For each of epochs rounds, compute, using LSMR, a slowness
 		image that satisfies the straight-ray arrival-time equations
@@ -236,8 +246,8 @@ class StraightRayTracer(TomographyTask):
 
 		Within each epoch, an update to the slowness image is computed
 		based on the difference between the compensated arrival time
-		produced by self.comptimes(s, tmin) and the actual arrival
-		times in self.atimes.
+		produced by self.comptimes(s, tmin, bent_fallback) and the
+		actual arrival times in self.atimes.
 
 		When mindiff is True, compensated arrival times will be replaced
 		by straight-ray times whenever the straight-ray time is closer
@@ -331,7 +341,7 @@ class StraightRayTracer(TomographyTask):
 		ns = s.perturb(sol)
 		while True:
 			# Adjust RHS times with straight-ray compensation
-			tv = self.comptimes(ns, tmin)
+			tv = self.comptimes(ns, tmin, bent_fallback)
 			# Find RMS arrival-time error for compensated model
 			terr = fsum((v[0] - self.atimes[k])**2
 					for k, v in tv.items())
