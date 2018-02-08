@@ -195,8 +195,7 @@ class StraightRayTracer(TomographyTask):
 				# Try to find the compensated times
 				tc, ts = tracer.trace(src, rcv, fresnel=0,
 						intonly=True, mode='straight')
-				# Check the time for sanity
-				if not ts >= tc >= tmin * ts:
+				if tc is None or not ts >= tc >= tmin * ts:
 					raise ValueError('Compensated time out of range')
 			except ValueError: continue
 

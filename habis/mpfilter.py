@@ -40,18 +40,27 @@ def parfilter(name, comm=None):
 	For a given named filter, construct a MPI distributed version of the
 	filter that divides the workload along the first axis of the filtered
 	image among all ranks in the MPI communicator comm (MPI.COMM_WORLD by
-	default). The filter must support a "size" or "footprint" argument
-	because distributed slices of the image to be filtered will overlap by
-	half the filter (or footprint) size along the first axis to avoid
-	boundary artifacts that would otherwise result from the slicing.
+	default).
+
+	Distributed slices of the image will overlap along the first axis by a
+	"pad" to mitigate boundary artifacts that would otherwise result from
+	slicing. The wrapped MPI function supports an optional keyword-only
+	"npad" argument that specifies the width of the overlap. If "npad" is
+	not provided, the filter must support a "footprint" or "size" argument
+	(if both are provided, footprint is preferred) and the value of "npad"
+	will be half the footprint or size.
 
 	The filter that will be parallelized is selected from scipy.ndimage if
 	such a function exists in that module, or else from pycwp.filter.
 
-	The return value is a function with the same signature as the original
-	filter. The function will handle distribution of the input array (which
-	should be the entire array on each process) and accumulation of the
-	result (which will be the same array on each process).
+	The return value is a wrapper function with the same signature as the
+	original filter except for the addition of the optional keyword-only
+	"npad" argument to indicate overlap of distributed slices. The "npad"
+	argument is consumed by the wrapper and will not be passed to the
+	wrapped filter. All other arguments are passed to the wrapped filter.
+	The function will handle distribution of the input array (which should
+	be the entire array on each process) and accumulation of the result
+	(which will be the same array on each process).
 	'''
 	try: filt = getattr(scipy.ndimage, name)
 	except AttributeError:
@@ -61,9 +70,11 @@ def parfilter(name, comm=None):
 	from mpi4py import MPI
 	if comm is None: comm = MPI.COMM_WORLD
 
-	def filterfunc(a, size=None, footprint=None, *args, **kwargs):
+	def filterfunc(a, size=None, footprint=None, *args, npad=None, **kwargs):
 		# Determine the necessary overlap in slicing
-		if footprint is not None:
+		if npad is not None:
+			npad = int(npad)
+		elif footprint is not None:
 			footprint = np.asarray(footprint)
 			npad = footprint.shape[0] // 2
 			kwargs['footprint'] = footprint
@@ -71,7 +82,7 @@ def parfilter(name, comm=None):
 			try: npad = size[0] // 2
 			except TypeError: npad = size // 2
 			kwargs['size'] = size
-		else: raise TypeError('One of "size" or "footprint" is required')
+		else: raise TypeError('One of "size", "footprint" or "npad" is required')
 
 		# Make sure the array is an array
 		a = np.asarray(a)

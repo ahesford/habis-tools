@@ -110,6 +110,7 @@ ctypedef struct WaveNormIntContext:
 	long nmax, n, cycles, bad_resets
 	WNErrCode custom_retcode
 	double normwt
+	double minaxdp
 	double *normals
 
 class TraceError(Exception): pass
@@ -162,12 +163,17 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		on the angle between the estimated wavefront normal and the
 		straight-ray path.
 
+		The value ctx.minaxdp is updated with the minimum of its prior
+		value and the value of the inner product between the wavefront
+		normal and propagation direction as computed by this evaluation
+		of the integrand.
+
 		The output array results must have length 2.
 		'''
 		cdef:
 			WaveNormIntContext *wctx = <WaveNormIntContext *>ctx
 			point p, gf, nrm, refnrm, ba
-			double fv, refu, L, rn
+			double fv, refu, L, rn, wdp
 			double *rnp
 			long uidx
 
@@ -228,8 +234,12 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			return IntegrableStatus.CUSTOM_RETURN
 		iscal(1 / rn, &nrm)
 
+		# Update the minimum axis dot product
+		wdp = dot(nrm, ba)
+		wctx.minaxdp = min(wctx.minaxdp, wdp)
+
 		# Scale integrand by compensating factor
-		results[0] = fv * dot(nrm, ba)
+		results[0] = fv * wdp
 		results[1] = fv
 
 		# Add the new normal to the cache
@@ -254,7 +264,8 @@ cdef class WavefrontNormalIntegrator(Integrable):
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
 	def pathint(self, a, b, double atol, double rtol, h=1.0,
-			double normwt=1.0, unsigned int ncache=512, int reclimit=-1):
+			double normwt=1.0, double maxangle=-1.0,
+			unsigned int ncache=512, int reclimit=-1):
 		'''
 		Given a 3-D path from point a to point b, in grid coordinates,
 		use an adaptive Gauss-Kronrod quadrature of order 15 to
@@ -268,6 +279,12 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		coordinates. If h is scalar, it is interpreted as [h, h, h]. If
 		h is a sequence of three floats, its values define the scaling
 		in x, y and z, respectively.
+
+		If maxangle is nonnegative, it specifies the maximum allowable
+		angle, in degrees, between the wavefront normal and the
+		propagation direction. If the wavefront normal exceeds this
+		limit at any evaluation point, the returned value of the
+		compensated path integral will be None.
 
 		To evaluate the compensation term in the integrand, estimates
 		of the wavefront normal are continually updated with a
@@ -289,8 +306,8 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		path integral. If reclimit is negative, no limit applies.
 
 		The return value is a tuple (I1, I2), where I1 is the
-		compensated integral and I2 is the uncompensated straight-ray
-		integral.
+		compensated integral (or None, if any maximum angle is exceed)
+		and I2 is the uncompensated straight-ray integral.
 		'''
 		cdef:
 			WaveNormIntContext ctx
@@ -328,6 +345,9 @@ cdef class WavefrontNormalIntegrator(Integrable):
 				raise MemoryError('Cannot allocate storage for normal tracking')
 		else: ctx.normals = <double *>NULL
 
+		# Initialize the minimum wavefront-propagation dot product
+		ctx.minaxdp = 1
+
 		# Integrate and free normal storage
 		rcode = self.gausskron(ivals, 2, atol, rtol,
 				0., 1., reclimit, <void *>(&ctx))
@@ -347,8 +367,13 @@ cdef class WavefrontNormalIntegrator(Integrable):
 		iptmpy(ctx.h, &bah)
 		L = ptnrm(bah)
 
+		# Make sure angular limit not exceeded for compensated integrals
+		if maxangle < 0 or ctx.minaxdp >= np.cos(np.pi * maxangle / 180):
+			Ic = ivals[0] * L
+		else: Ic = None
+
 		# Scale integrals properly
-		return ivals[0] * L, ivals[1] * L
+		return Ic, ivals[1] * L
 
 
 cdef class PathIntegrator(Integrable):
