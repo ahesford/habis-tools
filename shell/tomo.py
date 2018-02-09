@@ -204,7 +204,7 @@ class StraightRayTracer(TomographyTask):
 					tc = tracer.trace(src, rcv, fresnel=0,
 							intonly=True, mode='bent')
 
-				if not ts >= tc >= tmin * ts:
+				if tc is None or not ts >= tc >= tmin * ts:
 					raise ValueError('Compensated time out of range')
 			except (ValueError, TraceError): continue
 
