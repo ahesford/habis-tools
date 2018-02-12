@@ -392,9 +392,9 @@ cdef class PathIntegrator(Integrable):
 
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
-	def minpath(self, start, end, unsigned long nmax,
-			double atol, double rtol, double ptol,
-			h=1.0, double perturb=0.0, unsigned long nstart=1,
+	def minpath(self, start, end, double atol, double rtol, 
+			unsigned long nmax, double ptol, h=1.0,
+			double perturb=0.0, unsigned long nstart=1,
 			bint warn_on_fail=True, bint raise_on_fail=False, **kwargs):
 		'''
 		Given 3-vectors start and end in grid coordinates, search for a
@@ -808,8 +808,8 @@ class PathTracer(object):
 		try: keys = config.keys(psec)
 		except Exception as e: _throw('Unable to read configuration', e)
 
-		extra_keys = keys.difference({'prefilter', 'defval', 'interpolator',
-			'grid', 'ptol', 'atol', 'rtol', 'segmax', 'bropts', 'sropts'})
+		extra_keys = keys.difference({'prefilter', 'defval',
+			'interpolator', 'grid', 'atol', 'rtol', 'bropts', 'sropts'})
 		if extra_keys:
 			first_key = next(iter(extra_keys))
 			raise HabisConfigError(f'Unrecognized key {first_key} '
@@ -823,17 +823,11 @@ class PathTracer(object):
 			if grid: raise KeyError('Invalid keyword ' + str(next(iter(grid))))
 		except Exception as e: _throw('Configuration must specify valid grid', e)
 
-		try: ptol = config.get(psec, 'ptol', mapper=float, default=1e-3)
-		except Exception as e: _throw('Invalid optional ptol', e)
-
 		try: atol = config.get(psec, 'atol', mapper=float, default=1e-6)
 		except Exception as e: _throw('Invalid optional atol', e)
 
 		try: rtol = config.get(psec, 'rtol', mapper=float, default=1e-4)
 		except Exception as e: _throw('Invalid optional atol', e)
-
-		try: segmax = config.get(psec, 'segmax', mapper=int, default=256)
-		except Exception as e: _throw('Invalid optional segmax', e)
 
 		try:
 			bropts = config.get(psec, 'bropts',
@@ -857,12 +851,12 @@ class PathTracer(object):
 		except Exception as e: _throw('Invalid optional prefilter', e)
 
 		# Create the instance
-		return cls(lo, hi, ncell, segmax, atol, rtol, ptol,
+		return cls(lo, hi, ncell, atol, rtol,
 				interpolator, defval, prefilter, bropts, sropts)
 
 
-	def __init__(self, lo, hi, ncell, segmax, atol, rtol, ptol, interpolator,
-				defval=None, prefilter=None, bropts={ }, sropts={ }):
+	def __init__(self, lo, hi, ncell, atol, rtol, interpolator,
+			defval=None, prefilter=None, bropts={ }, sropts={ }):
 		'''
 		Define a grid (lo x hi) subdivided into ncell voxels on which a
 		slowness map should be interpreted, along with options for
@@ -873,15 +867,14 @@ class PathTracer(object):
 		bent-ray integration methods.
 
 		For bent-ray tracing tracing, PathIntegrator.minpath is used to
-		find an optimal path. The parameters segmax and ptol are passed
-		to that method as the respective arguments nmax and ptol.
-		Optional keyword arguments to PathIntegrator.minpath may be
-		provided in the dictionary bropts.
+		find an optimal path. Keyword arguments for the method
+		PathIntegrator.minpath may be provided in the dictionary
+		bropts; bropts must contain at least the "nmax" and "ptol"
+		keys if bent-ray tracing is to be used.
 
 		For straight-ray tracing, WavefrontNormalIntegrator.pathint is
 		used to compute compensated and uncompensated straight-ray
-		integrals. The segmax and ptol parameters have no effect for
-		straight-ray tracing. Optional keyword arguments to the method
+		integrals. Optional keyword arguments to the method
 		WavefrontNormalIntegrator.pathint may be provided in the
 		dictionary sropts.
 
@@ -895,10 +888,8 @@ class PathTracer(object):
 		self.box = Box3D(lo, hi, ncell)
 
 		# Copy integration parameters
-		self.ptol = float(ptol)
 		self.atol = float(atol)
 		self.rtol = float(rtol)
-		self.nmax = int(segmax)
 
 		# Copy optional argument dicts
 		self.bropts = dict(bropts)
@@ -1093,13 +1084,13 @@ class PathTracer(object):
 		and a receiver with world coordinates rcv, compute a path
 		integral from src to rcv using, when mode is 'bent',
 
-		  PathIntegrator(si).minpath(gs, gr, self.nmax, self.atol,
-			self.rtol, self.ptol, self.box.cell, **self.bropts),
+		  PathIntegrator(si).minpath(gs, gr, self.atol,
+				self.rtol, h=self.box.cell, **self.bropts),
 
 		or, when mode is 'straight',
 
-		  WavefrontNormalIntegrator(si).pathint(gs, gr,
-			self.atol, self.rtol, self.box.cell, **self.sropts),
+		  WavefrontNormalIntegrator(si).pathint(gs, gr, self.atol,
+				self.rtol, h=self.box.cell, **self.sropts),
 
 		where si is the interpolator returned by self.get_slowness, and
 		gs and gr are grid coordinates of src and rcv, respectively,
@@ -1108,8 +1099,9 @@ class PathTracer(object):
 		If self.get_slowness() returns None, this method will fail with
 		a TypeError.
 
-		Note that, in 'straight' mode, the parameters self.ptol and
-		self.nmax have no significance.
+		Note that, in 'bent' mode, the mandatory parameters 'ptol' and
+		'nmax' of PathIntegrator.minpath are required to be in
+		self.bropts as keyword arguments.
 
 		In 'bent' mode, the path integral is a scalar value: the
 		integral from src to rcv through an optimized path. If fresnel
@@ -1161,15 +1153,15 @@ class PathTracer(object):
 		if mode == 'bent':
 			# Use the bent-ray tracer to find an optimal path
 			points, pint = integrator.minpath(gsrc, grcv,
-					self.nmax, self.atol, self.rtol, self.ptol,
-					box.cell, raise_on_fail=True, **self.bropts)
+					self.atol, self.rtol, h=box.cell,
+					raise_on_fail=True, **self.bropts)
 			# Convert path to world coordinates for marching
 			points = np.array([box.cell2cart(*p) for p in points])
 		else:
 			# Do path integration only without Fresnel zones
 			if not fresnel:
 				pint = integrator.pathint(gsrc, grcv, self.atol,
-						self.rtol, box.cell, **self.sropts)
+						self.rtol, h=box.cell, **self.sropts)
 			else: pint = None
 			# Straight path just has a start and end
 			points = np.array([src, rcv], dtype=np.float64)
