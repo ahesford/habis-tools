@@ -1078,8 +1078,6 @@ class PathTracer(object):
 
 	def trace(self, src, rcv, fresnel=0, intonly=False, mode='bent'):
 		'''
-		Through a slowness model assigned by a prior call to
-		self.set_slowness, trace a path integral
 		Given a 3-D Numpy array s, a source with world coordinates src
 		and a receiver with world coordinates rcv, compute a path
 		integral from src to rcv using, when mode is 'bent',
@@ -1123,8 +1121,10 @@ class PathTracer(object):
 		a map (i, j, k) -> L, where (i, j, k) is a cell index in
 		self.box and L is the accumulated length of the optimum path
 		through that cell. The return value in this case will be
-		(pathmap, pathint), where pathmap is this cell-to-length map
-		and pathint is the single-value or double-value path integral.
+		(pathmap, points, pathint), where pathmap is the cell-to-length
+		map, points is an N-by-3 array containing the world coordinates
+		of the N (>= 2) points that define the traced path and pathint
+		is the single-value or double-value path integral.
 
 		Any Exceptions raised by WavefrontNormalIntegrator.pathint or
 		PathIntegrator.minpath will not be caught by this method.
@@ -1176,10 +1176,9 @@ class PathTracer(object):
 			# Reintegrate over Fresnel path
 			pint = fsum(v * si.evaluate(*k, grad=False)
 						for k, v in plens.items())
+			if intonly: return pint
 
-			return pint if intonly else (plens, pint)
-
-		return plens, pint
+		return plens, points, pint
 
 
 @cython.cdivision(True)

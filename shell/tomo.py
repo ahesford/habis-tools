@@ -480,7 +480,7 @@ class BentRayTracer(TomographyTask):
 		# Save most recent hit map, if desired
 		self.save_hitmaps = bool(hitmaps)
 
-	def evaluate(self, s, nm):
+	def evaluate(self, s, nm, hybrid=False):
 		'''
 		Evaluate a stochastic sample of the cost functional and its
 		gradient
@@ -493,6 +493,22 @@ class BentRayTracer(TomographyTask):
 		contribution to the travel times based on the traced paths as
 		computed by self.tracer.trace. The data D consists of
 		corresponding entries self.atimes[t,r].
+
+		If hybrid is True, the segments of each piecewise linear traced
+		path will be passed to self.tracer.trace again in 'straight'
+		mode with no Fresnel ellipsoid (regardless of the value of
+		self.fresnel) to determined (C, S), the compensated and
+		uncompensated straight-ray times, respectively. If both times
+		are not None, the corresponding entry of D will be the adjusted
+		time
+
+		  D[t,r] = self.atimes[t,r] + S - C
+
+		rather than the unadjusted D[t,r] = self.atimes[t,r]. If the
+		straight-ray tracer fails, the unadjusted value will be
+		substituted by default; however, iff hybrid takes the
+		(case-insensitive) value 'hard', the measurement pair for which
+		tracing failed will be excluded from the evaluation.
 
 		The return value will be (C(s), nr, grad(C)(s)), where nr is
 		the number of measurements participating in the sample (this
@@ -512,41 +528,68 @@ class BentRayTracer(TomographyTask):
 		stored in [:,:,:,1].
 		'''
 		rank, size = self.comm.rank, self.comm.size
-		self.tracer.set_slowness(s)
+		tracer = self.tracer
+
+		tracer.set_slowness(s)
 
 		# The Fresnel wavelength parameter (or None)
 		fresnel = self.fresnel
 
 		# Compute the random sample of measurements
 		if nm < 1 or nm > len(self.atimes): nm = len(self.atimes)
-		trset = sample(list(atimes.keys()), nm)
+		trset = sample(list(self.atimes.keys()), nm)
 
 		# Accumulate the local cost function and gradient
 		f = []
 
-		gshape = self.tracer.box.ncell
+		gshape = tracer.box.ncell
 		gf = np.zeros(gshape, dtype=np.float64, order='C')
 
 		nrows, nskip = 0, 0
 
 		if self.save_hitmaps:
-			hmshape = self.tracer.get_slowness().shape + (2,)
+			hmshape = tracer.get_slowness().shape + (2,)
 			hitmaps = np.zeros(hmshape, dtype=np.float64)
+
+		if hybrid and isinstance(hybrid, str):
+			# Make sure "hard" hybrid mode is properly handled
+			if hybrid.lower() == 'hard': hybrid = 'hard'
+			else: hybrid = True
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
 			src, rcv = self.elements[t], self.elements[r]
+			atdata = self.atimes[t,r]
+
 			try:
-				plens, pint = self.tracer.trace(src, rcv, fresnel)
+				plens, pts, pint = tracer.trace(src, rcv, fresnel)
 				if not plens or pint <= 0: raise ValueError
 			except (ValueError, TraceError):
 				# Skip invalid or empty paths
 				nskip += 1
 				continue
 
+			if hybrid:
+				# Compute straight-ray adjustments, if possible
+				tc, ts, invalid = 0, 0, False
+				for src, rcv in zip(pts, pts[1:]):
+					ltc, lts = tracer.trace(src, rcv, fresnel=0,
+							intonly=True, mode='straight')
+					try:
+						tc += ltc
+						ts += lts
+					except TypeError:
+						invalid = (hybrid == 'hard')
+						break
+				else: atdata += (ts - tc)
+
+				if invalid:
+					nskip += 1
+					continue
+
 			nrows += 1
 			# Calculate error in model arrival time
-			err = pint - atimes[t,r]
+			err = pint - atdata
 			f.append(err**2)
 			# Add gradient contribution
 			for c, l in plens.items(): gf[c] += l * err
@@ -569,8 +612,9 @@ class BentRayTracer(TomographyTask):
 
 		return f, nrows, gf
 
-	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6, maxstep=None,
-			regularizer=None, postfilter=None, partial_output=None):
+	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
+			maxstep=None, hybrid=False, regularizer=None,
+			postfilter=None, partial_output=None):
 		'''
 		Iteratively compute a slowness image by minimizing the cost
 		functional represented in this BentRayTracer instance and using
@@ -682,7 +726,7 @@ class BentRayTracer(TomographyTask):
 			sp = s.perturb(x)
 
 			# Compute the stochastic cost and gradient
-			f, nrows, gf = self.evaluate(sp, nmeas)
+			f, nrows, gf = self.evaluate(sp, nmeas, hybrid)
 
 			if nrows:
 				# Scale cost (and gradient) to mean-squared error
