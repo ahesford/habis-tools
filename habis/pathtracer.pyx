@@ -5,8 +5,6 @@ images.
 # Copyright (c) 2017 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-#cython: embedsignature=True
-
 import cython
 cimport cython
 
@@ -392,6 +390,47 @@ cdef class PathIntegrator(Integrable):
 
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
+	def _pathopt(self, points, atol, rtol, h, raise_on_fail, warn_on_fail, **kwargs):
+		'''
+		A helper function for self.minpath to find an optimal path by
+		perturbing all coordinates in the N-by-3 array points (except
+		for the first and last points) to minimize the path integral
+		with self.pathint.
+
+		If scipy.optimize.fmin_l_bfgs_b emits a 'warnflag', this method
+		will raise a TraceError if raise_on_fail is True or else will
+		issue a warning if warn_on_fail is True.
+
+		Returns the optimum path and its path integral.
+		'''
+		from scipy.optimize import fmin_l_bfgs_b as bfgs
+		import warnings
+
+		points = np.asanyarray(points)
+		n, m = points.shape
+		if m != 3 or n < 3:
+			raise ValueError('Array "points" must have shape (N, 3) with N > 2')
+
+		# Find the optimal path and unflatten the array
+		xopt, nf, info = bfgs(self.pathint, points, fprime=None,
+					args=(atol, rtol, h, True), **kwargs)
+		xopt = xopt.reshape((n, m), order='C')
+
+		if info['warnflag']:
+			msg = (f'Optimizer ({n-1} segs, {info["funcalls"]} '
+					f' fcalls {info["nit"]} iters) warns ')
+			if info['warnflag'] == 1:
+				msg += 'limits exceeded'
+			elif info['warnflag'] == 2:
+				msg += str(info.get('task', 'unknown warning'))
+			if raise_on_fail: raise TraceError(msg)
+			elif warn_on_fail: warnings.warn(msg)
+
+		return xopt, nf
+
+
+	@cython.wraparound(False)
+	@cython.boundscheck(False)
 	def minpath(self, start, end, double atol, double rtol, 
 			unsigned long nmax, double ptol, h=1.0,
 			double perturb=0.0, unsigned long nstart=1,
@@ -468,8 +507,14 @@ cdef class PathIntegrator(Integrable):
 		n = nstart
 
 		# Compute the starting cost (and current best)
-		pbest = points
-		bf = lf = self.pathint(points, atol, rtol, h, False)
+		if n > 2:
+			points, bf = self._pathopt(points, atol, rtol, h,
+					raise_on_fail, warn_on_fail, **kwargs)
+			pbest = points
+			lf = bf
+		else:
+			pbest = points
+			bf = lf = self.pathint(points, atol, rtol, h, False)
 
 		# Double perturbation length for a two-sided interval
 		if perturb > 0: perturb *= 2
@@ -508,18 +553,8 @@ cdef class PathIntegrator(Integrable):
 			points = npoints
 
 			# Optimize the interpolated path
-			xopt, nf, info = bfgs(self.pathint, points, fprime=None,
-						args=(atol, rtol, h, True), **kwargs)
-			points = xopt.reshape((n + 1, 3), order='C')
-
-			if info['warnflag']:
-				msg = 'Optimizer (%d segs, %d fcalls, %d iters) warns ' % (n, info['funcalls'], info['nit'])
-				if info['warnflag'] == 1:
-					msg += 'limits exceeded'
-				elif info['warnflag'] == 2:
-					msg += str(info.get('task', 'unknown warning'))
-				if raise_on_fail: raise TraceError(msg)
-				elif warn_on_fail: warnings.warn(msg)
+			points, nf = self._pathopt(points, atol, rtol, h,
+					raise_on_fail, warn_on_fail, **kwargs)
 
 			if nf < bf:
 				# Record the current best path

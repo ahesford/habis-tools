@@ -32,6 +32,7 @@ if __name__ == '__main__':
 			platforms=['any'], license='Closed',
 			packages=['habis'],
 			scripts=glob('shell/*.py'),
-			ext_modules=cythonize('habis/*.pyx'),
+			ext_modules=cythonize('habis/*.pyx', 
+				compiler_directives={'embedsignature': True}),
 			include_dirs = [np.get_include()],
 		)
