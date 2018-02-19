@@ -496,19 +496,18 @@ class BentRayTracer(TomographyTask):
 
 		If hybrid is True, the segments of each piecewise linear traced
 		path will be passed to self.tracer.trace again in 'straight'
-		mode with no Fresnel ellipsoid (regardless of the value of
-		self.fresnel) to determined (C, S), the compensated and
-		uncompensated straight-ray times, respectively. If both times
-		are not None, the corresponding entry of D will be the adjusted
-		time
+		mode to determine (C, S), the compensated and uncompensated
+		straight-ray times, respectively. If both times are not None,
+		the data entry
 
 		  D[t,r] = self.atimes[t,r] + S - C
 
-		rather than the unadjusted D[t,r] = self.atimes[t,r]. If the
-		straight-ray tracer fails, the unadjusted value will be
-		substituted by default; however, iff hybrid takes the
-		(case-insensitive) value 'hard', the measurement pair for which
-		tracing failed will be excluded from the evaluation.
+		will be substituted for the the unadjusted D[t,r] =
+		self.atimes[t,r]. If the straight-ray tracer fails, the
+		unadjusted value will be substituted by default; however, iff
+		hybrid takes the (case-insensitive) value 'hard', the
+		measurement pair for which tracing failed will be excluded from
+		the evaluation.
 
 		The return value will be (C(s), nr, grad(C)(s)), where nr is
 		the number of measurements participating in the sample (this
@@ -573,7 +572,7 @@ class BentRayTracer(TomographyTask):
 				# Compute straight-ray adjustments, if possible
 				tc, ts, invalid = 0, 0, False
 				for src, rcv in zip(pts, pts[1:]):
-					ltc, lts = tracer.trace(src, rcv, fresnel=0,
+					ltc, lts = tracer.trace(src, rcv, fresnel,
 							intonly=True, mode='straight')
 					try:
 						tc += ltc
@@ -623,12 +622,12 @@ class BentRayTracer(TomographyTask):
 		grid defined in self.tracer.box.
 
 		The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB)
-		method of Tan, et al. (2016) is used to compute the image. The
-		method continues for at most 'epochs' epochs, with a total of
-		'updates' stochastic descent steps per epoch. A single
-		stochastic descent is made by sampling the global cost
-		functional (mean-squared arrival-time error) using nmeas
-		measurements per MPI rank.
+		method of Tan, et al. (2016) is used to compute the image with
+		a convergence tolerance of tol. The method continues for at
+		most 'epochs' epochs, with a total of 'updates' stochastic
+		descent steps per epoch. A single stochastic descent is made by
+		sampling the global cost functional (mean-squared arrival-time
+		error) using nmeas measurements per MPI rank.
 
 		The descent step is selecting using a stochastic
 		Barzilai-Borwein (BB) scheme. The first two epochs will each
@@ -640,6 +639,8 @@ class BentRayTracer(TomographyTask):
 
 		where g_{k,0} == 0, f_t is the t-th sampled cost functional for
 		the epoch and x_t is the solution at update t.
+
+		The "hybrid" argument is passed to self.evaluate.
 
 		If regularizer is not None, the cost function will be
 		regularized with a method from pycwp.cytools.regularize. The

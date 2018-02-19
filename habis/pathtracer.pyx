@@ -1143,13 +1143,12 @@ class PathTracer(object):
 		for a dominant wavelength specified as the value of fresnel, in
 		the same units as self.box.cell.
 
-		In 'straight' mode, when fresnel is zero, the path integral is
-		a 2-tuple (c, s), where c is the wavefront-compensated path
-		integral and s is the uncompensated straight-ray integral.
-		Because compensated integrals are incompatible with Fresnel
-		zones, the the path integral for 'straight' mode when fresnel
-		is nonzero is a scalar value that represents the integral from
-		src to rcv over the straight Fresnel ellipsoid.
+		In 'straight' mode, the path integral is a 2-tuple (c, s),
+		where c is the wavefront-compensated path integral and s is the
+		uncompensated straight-ray integral. Compensated straight-ray
+		integrals are incompatible with Fresnel ellipsoids, so c always
+		behaves as if fresnel were zero; the uncompensated integral
+		will use Fresnel ellipsoids if fresnel is nonzero.
 
 		If intonly is True, only the path integral(s) will be returned.
 		Otherwise, the path will be marched through self.box to produce
@@ -1194,10 +1193,8 @@ class PathTracer(object):
 			points = np.array([box.cell2cart(*p) for p in points])
 		else:
 			# Do path integration only without Fresnel zones
-			if not fresnel:
-				pint = integrator.pathint(gsrc, grcv, self.atol,
-						self.rtol, h=box.cell, **self.sropts)
-			else: pint = None
+			pint = integrator.pathint(gsrc, grcv, self.atol,
+					self.rtol, h=box.cell, **self.sropts)
 			# Straight path just has a start and end
 			points = np.array([src, rcv], dtype=np.float64)
 
@@ -1209,8 +1206,12 @@ class PathTracer(object):
 
 		if fresnel:
 			# Reintegrate over Fresnel path
-			pint = fsum(v * si.evaluate(*k, grad=False)
+			fint = fsum(v * si.evaluate(*k, grad=False)
 						for k, v in plens.items())
+			# Replace relevant integral with Fresnel integral
+			if mode == 'bent': pint = fint
+			else: pint = (pint[0], fint)
+
 			if intonly: return pint
 
 		return plens, points, pint
