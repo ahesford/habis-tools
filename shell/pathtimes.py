@@ -21,8 +21,12 @@ from habis.pathtracer import PathTracer, TraceError
 timetype = np.dtype([('t', '<i8'), ('r', '<i8'),
 			('b', '<f8'), ('c', '<f8'), ('s', '<f8')])
 
+jointype = np.dtype([('t', '<i8'), ('r', '<i8'),
+			('xs', '<f8'), ('ys', '<f8'), ('zs', '<f8'),
+			('xe', '<f8'), ('ye', '<f8'), ('ze', '<f8'),])
+
 def tracetimes(tracer, s, elements, targets, trlist,
-		skip_straight=False, skip_bent=False, quiet=True):
+		skip_straight=False, skip_bent=False, quiet=True, joints=None):
 	'''
 	For a PathTracer tracer, a 3-D Numpy array s representing a slowness, a
 	keymap of source coordinates elements, and a list of targets, trace
@@ -46,9 +50,17 @@ def tracetimes(tracer, s, elements, targets, trlist,
 
 	If quiet is not True, a progress bar will be printed to show tracing
 	progress.
+
+	If joints is None, a second return value will be an array of "jointype"
+	records that list, for a (t, r) pair with a bent path containing at
+	least 3 segments, the first (xs, ys, zs) and last (xe, ye, ze) joints
+	in the path.
 	'''
 	if skip_straight and skip_bent:
 		raise ValueError('Cannot set both skip_straight and skip_bent to True')
+
+	if joints and skip_bent:
+		raise ValueError('Cannot set joints if skip_bent is True')
 
 	if skip_straight: ntimes = 1
 	elif skip_bent: ntimes = 2
@@ -71,6 +83,9 @@ def tracetimes(tracer, s, elements, targets, trlist,
 	if not quiet: bar = progressbar.ProgressBar(max_value=nrec)
 	else: bar = None
 
+	if joints is not None: joints = np.zeros((nrec,), dtype=jointype)
+	njoints = 0
+
 	for i, (t, r) in enumerate(itertr):
 		src = elements[t]
 		rcv = targc[r]
@@ -78,8 +93,13 @@ def tracetimes(tracer, s, elements, targets, trlist,
 		record = [ t, r ]
 
 		if not skip_bent:
-			try: tb = tracer.trace(src, rcv, intonly=True)
+			try: _, pts, tb = tracer.trace(src, rcv)
 			except (ValueError, TraceError): tb = -1
+
+			if joints is not None and len(pts) > 3:
+				joints[njoints] = (t, r, pts[1,0], pts[1,1], pts[1,2],
+							pts[-2,0], pts[-2,1], pts[-2,2])
+				njoints += 1
 		else: tb = 0
 		record.append(tb)
 
@@ -95,7 +115,8 @@ def tracetimes(tracer, s, elements, targets, trlist,
 
 	if not quiet: bar.update(nrec)
 
-	return times
+	if joints is not None: return times, joints[:njoints]
+	else: return times
 
 if __name__ == '__main__':
 	parser = ArgumentParser(description='Compute bent-ray as well as compensated '
@@ -109,6 +130,9 @@ if __name__ == '__main__':
 			action='store_true', help='Disable bent-ray tracing')
 	parser.add_argument('-q', '--quiet',
 			action='store_true', help='Disable printing of status bar')
+	parser.add_argument('-j', '--joints', type=str, default=None,
+			help='Save first and last joint in bent paths '
+				'with at least 3 segments (requires bent tracing')
 
 	parser.add_argument('elements', type=str,
 			help='A key-matrix of source (element) coordinates')
@@ -146,12 +170,19 @@ if __name__ == '__main__':
 	rank, size = comm.rank, comm.size
 
 	args.quiet = rank or args.quiet
-	times = tracetimes(tracer, s, elements, targets[rank::size],
-			args.trlist, args.nostraight, args.nobent, args.quiet)
+	times = tracetimes(tracer, s, elements, targets[rank::size], args.trlist,
+				args.nostraight, args.nobent, args.quiet, args.joints)
+	if args.joints:
+		# Expand two-value return when joints are desired
+		times, joints = times
+	else: joints = None
 
 	# Gather the number of records at the root
 	ntimes = len(times)
 	counts = comm.gather(ntimes)
+
+	if joints is not None:
+		jcounts = comm.gather(len(joints))
 
 	if not rank:
 		# Store all accumulated rows
@@ -159,10 +190,17 @@ if __name__ == '__main__':
 		displs = [0]
 		for ct in counts[:-1]: displs.append(displs[-1] + ct)
 		alltimes = np.empty((rows,), dtype=timetype)
+
+		if joints is not None:
+			rows = sum(jcounts)
+			jdispls = [0]
+			for ct in jcounts[:-1]: jdispls.append(jdispls[-1] + ct)
+			alljoints = np.empty((rows,), dtype=jointype)
 	else:
 		# Store only the local portion for accumulation
 		rows = len(times)
 		alltimes, displs = None, None
+		if joints is not None: alljoints, jdispls = None, None
 
 	# Build an MPI datatype for the record accumulation
 	offsets = [timetype.fields[n][1] for n in timetype.names]
@@ -170,11 +208,21 @@ if __name__ == '__main__':
 	mptype = MPI.Datatype.Create_struct([1]*len(mtypes), offsets, mtypes)
 	mptype.Commit()
 
+	if joints is not None:
+		offsets = [jointype.fields[n][1] for n in jointype.names]
+		mtypes = [MPI.LONG]*2 + [MPI.DOUBLE]*6
+		jptype = MPI.Datatype.Create_struct([1]*len(mtypes), offsets, mtypes)
+		jptype.Commit()
+
 	# Accumulate all records on the root node
 	comm.Gatherv([times, ntimes, mptype], [alltimes, counts, displs, mptype])
-
 	# No need for MPI datatype anymore
 	mptype.Free()
+
+	if joints is not None:
+		comm.Gatherv([joints, len(joints), jptype],
+				[alljoints, jcounts, jdispls, jptype])
+		jptype.Free()
 
 	if not rank:
 		if args.trlist:
@@ -189,3 +237,8 @@ if __name__ == '__main__':
 			# Write the values, ignoring indices
 			b = alltimes.view('float64').reshape(alltimes.shape + (-1,))[:,2:]
 			mio.writebmat(b.astype('float32'), args.output)
+
+		if args.joints and len(alljoints):
+			joints = { (t,r): (xs, ys, zs, xe, ye, ze)
+					for (t, r, xs, ys, zs, xe, ye, ze) in alljoints }
+			savez_keymat(args.joints, joints)
