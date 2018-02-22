@@ -390,7 +390,8 @@ cdef class PathIntegrator(Integrable):
 
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
-	def _pathopt(self, points, atol, rtol, h, raise_on_fail, warn_on_fail, **kwargs):
+	def _pathopt(self, points, atol, rtol, h, damp,
+			raise_on_fail, warn_on_fail, **kwargs):
 		'''
 		A helper function for self.minpath to find an optimal path by
 		perturbing all coordinates in the N-by-3 array points (except
@@ -413,7 +414,7 @@ cdef class PathIntegrator(Integrable):
 
 		# Find the optimal path and unflatten the array
 		xopt, nf, info = bfgs(self.pathint, points, fprime=None,
-					args=(atol, rtol, h, True), **kwargs)
+					args=(atol, rtol, h, True, damp), **kwargs)
 		xopt = xopt.reshape((n, m), order='C')
 
 		if info['warnflag']:
@@ -426,6 +427,10 @@ cdef class PathIntegrator(Integrable):
 			if raise_on_fail: raise TraceError(msg)
 			elif warn_on_fail: warnings.warn(msg)
 
+		# Re-evaluate the integral if damping was used for optimization
+		if (damp or 0) and damp > 0:
+			nf = self.pathint(xopt, atol, rtol, h, False)
+
 		return xopt, nf
 
 
@@ -433,7 +438,7 @@ cdef class PathIntegrator(Integrable):
 	@cython.boundscheck(False)
 	def minpath(self, start, end, double atol, double rtol, 
 			unsigned long nmax, double ptol, h=1.0,
-			double perturb=0.0, unsigned long nstart=1,
+			double damp=0.0, double perturb=0.0, unsigned long nstart=1,
 			bint warn_on_fail=True, bint raise_on_fail=False, **kwargs):
 		'''
 		Given 3-vectors start and end in grid coordinates, search for a
@@ -443,8 +448,11 @@ cdef class PathIntegrator(Integrable):
 		The path will be iteratively divided into at most N segments,
 		where N = 2**M * nstart for the smallest integer M that is not
 		less than nmax. With each iteration, an optimal path is sought
-		by minimizing the object self.pathint(path, atol, rtol, h) with
-		respect to all points along the path apart from the fixed
+		by minimizing the object
+		
+			self.pathint(path, atol, rtol, h, damp=damp)
+			
+		with respect to all points along the path apart from the fixed
 		points start and end. The resulting optimal path is subdivided
 		for the next iteration by inserting points that coincide with
 		the midpoints of all segments in the currently optimal path.
@@ -509,7 +517,7 @@ cdef class PathIntegrator(Integrable):
 		# Compute the starting cost (and current best)
 		if n > 2:
 			points, bf = self._pathopt(points, atol, rtol, h,
-					raise_on_fail, warn_on_fail, **kwargs)
+					damp, raise_on_fail, warn_on_fail, **kwargs)
 			pbest = points
 			lf = bf
 		else:
@@ -554,7 +562,7 @@ cdef class PathIntegrator(Integrable):
 
 			# Optimize the interpolated path
 			points, nf = self._pathopt(points, atol, rtol, h,
-					raise_on_fail, warn_on_fail, **kwargs)
+					damp, raise_on_fail, warn_on_fail, **kwargs)
 
 			if nf < bf:
 				# Record the current best path
@@ -572,7 +580,8 @@ cdef class PathIntegrator(Integrable):
 	@cython.boundscheck(False)
 	@cython.cdivision(True)
 	def pathint(self, points, double atol, double rtol,
-			h=1.0, bint grad=False, bint gk=False, int reclimit=-1):
+			h=1.0, bint grad=False, double damp=0.0,
+			bint gk=False, int reclimit=-1):
 		'''
 		Given control points specified as rows of an N-by-3 array of
 		grid coordinates, use an adaptive quadrature to integrate the
@@ -596,6 +605,11 @@ cdef class PathIntegrator(Integrable):
 		convention, igrad[0] and igrad[N - 1] are identically zero. If
 		the input array points was a 1-D flattened version of points,
 		the output igrad will be similarly flattened in C order.
+
+		If damp is greater than 0, the path integrand will be replaced
+		by (self.data + damp), which effectively adds a length penalty
+		when the path integral is optimized. Otherwise, damp is
+		ignored.
 
 		If gk is True, adaptive Gauss-Kronrod quadrature will be used
 		to compute path integrals. Otherwise, adaptive Simpson
@@ -624,6 +638,9 @@ cdef class PathIntegrator(Integrable):
 		cdef unsigned long npts = points.shape[0]
 		if points.shape[1] != 3:
 			raise ValueError('Length of second dimension of points must be 3')
+
+		# Ignore negative damping parameters
+		if damp < 0: damp = 0
 
 		cdef:
 			double ival = 0.0, fval = 0.0
@@ -706,6 +723,9 @@ cdef class PathIntegrator(Integrable):
 			iptmpy(scale, &bah)
 			L = ptnrm(bah)
 
+			# Include damping parameter
+			results[0] += damp
+
 			# Scale integrals properly
 			ival = L * results[0]
 			if ctx.dograd:
@@ -729,7 +749,7 @@ cdef class PathIntegrator(Integrable):
 			for im1 in range(nval):
 				ends[im1] = ends[im1 + nval]
 
-			if not grad: continue
+			if not ctx.dograd: continue
 
 			# Add contribution to gradient from segment endpoints
 			im1 = i - 1
@@ -741,7 +761,7 @@ cdef class PathIntegrator(Integrable):
 			pgrad[i, 2] += rgrad.z
 
 		# Return just the function, if no gradient is desired
-		if not grad: return fval
+		if not ctx.dograd: return fval
 
 		# Force endpoint gradients to zero
 		pgrad[0,0] = pgrad[0,1] = pgrad[0,2] = 0.0
