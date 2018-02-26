@@ -16,7 +16,7 @@ from habis.formats import loadmatlist, WaveformSet
 
 def usage(progname=None, fatal=False):
 	if progname is None: progname = sys.argv[0]
-	print(f'USAGE: {progname} [-b bitrate] [-e] [-m] [-l] '
+	print(f'USAGE: {progname} [-b bitrate] [-e] [-m] [-s] [-l] '
 			'[-w s,e] [-a glob[:column]] [-t thresh] '
 			'[-f freq] [-n nsamp] <imgname> <wavesets>', file=sys.stderr)
 	sys.exit(fatal)
@@ -540,10 +540,11 @@ if __name__ == '__main__':
 	atimes = None
 	freq = 20.
 	hidewf = False
+	suppwf = False
 	bitrate = -1
 	equalize = 0
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:mle')
+	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:msle')
 
 	for opt in optlist:
 		if opt[0] == '-h':
@@ -566,6 +567,8 @@ if __name__ == '__main__':
 			bitrate = int(opt[1])
 		elif opt[0] == '-m':
 			hidewf = True
+		elif opt[0] == '-s':
+			suppwf = True
 		elif opt[0] == '-e':
 			equalize += 1
 		else:
@@ -642,10 +645,15 @@ if __name__ == '__main__':
 						wave /= pkamp
 				waves[t,r] = wave
 
-		if hidewf and atimes:
-			print('Suppressing unaligned waveforms')
-			for k, v in waves.items():
-				if k not in atimes: v *= 0
+		if atimes:
+			if suppwf:
+				print('Suppressing unaligned waveforms')
+				ckeys = set(atimes).intersection(waves)
+				waves = { k: waves[k] for k in ckeys }
+			elif hidewf:
+				print('Zeroing unaligned waveforms')
+				for k, v in waves.items():
+					if k not in atimes: v *= 0
 
 		print('Storing waveform image to file', imgname)
 		plotwaves(imgname, waves, atimes, mtime, dwin, log, cthresh)
