@@ -4,6 +4,8 @@ import numpy as np, getopt, sys, os
 
 from math import sqrt
 
+from argparse import ArgumentParser
+
 from scipy.signal import hilbert
 
 import progressbar
@@ -13,14 +15,6 @@ from collections import defaultdict
 from habis.habiconf import matchfiles
 from habis.sigtools import Waveform, Window
 from habis.formats import loadmatlist, WaveformSet
-
-def usage(progname=None, fatal=False):
-	if progname is None: progname = sys.argv[0]
-	print(f'USAGE: {progname} [-b bitrate] [-e] [-m] [-s] [-l] '
-			'[-w s,e] [-a glob[:column]] [-t thresh] '
-			'[-f freq] [-n nsamp] <imgname> <wavesets>', file=sys.stderr)
-	sys.exit(fatal)
-
 
 def plotframes(output, waves, atimes, dwin=None, 
 		equalize=False, cthresh=None, bitrate=-1):
@@ -123,7 +117,9 @@ def plotframes(output, waves, atimes, dwin=None,
 	waves = { k: [ w.window(dwin) for w in v ] for k, v in waves.items() }
 
 	# Equalize the waveforms if desired
-	if equalize: waves = eqwavegrps(waves, equalize > 1)
+	if equalize:
+		if equalize > 1: print('Equalizing waveforms individually')
+		waves = eqwavegrps(waves, equalize > 1)
 
 	# Set the amplitude limits
 	pkamps = [ w.envelope().extremum()[0] for v in waves.values() for w in v ]
@@ -330,7 +326,7 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	fig.savefig(output, bbox_inches='tight')
 
 
-def getatimes(atarg, freq=1, scalar=True):
+def getatimes(atarg, freq=1, scalar=True, cols=None):
 	'''
 	Given a glob with an optional ":<column>,<column>,..." suffix of
 	integer indices, try to open arrival-time maps matching the glob with
@@ -351,26 +347,22 @@ def getatimes(atarg, freq=1, scalar=True):
 	Otherwise, the returned values will be arrays.
 	'''
 	acols = [0]
-	try:
-		# Try to load the file with the full name
-		atmap = loadmatlist(atarg, scalar=False, nkeys=2, forcematch=True)
 
-		# Find the number of columns
+	# Try to load the files
+	atfiles = matchfiles(atarg, forcematch=True)
+	atmap = loadmatlist(atfiles, scalar=False, nkeys=2)
+
+	if cols is None:
 		ait = iter(atmap.values())
 		try: ncol = len(next(ait))
 		except StopIteration: ncol = 1
 		for v in ait:
 			if ncol != len(v):
-				raise ValueError('Arrival-time file has values of different lengths')
+				raise ValueError('Specify cols if arrival-time records have different lengths')
 		acols = list(range(ncol))
-	except IOError as err:
-		atcomps = atarg.split(':')
-		if len(atcomps) < 2: raise err
-		# Treat the name as a name + column
-		acols = [int(av, base=10) for av in atcomps[-1].split(',')]
-		atname = ':'.join(atcomps[:-1])
-		atmap = loadmatlist(atname, scalar=False, nkeys=2, forcematch=True)
-		print(f'Loading columns {acols} from arrival-time file {atname}')
+	else:
+		acols = cols
+		print(f'Using columns {acols} from arrival-time records')
 
 	if scalar:
 		if len(acols) != 1:
@@ -532,128 +524,124 @@ def getwave(infile, nsamp=None):
 
 
 if __name__ == '__main__':
-	dwin = None
-	nsamp = None
-	cthresh = None
-	log = False
-	zeropad = False
-	atimes = None
-	freq = 20.
-	hidewf = False
-	suppwf = False
-	bitrate = -1
-	equalize = 0
+	parser = ArgumentParser(description='Plot waveforms in videos or PDF images')
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'hw:a:t:f:n:p:b:msle')
+	parser.add_argument('-l', '--log', action='store_true',
+			help='Display log-magnitude instead of linear amplitude')
 
-	for opt in optlist:
-		if opt[0] == '-h':
-			usage(fatal=False)
-		elif opt[0] == '-w':
-			dwin = [int(s, base=10) for s in opt[1].split(',')]
-			if len(dwin) != 2:
-				raise ValueError('Window must be a start,end pair')
-		elif opt[0] == '-a':
-			atimes = opt[1]
-		elif opt[0] == '-l':
-			log = True
-		elif opt[0] == '-t':
-			cthresh = float(opt[1])
-		elif opt[0] == '-f':
-			freq = float(opt[1])
-		elif opt[0] == '-n':
-			nsamp = int(opt[1])
-		elif opt[0] == '-b':
-			bitrate = int(opt[1])
-		elif opt[0] == '-m':
-			hidewf = True
-		elif opt[0] == '-s':
-			suppwf = True
-		elif opt[0] == '-e':
-			equalize += 1
-		else:
-			usage(fatal=True)
+	parser.add_argument('-z', '--zero', action='store_true',
+			help='Zero waveforms with no arrival times')
 
-	if len(args) < 2:
-		print('ERROR: required arguments missing', file=sys.stderr)
-		usage(fatal=True)
+	parser.add_argument('-s', '--suppress', action='store_true',
+			help='Eliminate waveforms with no arrival times')
 
-	# Pull the output name and load the input files
-	imgname = args.pop(0)
+	parser.add_argument('-w', '--window', nargs=2, type=int,
+			default=None, metavar=('START', 'END'),
+			help='Only display samples from START to END '
+				'(relative to arrival times if provided)')
 
-	# Determine the mode
-	imgext = os.path.splitext(imgname)[1].lower()
-	if imgext == '.mp4':
-		vidmode = True
-	elif imgext == '.pdf':
-		vidmode = False
-	else:
-		print('ERROR: <imgname> must have extension mp4 or pdf', file=sys.stderr)
-		usage(fatal=True)
+	parser.add_argument('-a', '--atimes', nargs='+', default=None,
+			help='Arrival-time files to align waveforms')
 
-	if atimes is not None:
+	parser.add_argument('-c', '--cols', nargs='+', type=int, default=None,
+			help='Columns of arrival-time records to use for alignment')
+
+	parser.add_argument('-t', '--thresh', type=float, default=None,
+			help='Color (image) or y-axis (video) threshold')
+
+	parser.add_argument('-f', '--freq', type=float, default=20.,
+			help='Frequency of samples in waveform files')
+
+	parser.add_argument('-n', '--nsamp', type=int, default=None,
+			help='Force all waveform files to have NSAMP samples')
+
+	parser.add_argument('-b', '--bitrate', type=int, default=-1,
+			help='Set bitrate for video output in kbps')
+
+	parser.add_argument('-e', '--equalize', action='count',
+			help='Equalize waveforms (in videos, use twice to '
+				'equalize all waves in each frame independently')
+
+	parser.add_argument('output', type=str,
+			help='Name of output file (PDF for image, mp4 for video)')
+
+	parser.add_argument('inputs', type=str, nargs='+',
+			help='Names of waveform input files')
+
+	args = parser.parse_args(sys.argv[1:])
+
+	# Determine the output mode
+	imgext = os.path.splitext(args.output)[1].lower()
+	if imgext == '.mp4': vidmode = True
+	elif imgext == '.pdf': vidmode = False
+	else: sys.exit('ERROR: Output must have extension mp4 or pdf')
+
+	try: args.inputs = matchfiles(args.inputs)
+	except IOError as e: sys.exit(f'ERROR: {e}')
+
+	if args.atimes:
 		# Load arrival times and convert to samples
-		atimes = getatimes(atimes, freq, not vidmode)
-		print('Parsed arrival times')
-
-	try:
-		infiles = matchfiles(args)
-	except IOError as e:
-		print('ERROR:', e, file=sys.stderr)
-		usage(fatal=True)
+		args.atimes = getatimes(args.atimes, args.freq, not vidmode, args.cols)
+		print(f'Parsed {len(args.atimes)} arrival times')
 
 	if vidmode:
 		# Load the backscatter waves in groups by element
-		wavegrps = getwavegrps(infiles, nsamp)
+		wavegrps = getwavegrps(args.inputs, args.nsamp)
 		# Shift waveforms if arrival times are provided
-		if atimes:
-			wavegrps = shiftgrps(wavegrps, atimes)
+		if args.atimes:
+			wavegrps = shiftgrps(wavegrps, args.atimes)
 			print('Shifted waveform groups')
-		print('Storing waveform video to file', imgname)
-		plotframes(imgname, wavegrps, atimes, dwin, equalize, cthresh, bitrate)
+		print('Storing waveform video to file', args.output)
+		plotframes(args.output, wavegrps, args.atimes, args.window,
+					args.equalize, args.thresh, args.bitrate)
 	else:
 		# Load the waveforms
-		waves = dict(getwave(inf, nsamp) for inf in infiles)
+		waves = dict(getwave(inf, args.nsamp) for inf in args.inputs)
 
 		# There is no mean arrival time unless arrival times are provided
 		mtime = None
 
-		if atimes:
+		if args.atimes:
 			# Find the mean arrival time for all waveforms
-			celts = set(waves).intersection(atimes)
-			mtime = int(np.mean([atimes[c] for c in celts]))
+			celts = set(waves).intersection(args.atimes)
+			print(f'{len(celts)} waveforms have associated arrival times')
+			mtime = int(np.mean([args.atimes[c] for c in celts]))
 			# Shift all waveforms with an arrival time to the mean
 			for k in celts:
-				waves[k] = waves[k].shift(mtime - atimes[k])
+				waves[k] = waves[k].shift(mtime - args.atimes[k])
 			print('Shifted waveforms')
-			if dwin is not None:
+			if args.window is not None:
 				# The window specification is relative to the mean time
-				dwin = Window(max(0, mtime + dwin[0]), end=mtime + dwin[1])
-		elif dwin is not None:
+				st = max(0, mtime + args.window[0])
+				ed = mtime + args.window[1]
+				args.window = Window(st, end=ed)
+		elif args.window is not None:
 			# Convert the window specification to a Window object
-			dwin = Window(dwin[0], end=dwin[1], nonneg=True)
+			args.window = Window(args.window[0],
+					end=args.window[1], nonneg=True)
 
 		# Window and equalize, if necessary
-		if dwin is not None or equalize:
+		if args.window is not None or args.equalize:
 			for (t, r) in waves:
 				wave = waves[t,r]
-				if dwin is not None:
-					wave = wave.window(dwin)
-				if equalize:
+				if args.window is not None:
+					wave = wave.window(args.window)
+				if args.equalize:
 					pkamp = wave.envelope().extremum()[0]
 					if pkamp > sqrt(sys.float_info.epsilon):
 						wave /= pkamp
 				waves[t,r] = wave
 
-		if atimes:
-			if suppwf:
+		if args.atimes:
+			if args.suppress:
 				print('Suppressing unaligned waveforms')
-				ckeys = set(atimes).intersection(waves)
+				ckeys = set(args.atimes).intersection(waves)
 				waves = { k: waves[k] for k in ckeys }
-			elif hidewf:
+			elif args.zero:
 				print('Zeroing unaligned waveforms')
 				for k, v in waves.items():
-					if k not in atimes: v *= 0
+					if k not in args.atimes: v *= 0
 
-		print('Storing waveform image to file', imgname)
-		plotwaves(imgname, waves, atimes, mtime, dwin, log, cthresh)
+		print('Storing waveform image to file', args.output)
+		plotwaves(args.output, waves, args.atimes, mtime,
+				args.window, args.log, args.thresh)
