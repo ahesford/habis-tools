@@ -16,14 +16,14 @@ from habis.habiconf import matchfiles
 from habis.sigtools import Waveform, Window
 from habis.formats import loadmatlist, WaveformSet
 
-def plotframes(output, waves, atimes, dwin=None, 
-		equalize=False, cthresh=None, bitrate=-1):
+def plotframes(output, waves, atimes, dwin=None,
+		equalize=False, cthresh=None, bitrate=-1, one_sided=False):
 	'''
-	Prepare, using the ffmpeg writer in matplotlib.animation, a video in
-	which each frame depicts aligned waveforms received by a common
-	element. The argument waves should be a mapping from transmit-receive
-	pairs to a list of Waveform objects, prealigned if alignment is
-	desired.
+	Prepare, using the ffmpeg writer in matplotlib.animation, a video with
+	the given bitrate in which each frame depicts aligned waveforms
+	received by a common element. The argument waves should be a mapping
+	from transmit-receive pairs to a list of Waveform objects, prealigned
+	if alignment is desired.
 
 	The argument atimes should be a mapping from element index to a list of
 	at least one arrival time. If the mapping contains at least one arrival
@@ -50,6 +50,16 @@ def plotframes(output, waves, atimes, dwin=None,
 	be equalized by calling eqwavegrps with a value (equalize > 1) for the
 	"individual" argument to the function. The equalization is done after
 	dwin is applied to each waveform.
+
+	The value of cthresh, if not None, specifies the number of standard
+	deviations above the mean of the peak amplitudes of all displayed
+	waveforms that establishes the upper limit on the vertical scale. For
+	the corresponding value CMAX = <PEAK MEAN> + cthresh * <PEAK STD>, the
+	vertical scale will range from -CMAX to CMAX. If cthresh is None, CMAX
+	will assume the largest peak amplitude displayed in the video.
+
+	If one_sided is True, the vertical scale will run from 0 to CMAX
+	instead of -CMAX to CMAX.
 	'''
 	import matplotlib as mpl
 	mpl.use('agg')
@@ -122,15 +132,20 @@ def plotframes(output, waves, atimes, dwin=None,
 		waves = eqwavegrps(waves, equalize > 1)
 
 	# Set the amplitude limits
-	pkamps = [ w.envelope().extremum()[0] for v in waves.values() for w in v ]
+	pkamps = [ w.envelope().extremum()[0]
+			for v in waves.values() for w in v ]
+
 	if cthresh is None: vmax = np.max(pkamps)
 	else: vmax = np.mean(pkamps) + cthresh * np.std(pkamps)
+
+	if not one_sided: vmin = -vmax
+	else: vmin = 0
 
 	# Build the common time axis
 	taxis = np.arange(dwin.start, dwin.end)
 
 	print(f'Waveform count: {nsets}; arrival-time count: {ntimes}')
-	print(f'Display frame is [{dwin.start}, {dwin.end}, {-vmax:g}, {vmax:g}]')
+	print(f'Display frame is [{dwin.start}, {dwin.end}, {vmin:g}, {vmax:g}]')
 
 	# Create the frames and write the video
 	with writer.saving(fig, output, fig.get_dpi()):
@@ -152,7 +167,7 @@ def plotframes(output, waves, atimes, dwin=None,
 			aln = ax.axvline(color=color, linestyle='--')
 			alines.append(aln)
 
-		ax.axis([taxis[0], taxis[-1], -vmax, vmax])
+		ax.axis([taxis[0], taxis[-1], vmin, vmax])
 		ax.set_xlabel('Time, samples', fontsize=14)
 		ax.set_ylabel('Amplitude', fontsize=14)
 		ax.grid(True)
@@ -187,7 +202,7 @@ def plotframes(output, waves, atimes, dwin=None,
 
 
 def plotwaves(output, waves, atimes=None, mtime=None,
-		dwin=None, log=False, cthresh=None):
+		dwin=None, log=False, cthresh=None, one_sided=False):
 	'''
 	Plot, into the image file output, the habis.sigtools.Waveform objects
 	mapped (by index) in waves, with temporal variations along the vertical
@@ -217,6 +232,11 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	If log is False, the color range will clip at cthresh standard
 	deviations above the mean peak amplitude over all signals. If cthresh
 	is None, the narrowest range that avoids clipping will be selected.
+
+	When one_sided is False, the color scale will be symmetric about zero
+	based on the maximum value determined by cthresh. When one_sided is
+	True (which is not possible when log is True), the low end of the color
+	scale will be zero.
 	'''
 	import matplotlib as mpl
 	mpl.use('pdf')
@@ -225,6 +245,9 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 
 	# Split the mapping in indexed order
 	widx, waves = zip(*sorted(waves.items()))
+
+	if log and one_sided:
+		raise ValueError('Cannot have both log==True and one_sided==True')
 
 	# Pull the relevant arrival times for a subplot
 	if atimes is not None:
@@ -266,8 +289,12 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 		if cthresh is None: cmax = np.max(pkamps)
 		else: cmax = np.mean(pkamps) + cthresh * np.std(pkamps)
 
-		clim = [-cmax, cmax]
-		cmap = cm.RdBu
+		if not one_sided:
+			clim = [-cmax, cmax]
+			cmap = cm.RdBu
+		else:
+			clim = [0, cmax]
+			cmap = cm.Reds
 	else:
 		# Compute signal image to log magnitude
 		img = np.abs(hilbert(img, axis=1))
@@ -558,6 +585,9 @@ if __name__ == '__main__':
 	parser.add_argument('-b', '--bitrate', type=int, default=-1,
 			help='Set bitrate for video output in kbps')
 
+	parser.add_argument('--one-sided', action='store_true',
+			help='Use a one-sided color or amplitude scale')
+
 	parser.add_argument('-e', '--equalize', action='count',
 			help='Equalize waveforms (in videos, use twice to '
 				'equalize all waves in each frame independently')
@@ -576,6 +606,9 @@ if __name__ == '__main__':
 	elif imgext == '.pdf': vidmode = False
 	else: sys.exit('ERROR: Output must have extension mp4 or pdf')
 
+	if vidmode and args.log:
+		sys.exit('ERROR: Log mode is not supported for video output')
+
 	try: args.inputs = matchfiles(args.inputs)
 	except IOError as e: sys.exit(f'ERROR: {e}')
 
@@ -592,8 +625,9 @@ if __name__ == '__main__':
 			wavegrps = shiftgrps(wavegrps, args.atimes)
 			print('Shifted waveform groups')
 		print('Storing waveform video to file', args.output)
-		plotframes(args.output, wavegrps, args.atimes, args.window,
-					args.equalize, args.thresh, args.bitrate)
+		plotframes(args.output, wavegrps, args.atimes,
+				args.window, args.equalize,
+				args.thresh, args.bitrate, args.one_sided)
 	else:
 		# Load the waveforms
 		waves = dict(getwave(inf, args.nsamp) for inf in args.inputs)
@@ -644,4 +678,4 @@ if __name__ == '__main__':
 
 		print('Storing waveform image to file', args.output)
 		plotwaves(args.output, waves, args.atimes, mtime,
-				args.window, args.log, args.thresh)
+				args.window, args.log, args.thresh, args.one_sided)
