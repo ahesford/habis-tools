@@ -14,14 +14,15 @@ DOCLINES = __doc__.split('\n')
 VERSION = '1.1'
 
 if __name__ == '__main__':
-	try: import wheel
-	except ImportError: pass
-
-	from setuptools import setup, find_packages
+	from setuptools import setup, find_packages, Extension
 	from Cython.Build import cythonize
 	from glob import glob
 
 	import numpy as np
+
+	ext_includes = [ np.get_include() ]
+
+	extensions = [ Extension('*', ['habis/*.pyx'], include_dirs=ext_includes) ]
 
 	setup(name='habis',
 			version=VERSION,
@@ -32,7 +33,7 @@ if __name__ == '__main__':
 			platforms=['any'], license='Closed',
 			packages=['habis'],
 			scripts=glob('shell/*.py'),
-			ext_modules=cythonize('habis/*.pyx', 
+			ext_modules=cythonize(extensions,
 				compiler_directives={'embedsignature': True}),
-			include_dirs = [np.get_include()],
+			include_dirs = ext_includes,
 		)
