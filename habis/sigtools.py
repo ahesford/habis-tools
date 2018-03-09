@@ -7,20 +7,29 @@ Routines for manipulating HABIS signals.
 
 import numpy as np, math
 import collections
+
+import scipy
+
 from numpy import linalg as nla
 from scipy import linalg as la
-from scipy.signal import hilbert
+from scipy.signal import hilbert, stft, get_window
 from scipy.stats import linregress
-from scipy.fftpack.helper import next_fast_len
 from operator import itemgetter, add
 from itertools import groupby
+
+next_fast_len = scipy.fftpack.helper.next_fast_len
 
 try:
 	import pyfftw
 except ImportError:
-	from numpy import fft
+	fft = np.fft
 else:
-	fft = pyfftw.interfaces.numpy_fft
+	# The PyFFTW interface is missing rfftfreq
+	rfftfreq = np.fft.rfftfreq
+	fft = np.fft = pyfftw.interfaces.numpy_fft
+	np.fft.rfftfreq = rfftfreq
+
+	scipy.fftpack = pyfftw.interfaces.scipy_fftpack
 
 from pycwp import cutil, mio, signal, stats
 
@@ -1675,6 +1684,23 @@ class Waveform(object):
 		'''
 		if self._data is not None:
 			self._data -= np.mean(self._data)
+
+
+	def gabor(self, sigma=8, trunc=5):
+		'''
+		Return the Gabor transform, as the output of scipy.signal.stft,
+		over the window self.datawin. The parameter sigma (measured in
+		samples) specifies the standard deviation of the Gaussian
+		window used in the STFT, and will be truncated to +/- trunc
+		standard deviations.
+
+		The sampling frequency is assumed to be the default for the
+		STFT function.
+		'''
+		# Build the window
+		win = get_window(('gaussian', sigma), 2 * trunc * sigma)
+		return stft(self._data, window=win, nfft=len(win),
+				nperseg=len(win), noverlap=len(win)-1)
 
 
 	def bandpass(self, start, end, tails=0, dtype=None):
