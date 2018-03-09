@@ -12,7 +12,7 @@ import scipy
 
 from numpy import linalg as nla
 from scipy import linalg as la
-from scipy.signal import hilbert, stft, get_window
+from scipy.signal import hilbert, stft, istft, get_window
 from scipy.stats import linregress
 from operator import itemgetter, add
 from itertools import groupby
@@ -1051,10 +1051,10 @@ class Waveform(object):
 		if not cyclic:
 			try: wst, dst, length = cutil.overlap((0, nsamp), dwin.shift(d))
 			except TypeError: return shwave
-			
+
 			data = self._data[dst:dst+length]
 			if dtype is not None: data = data.astype(dtype)
-			
+
 			shwave.setsignal(data, wst)
 		else:
 			# Wrap shifted waveform into window
@@ -1686,7 +1686,7 @@ class Waveform(object):
 			self._data -= np.mean(self._data)
 
 
-	def gabor(self, sigma=8, trunc=5):
+	def gabor(self, sigma=8, trunc=5, win=None):
 		'''
 		Return the Gabor transform, as the output of scipy.signal.stft,
 		over the window self.datawin. The parameter sigma (measured in
@@ -1694,13 +1694,97 @@ class Waveform(object):
 		window used in the STFT, and will be truncated to +/- trunc
 		standard deviations.
 
+		If win is not None, it should be a precomputed window that will
+		be used in place of a Gaussian. In this case, sigma and trunc
+		will be ignored.
+
 		The sampling frequency is assumed to be the default for the
 		STFT function.
 		'''
 		# Build the window
-		win = get_window(('gaussian', sigma), 2 * trunc * sigma)
+		if win is None:
+			win = get_window(('gaussian', sigma), 2 * trunc * sigma)
+		else:
+			win = np.asarray(win)
+
 		return stft(self._data, window=win, nfft=len(win),
 				nperseg=len(win), noverlap=len(win)-1)
+
+
+	def denoise(self, noisewin, pfa, sigma=8, trunc=5):
+		'''
+		Denoise the waveform based on Constant False Alarm Rate (CFAR,
+		[1]) rejection in the Gabor spectrogram produced with a
+		Gaussian window with a standard deviation of sigma samples,
+		truncated to a total width of 2 * trunc * sigma samples. The
+		paramter pfa is the probability of false alarm.
+
+		The mean noise amplitude is calculated in the window
+
+		  noisewin = (flo, fhi, tlo, thi),
+
+		where flo and fhi are the low and high frequency bin indices,
+		respectively, of the Gabor spectram; tlo and thi are the time
+		indices relative to the start of the signal (without regard to
+		the start of the data window).
+
+		Noise is assumed to follow a Rayleigh distribution, with the
+		scale parameter sigma = sqrt(2 / pi) * mean. All time-frequency
+		bins with amplitudes A such that A / sigma < T, where the
+		threshold T = sqrt(2 * log(1 / pfa)), are suppressed before the
+		Gabor transform is inverted to return a denoised signal.
+
+		Reference:
+		[1] Chen and Qian, "CFAR detection and extraction of unknown
+		    signal in noise with time-frequency Gabor transform", Proc.
+		    SPIE 2762, Wavelet Applications III, 1996, pp. 285--294.
+		'''
+		# Check arguments for sanity
+		flo, fhi, tlo, thi = noisewin
+		if flo >= fhi or flo < 0:
+			raise ValueError('Frequency bounds in noisewin '
+						'must satisfy 0 <= flo < fhi')
+		if tlo >= thi or tlo < 0:
+			raise ValueError('Time bounds in noisewin '
+						'must satisfy 0 <= tlo < thi')
+
+		if not 0 < pfa < 1:
+			raise ValueError('Parameter pfa must be in range (0, 1)')
+
+		# Precompute the window for the Gabor transform
+		win = get_window(('gaussian', sigma), 2 * trunc * sigma)
+		stftargs = dict(window=win, nfft=len(win),
+				nperseg=len(win), noverlap=len(win)-1)
+
+		# Compute the Gabor transform and check noise window for sanity
+		freqs, times, gtsig = stft(self._data, **stftargs)
+
+		# Identify the noise band and interval in the transform
+		fwin = (flo, fhi - flo)
+		try:
+			fstart, _, flen = cutil.overlap((0, len(freqs)), fwin)
+		except TypeError:
+			raise ValueError('Frequency bounds in noisewin do '
+						'not describe a valid spectral region')
+
+		twin = (tlo, thi - tlo)
+		try:
+			tstart, _, tlen = cutil.overlap((0, len(times)), twin)
+		except TypeError:
+			raise ValueError('Time bounds in noisewin do '
+						'not describe a valid time region')
+
+		# Estimate noise mean and convert to Rayleigh scale
+		gtabs = np.abs(gtsig)
+		nm = np.mean(gtabs[fstart:fstart+flen,tstart:tstart+tlen])
+		sigma = np.sqrt(2 / math.pi) * nm
+
+		# Apply the CFAR threshold and invert
+		T = np.sqrt(2 * np.log(1 / pfa))
+		gtfilt = (gtabs > T * sigma).choose(0, gtsig)
+
+		times, gw = istft(gtfilt, **stftargs)
+		return Waveform(self.nsamp, gw, self._datastart)
 
 
 	def bandpass(self, start, end, tails=0, dtype=None):
