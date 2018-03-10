@@ -19,17 +19,9 @@ from itertools import groupby
 
 next_fast_len = scipy.fftpack.helper.next_fast_len
 
-try:
-	import pyfftw
-except ImportError:
-	fft = np.fft
-else:
-	# The PyFFTW interface is missing rfftfreq
-	rfftfreq = np.fft.rfftfreq
-	fft = np.fft = pyfftw.interfaces.numpy_fft
-	np.fft.rfftfreq = rfftfreq
-
-	scipy.fftpack = pyfftw.interfaces.scipy_fftpack
+try: import pyfftw
+except ImportError: fft = np.fft
+else: fft = pyfftw.interfaces.numpy_fft
 
 from pycwp import cutil, mio, signal, stats
 
@@ -1707,8 +1699,11 @@ class Waveform(object):
 		else:
 			win = np.asarray(win)
 
-		return stft(self._data, window=win, nfft=len(win),
-				nperseg=len(win), noverlap=len(win)-1)
+		nperseg = len(win)
+		nfft = next_fast_len(len(win))
+
+		return stft(self._data, window=win, nfft=nfft,
+				nperseg=nperseg, noverlap=nperseg-1)
 
 
 	def denoise(self, noisewin, pfa, sigma=8, trunc=5):
@@ -1753,8 +1748,8 @@ class Waveform(object):
 
 		# Precompute the window for the Gabor transform
 		win = get_window(('gaussian', sigma), 2 * trunc * sigma)
-		stftargs = dict(window=win, nfft=len(win),
-				nperseg=len(win), noverlap=len(win)-1)
+		stftargs = dict(window=win, nfft=next_fast_len(len(win)),
+					nperseg=len(win), noverlap=len(win)-1)
 
 		# Compute the Gabor transform and check noise window for sanity
 		freqs, times, gtsig = stft(self._data, **stftargs)
