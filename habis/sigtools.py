@@ -1737,7 +1737,7 @@ class Waveform(object):
 		return stft(self._data, win)
 
 
-	def denoise(self, noisewin, pfa, sigma=8, trunc=5):
+	def denoise(self, noisewin, pfa, sigma=8, trunc=5, floordb=None):
 		'''
 		Denoise the waveform based on Constant False Alarm Rate (CFAR,
 		[1]) rejection in the Gabor spectrogram produced with a
@@ -1759,6 +1759,11 @@ class Waveform(object):
 		bins with amplitudes A such that A / sigma < T, where the
 		threshold T = sqrt(2 * log(1 / pfa)), are suppressed before the
 		Gabor transform is inverted to return a denoised signal.
+
+		If floordb is not None, the denoised signal is augmented by
+		adding Gaussian white noise (using numpy.random.normal) with an
+		RMS level that is floordb dB relative to the peak ampltidue
+		envelope of the original signal.
 
 		Reference:
 		[1] Chen and Qian, "CFAR detection and extraction of unknown
@@ -1808,6 +1813,11 @@ class Waveform(object):
 		gtfilt = (gtabs > T * sigma).choose(0, gtsig)
 
 		gw = istft(gtfilt, win)
+
+		if floordb is not None:
+			emax = self.envelope().extremum()[0]
+			scale = 10**(floordb / 20) * emax
+			gw += np.random.normal(scale=scale, size=gw.shape)
 		return Waveform(self.nsamp, gw, self._datastart)
 
 

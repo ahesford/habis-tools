@@ -554,6 +554,12 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 	  optional window. Delays will not be calculated for signals fail to
 	  exceed the minimum threshold.
 
+	* denoise: If not None, a dictionary suitable for passing as keyword
+	  arguments (**denoise) to Waveform.denoise to use CFAR rejection of
+	  the Gabor spectrogram to isolate the signal. Denoising is done after
+	  minimum-SNR rejection to avoid too many false matches with
+	  very-low-noise signals.
+
 	* peaks: A dictionary suitable for passing as keyword arguments
 	  (**peaks) to the isolatepeak function, excluding the first three
 	  arguments.
@@ -692,6 +698,9 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 	# Pull the optional peak search criteria
 	peaks = dict(kwargs.pop('peaks', ()))
 
+	# Pull the optional denoising criteria
+	denoise = dict(kwargs.pop('denoise', ()))
+
 	# Determine whether to allow negative correlations
 	negcorr = kwargs.pop('negcorr', False)
 
@@ -732,6 +741,8 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 			if sig.snr(noisewin) < minsnr:
 				wavestats['low-snr'] += 1
 				continue
+
+		if denoise: sig = sig.denoise(**denoise)
 
 		if eleak:
 			# Calculate cumulative energy in unwindowed waveform
