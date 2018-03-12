@@ -7,7 +7,8 @@ instrument and exchanging data between nodes.
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-__all__ = [ 'habiconf', 'formats', 'facet', 'mpdfile', 'mpfilter', 'sigtools',
-		'slowness', 'pathtracer', 'trilateration', 'wrappers', 'conductor' ]
+__all__ = [ 'conductor', 'habiconf', 'formats', 'facet',
+		'mpdfile', 'mpfilter', 'pathtracer', 'sigtools',
+		'slowness', 'stft', 'trilateration', 'wrappers', ]
 
 from . import *
