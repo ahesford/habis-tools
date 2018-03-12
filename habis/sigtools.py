@@ -12,7 +12,7 @@ import scipy
 
 from numpy import linalg as nla
 from scipy import linalg as la
-from scipy.signal import hilbert, stft, istft, get_window
+from scipy.signal import hilbert, get_window
 from scipy.stats import linregress
 from operator import itemgetter, add
 from itertools import groupby
@@ -24,6 +24,8 @@ except ImportError: fft = np.fft
 else: fft = pyfftw.interfaces.numpy_fft
 
 from pycwp import cutil, mio, signal, stats
+
+from .stft import stft, istft
 
 def _valley(lpk, hpk):
 	'''
@@ -1680,7 +1682,7 @@ class Waveform(object):
 
 	def gabor(self, sigma=8, trunc=5, win=None):
 		'''
-		Return the Gabor transform, as the output of scipy.signal.stft,
+		Return the Gabor transform, as the output of habis.stft.stft,
 		over the window self.datawin. The parameter sigma (measured in
 		samples) specifies the standard deviation of the Gaussian
 		window used in the STFT, and will be truncated to +/- trunc
@@ -1689,9 +1691,6 @@ class Waveform(object):
 		If win is not None, it should be a precomputed window that will
 		be used in place of a Gaussian. In this case, sigma and trunc
 		will be ignored.
-
-		The sampling frequency is assumed to be the default for the
-		STFT function.
 		'''
 		# Build the window
 		if win is None:
@@ -1699,11 +1698,7 @@ class Waveform(object):
 		else:
 			win = np.asarray(win)
 
-		nperseg = len(win)
-		nfft = next_fast_len(len(win))
-
-		return stft(self._data, window=win, nfft=nfft,
-				nperseg=nperseg, noverlap=nperseg-1)
+		return stft(self._data, win)
 
 
 	def denoise(self, noisewin, pfa, sigma=8, trunc=5):
@@ -1748,37 +1743,35 @@ class Waveform(object):
 
 		# Precompute the window for the Gabor transform
 		win = get_window(('gaussian', sigma), 2 * trunc * sigma)
-		stftargs = dict(window=win, nfft=next_fast_len(len(win)),
-					nperseg=len(win), noverlap=len(win)-1)
 
 		# Compute the Gabor transform and check noise window for sanity
-		freqs, times, gtsig = stft(self._data, **stftargs)
+		gtsig = stft(self._data, win)
 
 		# Identify the noise band and interval in the transform
 		fwin = (flo, fhi - flo)
 		try:
-			fstart, _, flen = cutil.overlap((0, len(freqs)), fwin)
+			fstart, _, flen = cutil.overlap((0, gtsig.shape[1]), fwin)
 		except TypeError:
 			raise ValueError('Frequency bounds in noisewin do '
 						'not describe a valid spectral region')
 
-		twin = (tlo, thi - tlo)
+		twin = (tlo - self._datastart, thi - tlo)
 		try:
-			tstart, _, tlen = cutil.overlap((0, len(times)), twin)
+			tstart, _, tlen = cutil.overlap((0, gtsig.shape[0]), twin)
 		except TypeError:
 			raise ValueError('Time bounds in noisewin do '
 						'not describe a valid time region')
 
 		# Estimate noise mean and convert to Rayleigh scale
 		gtabs = np.abs(gtsig)
-		nm = np.mean(gtabs[fstart:fstart+flen,tstart:tstart+tlen])
+		nm = np.mean(gtabs[tstart:tstart+tlen,fstart:fstart+flen])
 		sigma = np.sqrt(2 / math.pi) * nm
 
 		# Apply the CFAR threshold and invert
 		T = np.sqrt(2 * np.log(1 / pfa))
 		gtfilt = (gtabs > T * sigma).choose(0, gtsig)
 
-		times, gw = istft(gtfilt, **stftargs)
+		gw = istft(gtfilt, win)
 		return Waveform(self.nsamp, gw, self._datastart)
 
 
