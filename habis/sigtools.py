@@ -10,6 +10,8 @@ import collections
 
 import scipy
 
+import functools
+
 from numpy import linalg as nla
 from scipy import linalg as la
 from scipy.signal import hilbert, get_window
@@ -26,6 +28,30 @@ else: fft = pyfftw.interfaces.numpy_fft
 from pycwp import cutil, mio, signal, stats
 
 from .stft import stft, istft
+
+@functools.lru_cache(maxsize=32)
+def _gabor_window(sigma, width, dtype=None):
+	'''
+	Using scipy.signal.get_window, build a Gaussian window with a standard
+	deviation of sigma samples and a width of width samples.
+
+	If dtype is not None, the resulting window will be cast into then
+	appropriate dtype using numpy.ndarray.astype. If the dtype is not a
+	subtype of np.inexact, the type of the window is not changed.
+	Otherwise, the type of the window is converted to the type given by
+	np.dtype(dtype).type(0).real.dtype.
+
+	The results of this call are memoized by a 32-element cache.
+	'''
+	window = scipy.signal.get_window(('gaussian', sigma), width)
+	if dtype is not None:
+		# Make sure the type is a Numpy dtype
+		dtype = np.dtype(dtype)
+		# Convert the type if the input is an inexact
+		if np.issubdtype(dtype, np.inexact):
+			window = window.astype(dtype.type(0).real.dtype)
+	return window
+
 
 def _valley(lpk, hpk):
 	'''
@@ -1388,7 +1414,7 @@ class Waveform(object):
 		return { 'nmer': nmer, 'fmer': fmer, 'ner': ner, 'fer': fer }
 
 
-	def enratio(self, prewin, postwin=None, vpwin=None, *, raw=False):
+	def enratio(self, prewin, postwin=None, vpwin=None, *, wrap=False, raw=False):
 		'''
 		Compute energy ratios for each sample of the signal, which is
 		given as the ratio between the average energy in a window of
@@ -1399,7 +1425,8 @@ class Waveform(object):
 		For samples approaching the ends of the signal, the preceding
 		and following windows will run past the data; the missing
 		samples will be replaced with the average energy in the entire
-		signal.
+		signal if wrap_edges is False, or will cyclically wrap if wrap
+		is True.
 
 		If postwin is None, it will be the same as prewin.
 
@@ -1436,10 +1463,28 @@ class Waveform(object):
 		exdata = np.empty((end + postwin - 1), dtype=self.dtype)
 		# Copy the real data
 		exdata[start:end] = self._data**2
-		# Fill in padded values with the mean
-		mval = np.mean(exdata[start:end])
-		exdata[:start] = mval
-		exdata[end:] = mval
+		# Pad out-of bound values
+		if wrap:
+			# Handle left-edge wraps
+			nrem = start
+			while nrem > 0:
+				edge = exdata[max(start,end-nrem):end]
+				ledge = len(edge)
+				exdata[nrem-ledge:nrem] = edge
+				nrem -= ledge
+			# Handle right-edge wraps
+			nrem = end
+			while nrem < len(exdata):
+				ne = len(exdata) - nrem
+				edge = exdata[start:min(start+ne,end)]
+				ledge = len(edge)
+				exdata[nrem:nrem+ledge] = edge
+				nrem += ledge
+		else:
+			# Just use average energy levels outside of signals
+			mval = np.mean(exdata[start:end])
+			exdata[:start] = mval
+			exdata[end:] = mval
 
 		# Compute the rolling average for the far-left window
 		if vpwin: vleft = stats.rolling_mean(exdata, vpwin)
@@ -1680,24 +1725,15 @@ class Waveform(object):
 			self._data -= np.mean(self._data)
 
 
-	def gabor(self, sigma=8, trunc=5, win=None):
+	def gabor(self, sigma=8, trunc=5):
 		'''
 		Return the Gabor transform, as the output of habis.stft.stft,
 		over the window self.datawin. The parameter sigma (measured in
 		samples) specifies the standard deviation of the Gaussian
-		window used in the STFT, and will be truncated to +/- trunc
-		standard deviations.
-
-		If win is not None, it should be a precomputed window that will
-		be used in place of a Gaussian. In this case, sigma and trunc
-		will be ignored.
+		window used in the STFT, and the overall window width will be
+		int(2 * trunc * sigma).
 		'''
-		# Build the window
-		if win is None:
-			win = get_window(('gaussian', sigma), 2 * trunc * sigma)
-		else:
-			win = np.asarray(win)
-
+		win = _gabor_window(sigma, int(2 * trunc * sigma), self.dtype)
 		return stft(self._data, win)
 
 
@@ -1742,7 +1778,7 @@ class Waveform(object):
 			raise ValueError('Parameter pfa must be in range (0, 1)')
 
 		# Precompute the window for the Gabor transform
-		win = get_window(('gaussian', sigma), 2 * trunc * sigma)
+		win = _gabor_window(sigma, int(2 * trunc * sigma), self.dtype)
 
 		# Compute the Gabor transform and check noise window for sanity
 		gtsig = stft(self._data, win)

@@ -499,10 +499,7 @@ def getwavegrps(infiles, nsamp=None):
 		if wset.ntx != 1 or wset.nrx != 1:
 			raise IOError(f'Input {infile} must contain a single waveform')
 
-		rx = wset.rxidx[0]
-		tx = next(wset.txidx)
-
-		wf = wset.getwaveform(rx, tx)
+		(tx, rx), wf = next(wset.allwaveforms())
 		if nsamp: wf.nsamp = nsamp
 
 		# Remove F2C
@@ -537,10 +534,7 @@ def getwave(infile, nsamp=None):
 	if wset.ntx != 1 or wset.nrx != 1:
 		raise IOError(f'Input {infile} must contain a single waveform')
 
-	rx = wset.rxidx[0]
-	tx = next(wset.txidx)
-
-	wf = wset.getwaveform(rx, tx)
+	(tx, rx), wf = next(wset.allwaveforms())
 	if nsamp: wf.nsamp = nsamp
 
 	# Shift out the F2C

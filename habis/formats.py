@@ -1708,7 +1708,7 @@ class WaveformSet(object):
 		(scalar or iterable of) transmission(s) tid.
 
 		If tid is a scalar, a single Waveform object is returned.
-		Otherwise, is tid is an iterable or None (which pulls all
+		Otherwise, if tid is an iterable or None (which pulls all
 		transmissions), a list of Waveform objects is returned.
 
 		If a keyword-only argument '' is
@@ -1879,3 +1879,24 @@ class WaveformSet(object):
 		'''
 		for rid in sorted(self.rxidx):
 			yield self.getheader(rid)
+
+
+	def allwaveforms(self, *args, **kwargs):
+		'''
+		Return a generator that fetches each waveform in the
+		WaveformSet by successive calls to
+
+			self.getwaveform(rid, tid, *args, **kwargs)
+
+		with tid cycling most rapidly through all values in
+		sorted(self.txidx) and least rapidly through all values in
+		sorted(self.rxidx).
+
+		Each yielded result is a tuple ((tid, rid), waveform).
+		'''
+		tids = sorted(self.txidx)
+		rids = sorted(self.rxidx)
+		for rid in rids:
+			# Pull all waveforms for the current receive record
+			waves = self.getwaveform(rid, tids, *args, **kwargs)
+			yield from zip(((tid, rid) for tid in tids), waves)
