@@ -598,7 +598,7 @@ if __name__ == '__main__':
 	imgext = os.path.splitext(args.output)[1].lower()
 	if imgext == '.mp4': vidmode = True
 	elif imgext == '.pdf': vidmode = False
-	else: sys.exit('ERROR: Output must have extension mp4 or pdf')
+	else: sys.exit(f'ERROR: Output {args.output} is not an MP4 or PDF')
 
 	if vidmode and args.log:
 		sys.exit('ERROR: Log mode is not supported for video output')
