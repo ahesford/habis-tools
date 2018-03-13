@@ -43,7 +43,7 @@ def _strict_nonnegative_int(x, positive=False):
 def renderAndLoadYaml(data, **kwargs):
 	'''
 	Attempt to render the string data as a Mako template with kwargs passed
-	to the Mako renderer with string_undefined=True.  Parse the rendered
+	to the Mako renderer with string_undefined=True. Parse the rendered
 	result as YAML using yaml.safe_load.
 
 	If the Mako template engine cannot be imported, the data is parsed as
@@ -1022,7 +1022,8 @@ class WaveformSet(object):
 
 
 	def load(self, f, force_dtype=None, allow_duplicates=False,
-			skip_zero_length=True, warn_on_error=True):
+			skip_zero_length=True, warn_on_error=True,
+			header_only=False, stream_mode=False):
 		'''
 		Associate the WaveformSet object with the data in f, a file-
 		like object or string specifying a file name. If f is a file-
@@ -1033,8 +1034,9 @@ class WaveformSet(object):
 		values specified in the file header. Failure to parse the file
 		completely may result in the instance being corrupted.
 
-		Each block of waveform data is memory-mapped from the source
-		file. This mapping is copy-on-write; changes do not persist.
+		Each block of waveform data is memory-mapped (except when
+		stream_mode is True; see below) from the source file. This
+		mapping is copy-on-write; changes do not persist.
 
 		If force_dtype is not None, and the data type of records stored
 		in the file is not equal to force_dtype, each record block will
@@ -1060,6 +1062,28 @@ class WaveformSet(object):
 		header. If warn_on_error is True, this error will cause a
 		warning to be issued. Otherwise, a ValueError will be raised in
 		case this error is encountered.
+
+		If header_only is True, the contents of the WaveformSet header
+		header will be read from the file, but processing will stop
+		before records are read and stored in the WaveformSet instance.
+		No file-length checks are performed to determine whether the
+		file contents are valid (beyond the ability to parse the
+		header), and no indication of the receive channels encoded in
+		the file will be available.
+
+		When header_only is False, this method returns None. Otherwise,
+		when header_only is True, this method returns the value of the
+		"nrx" property encoded in the file. (When only reading the
+		header, the value of this instance's "nrx" will be 0 because no
+		records will have been associated with the instance.)
+
+		If stream_mode is True, the waveform data will not be
+		memory-mapped, but will be copied into locally controlled
+		memory. Furthermore, seeks will not be performed on the input,
+		making this mode suitable for compressed input. (This method
+		will not attempt to open compressed files, so the argument f
+		should be a GzipFile, BZ2File or similar instance if inline
+		decompression is desired. Note that, in stream mode,
 		'''
 		# Open the file if it is not open
 		if isinstance(f, str):
@@ -1068,6 +1092,8 @@ class WaveformSet(object):
 		def funpack(fmt):
 			sz = struct.calcsize(fmt)
 			return struct.unpack(fmt, f.read(sz))
+
+		f32size = np.dtype('float32').itemsize
 
 		# Read the magic number and file version
 		magic, major, minor = funpack('<4s2I')
@@ -1079,7 +1105,10 @@ class WaveformSet(object):
 
 		if minor > 4:
 			# Read temperature context
-			try: self.context['temps'] = np.fromfile(f, dtype=np.float32, count=2)
+			try:
+				rcount = 2
+				rbytes = f.read(f32size * rcount)
+				self.context['temps'] = np.frombuffer(rbytes, 'float32', rcount)
 			except ValueError:
 				raise ValueError('Temperature section of header must contain 2 floats')
 
@@ -1130,20 +1159,30 @@ class WaveformSet(object):
 			if minor >= 4: self.txstart = funpack('<I')[0]
 
 			# Read 256 TGC parameters in the header
-			try: self.context['tgc'] = np.fromfile(f, dtype=np.float32, count=256)
+			try:
+				rcount = 256
+				rbytes = f.read(f32size * rcount)
+				self.context['tgc'] = np.frombuffer(rbytes, 'float32', rcount)
 			except ValueError:
 				raise ValueError('TGC section of header must contain 256 floats')
 		elif minor == 0:
 			# Verion 0 uses an explicit 1-based transmit-index list
-			self.txidx = np.fromfile(f, dtype=np.uint32, count=ntx) - 1
+			try:
+				rbytes = f.read(np.dtype('uint32').itemsize * ntx)
+				self.txidx = np.frombuffer(rbytes, 'uint32', ntx) - 1
+			except ValueError:
+				raise ValueError(f'Transmit-index list in header '
+						'must contain {ntx} uint32 values')
 
-		# Record the start of the waveform data records in the file
-		fsrec = f.tell()
+		# Skip processing of records in header_only mode
+		if header_only: return nrx
 
-		# Use a single Python mmap buffer for backing data
-		# This avoids multiple openings of the file for independent maps
-		buf = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
-		f.seek(fsrec)
+		if not stream_mode:
+			# Use a single Python mmap buffer for backing data
+			# (Map starts at file start; remember current location)
+			fsrec = f.tell()
+			buf = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
+			f.seek(fsrec)
 
 		# For (1, 2) files, keep a running index tally
 		idx = -1
@@ -1190,19 +1229,35 @@ class WaveformSet(object):
 					msg = f'Parsing terminated at duplicate record {idx}'
 					warnings.warn(WaveformSetIOWarning(msg))
 					# Avoid detecting junk after duplicate header
-					fsrec = f.tell()
+					if not stream_mode: fsrec = f.tell()
 					break
 				encountered.add(idx)
 
 			# Determine the shape of the waveform
 			waveshape = (ntx, wl)
-			# Determine the start and end of waveform data block
-			fsmap = f.tell()
-			try:
-				# Return a view of the map
-				wavemap = np.ndarray(waveshape, dtype=dtype,
-						buffer=buf, order='C', offset=fsmap)
-			except TypeError: break
+
+			if not stream_mode:
+				# Return a view into the map
+				fsmap = f.tell()
+				
+				try:
+					wavemap = np.ndarray(waveshape,
+							dtype=dtype, buffer=buf,
+							order='C', offset=fsmap)
+				except TypeError: break
+
+				# Skip to next header and update next record offset
+				f.seek(fsmap + wavemap.nbytes)
+				fsrec = f.tell()
+			else:
+				# Read into a new array
+				nvals = waveshape[0] * waveshape[1]
+
+				try:
+					wavemap = f.read(nvals * dtype.itemsize)
+					wavemap = np.frombuffer(wavemap, dtype, nvals)
+					wavemap = wavemap.reshape(waveshape, order='C')
+				except (ValueError, TypeError, IOError): break
 
 			if not skip_zero_length or wavemap.nbytes != 0:
 				if force_dtype is not None:
@@ -1210,13 +1265,8 @@ class WaveformSet(object):
 				else: wmap = wavemap
 				# Add the record to the set
 				self.setrecord(hdr, wmap, copy=False)
-				# Skip to the next header
-				f.seek(fsmap + wavemap.nbytes)
 
-			# Update the offset of the next record
-			fsrec = f.tell()
-
-		if f.tell() != fsrec:
+		if not stream_mode and f.tell() != fsrec:
 			warnings.warn(WaveformSetIOWarning('Junk at end of file'))
 
 		if nrx and self.nrx != nrx:
