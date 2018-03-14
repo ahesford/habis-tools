@@ -19,7 +19,7 @@ from scipy.stats import linregress
 from operator import itemgetter, add
 from itertools import groupby
 
-next_fast_len = scipy.fftpack.helper.next_fast_len
+from scipy.fftpack.helper import next_fast_len
 
 try: import pyfftw
 except ImportError: fft = np.fft
@@ -1737,7 +1737,7 @@ class Waveform(object):
 		return stft(self._data, win)
 
 
-	def denoise(self, noisewin, pfa, sigma=8, trunc=5, floordb=None):
+	def denoise(self, band, noisewin, pfa, sigma=8, trunc=5, fs=1, floordb=None):
 		'''
 		Denoise the waveform based on Constant False Alarm Rate (CFAR,
 		[1]) rejection in the Gabor spectrogram produced with a
@@ -1745,20 +1745,34 @@ class Waveform(object):
 		truncated to a total width of 2 * trunc * sigma samples. The
 		paramter pfa is the probability of false alarm.
 
-		The mean noise amplitude is calculated in the window
+		The mean noise amplitude is calculated over the windows
 
-		  noisewin = (flo, fhi, tlo, thi),
+		  band = (flo, fhi),
+		  noisewin = (tlo, thi),
 
-		where flo and fhi are the low and high frequency bin indices,
-		respectively, of the Gabor spectram; tlo and thi are the time
-		indices relative to the start of the signal (without regard to
-		the start of the data window).
+		where flo and fhi are the lower and upper limits, respectively,
+		of the frequency bands to consider in the Gabor spectrogram;
+		tlo and thi are the lower and upper time limits, respectively,
+		in samples relative to the start of the signal (without regard
+		to the start of the data window). Time samples outside of the
+		data window are excluded from the averaging, even when the
+		specified window extends beyond the data window.
+
+		The sampling frequency of the signal is specified in fs, which
+		is used to convert the values flo and fhi in the noise window
+		into DFT bin indices.
+		
+		The noise window must satsify 0 <= flo < fhi <= fs / 2 and
+		0 <= tlo < thi < self.nsamp.
 
 		Noise is assumed to follow a Rayleigh distribution, with the
 		scale parameter sigma = sqrt(2 / pi) * mean. All time-frequency
 		bins with amplitudes A such that A / sigma < T, where the
 		threshold T = sqrt(2 * log(1 / pfa)), are suppressed before the
 		Gabor transform is inverted to return a denoised signal.
+		Frequencies approximately below flo and fhi (as converted to
+		DFT bin indices in integer arithmetic) will be explicitly
+		suppressed regardless of their value.
 
 		If floordb is not None, the denoised signal is augmented by
 		adding Gaussian white noise (using numpy.random.normal) with an
@@ -1771,13 +1785,15 @@ class Waveform(object):
 		    SPIE 2762, Wavelet Applications III, 1996, pp. 285--294.
 		'''
 		# Check arguments for sanity
-		flo, fhi, tlo, thi = noisewin
-		if flo >= fhi or flo < 0:
-			raise ValueError('Frequency bounds in noisewin '
-						'must satisfy 0 <= flo < fhi')
-		if tlo >= thi or tlo < 0:
-			raise ValueError('Time bounds in noisewin '
-						'must satisfy 0 <= tlo < thi')
+		flo, fhi = band
+		tlo, thi = noisewin
+
+		if not 0 <= flo < fhi <= fs:
+			raise ValueError('Frequency bounds in noisewin must '
+						'satisfy 0 <= flo < fhi <= fs')
+		if not 0 <= tlo < thi <= self.nsamp:
+			raise ValueError('Time bounds in noisewin must '
+						'satisfy 0 <= tlo < thi <= self.nsamp')
 
 		if not 0 < pfa < 1:
 			raise ValueError('Parameter pfa must be in range (0, 1)')
@@ -1785,34 +1801,47 @@ class Waveform(object):
 		# Precompute the window for the Gabor transform
 		win = _gabor_window(sigma, int(2 * trunc * sigma), self.dtype)
 
+		# Compute STFT window size to interpret frequency limits
+		nfft = next_fast_len(len(win))
+
 		# Compute the Gabor transform and check noise window for sanity
-		gtsig = stft(self._data, win)
+		gtsig = stft(self._data, win, nfft=nfft)
+
+		# Convert frequency limits to bin indices
+		flo = int(nfft * flo / fs)
+		fhi = int(nfft * fhi / fs)
 
 		# Identify the noise band and interval in the transform
-		fwin = (flo, fhi - flo)
 		try:
-			fstart, _, flen = cutil.overlap((0, gtsig.shape[1]), fwin)
+			fwin = (flo, max(fhi - flo, 1))
+			flo, _, flen = cutil.overlap((0, gtsig.shape[1]), fwin)
+			fhi = flo + flen
 		except TypeError:
 			raise ValueError('Frequency bounds in noisewin do '
 						'not describe a valid spectral region')
 
-		twin = (tlo - self._datastart, thi - tlo)
 		try:
-			tstart, _, tlen = cutil.overlap((0, gtsig.shape[0]), twin)
+			twin = (max(0, tlo - self._datastart), max(thi - tlo, 1))
+			tlo, _, tlen = cutil.overlap((0, gtsig.shape[0]), twin)
+			thi = tlo + tlen
 		except TypeError:
 			raise ValueError('Time bounds in noisewin do '
 						'not describe a valid time region')
 
+		# Eliminate out-of-band data
+		if flo > 0: gtsig[:,:flo] = 0
+		if fhi < gtsig.shape[1]: gtsig[:,fhi:] = 0
+
 		# Estimate noise mean and convert to Rayleigh scale
 		gtabs = np.abs(gtsig)
-		nm = np.mean(gtabs[tstart:tstart+tlen,fstart:fstart+flen])
+		nm = np.mean(gtabs[tlo:thi,flo:fhi])
 		sigma = np.sqrt(2 / math.pi) * nm
 
 		# Apply the CFAR threshold and invert
-		T = np.sqrt(2 * np.log(1 / pfa))
-		gtfilt = (gtabs > T * sigma).choose(0, gtsig)
+		T = np.sqrt(-2 * np.log(pfa))
+		gtsig[gtabs <= T * sigma] = 0
 
-		gw = istft(gtfilt, win)
+		gw = istft(gtsig, win, nfft=nfft)
 
 		if floordb is not None:
 			emax = self.envelope().extremum()[0]
