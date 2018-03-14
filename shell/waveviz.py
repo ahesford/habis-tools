@@ -214,7 +214,7 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	the waveform image. Elements in waves that do not exist in atimes will
 	be replaced with NaN when plotting arrival times.
 
-	If mtimes is not None, it should be the mean arrival time use to align
+	If mtime is not None, it should be the mean arrival time use to align
 	the waveforms. In this case, the time will be printed in the title of
 	the arrival-time plot.
 
@@ -399,37 +399,39 @@ def getatimes(atarg, freq=1, scalar=True, cols=None):
 	return { k: freq * v[acols] for k, v in atmap.items() }
 
 
-def shiftgrps(wavegrps, atimes):
+def shiftgrps(wavegrps, atimes, suppress=False):
 	'''
 	In a mapping wavegrps as returned by getwavegrps, shift each waveform
 	wavegrps[t,r][i] by the difference atimes[t,r][0] - atimes[t,r][i]. If
 	a list atimes[t,r] cannot be found, no shift will be performed for that
-	(t, r) pair.
+	(t, r) pair. If suppress is True, any (t,r) pair in wavegrps without a
+	corresponding list atimes[t,r] will be excluded from the output.
 
 	If atimes[t,r] exists but its length does not match the length of
 	wavegrps[t,r], an IndexError will be raised unless the length of
 	wavegrps[t,r] is unity (i.e., no waveforms would be shifted).
-
-	The shifting is done in place, but wavegrps is also returned.
 	'''
+	output = { }
 	for (t,r) in wavegrps.keys():
 		# Pull the waveform list
 		waves = wavegrps[t,r]
 
 		# Pull the arrival-time list, if possible
 		try: atlist = atimes[t,r]
-		except KeyError: continue
+		except KeyError: 
+			if not suppress: output[t,r] = waves
+			continue
 
 		if len(waves) > 1 and len(atlist) != len(waves):
 			raise IndexError('Length of arrival-time list does not match '
 					f'length of wave-group list for pair {(t,r)}')
 
 		# Build the new list of shifted waves
-		wavegrps[t,r] = [ waves[0] ]
-		wavegrps[t,r].extend(wf.shift(atlist[0] - atv)
+		output[t,r] = [ waves[0] ]
+		output[t,r].extend(wf.shift(atlist[0] - atv)
 					for wf, atv in zip(waves[1:], atlist[1:]))
 
-	return wavegrps
+	return output
 
 
 def eqwavegrps(wavegrps, individual=False):
@@ -600,8 +602,11 @@ if __name__ == '__main__':
 	elif imgext == '.pdf': vidmode = False
 	else: sys.exit(f'ERROR: Output {args.output} is not an MP4 or PDF')
 
-	if vidmode and args.log:
-		sys.exit('ERROR: Log mode is not supported for video output')
+	if vidmode:
+		if args.log:
+			sys.exit('ERROR: Cannot set --log for video output')
+		elif args.zero:
+			sys.exit('ERROR: Cannot set --zero for video output')
 
 	try: args.inputs = matchfiles(args.inputs)
 	except IOError as e: sys.exit(f'ERROR: {e}')
@@ -610,13 +615,15 @@ if __name__ == '__main__':
 		# Load arrival times and convert to samples
 		args.atimes = getatimes(args.atimes, args.freq, not vidmode, args.cols)
 		print(f'Parsed {len(args.atimes)} arrival times')
+	elif args.suppress or args.zero:
+		sys.exit('ERROR: Cannot set --suppress or --zero without --atimes')
 
 	if vidmode:
 		# Load the backscatter waves in groups by element
 		wavegrps = getwavegrps(args.inputs, args.nsamp)
 		# Shift waveforms if arrival times are provided
 		if args.atimes:
-			wavegrps = shiftgrps(wavegrps, args.atimes)
+			wavegrps = shiftgrps(wavegrps, args.atimes, args.suppress)
 			print('Shifted waveform groups')
 		print('Storing waveform video to file', args.output)
 		plotframes(args.output, wavegrps, args.atimes,
@@ -634,42 +641,47 @@ if __name__ == '__main__':
 			celts = set(waves).intersection(args.atimes)
 			print(f'{len(celts)} waveforms have associated arrival times')
 			mtime = int(np.mean([args.atimes[c] for c in celts]))
-			# Shift all waveforms with an arrival time to the mean
-			for k in celts:
-				waves[k] = waves[k].shift(mtime - args.atimes[k])
-			print('Shifted waveforms')
+
+			if args.suppress: print('Will suppress unaligned waveforms')
+			elif args.zero: print('Will zero unaligned waveforms')
+
+			# Define the relative window in alignment mode
 			if args.window is not None:
-				# The window specification is relative to the mean time
-				st = max(0, mtime + args.window[0])
-				ed = mtime + args.window[1]
-				args.window = Window(st, end=ed)
+				start, end = args.window
+				start = max(0, mtime + start)
+				end = mtime + end
+				args.window = Window(start, end=end)
 		elif args.window is not None:
-			# Convert the window specification to a Window object
-			args.window = Window(args.window[0],
-					end=args.window[1], nonneg=True)
+			# Define the absolute window
+			start, end = args.window
+			args.window = Window(start, end=end, nonneg=True)
 
-		# Window and equalize, if necessary
-		if args.window is not None or args.equalize:
-			for (t, r) in waves:
-				wave = waves[t,r]
-				if args.window is not None:
-					wave = wave.window(args.window)
-				if args.equalize:
-					pkamp = wave.envelope().extremum()[0]
-					if pkamp > sqrt(sys.float_info.epsilon):
-						wave /= pkamp
-				waves[t,r] = wave
+		# Align, window and equalize each waveform as necessary
+		pwaves = { }
+		for k, wave in waves.items():
+			# Try to shift waveforms to mean arrival time
+			try:
+				atime = args.atimes[k]
+			except (KeyError, TypeError):
+				if args.suppress:
+					continue
+				elif args.zero:
+					pwaves[k] = Waveform(wave.nsamp)
+					continue
+			else:
+				wave = wave.shift(mtime - atime)
 
-		if args.atimes:
-			if args.suppress:
-				print('Suppressing unaligned waveforms')
-				ckeys = set(args.atimes).intersection(waves)
-				waves = { k: waves[k] for k in ckeys }
-			elif args.zero:
-				print('Zeroing unaligned waveforms')
-				for k, v in waves.items():
-					if k not in args.atimes: v *= 0
+			if args.window is not None:
+				wave = wave.window(args.window)
+			if args.equalize:
+				pkamp = wave.envelope().extremum()[0]
+				if pkamp > sqrt(sys.float_info.epsilon): wave /= pkamp
 
-		print('Storing waveform image to file', args.output)
+			# Store the final product
+			pwaves[k] = wave
+
+		waves = pwaves
+		print('Processed waveforms, storing to file', args.output)
+
 		plotwaves(args.output, waves, args.atimes, mtime,
 				args.window, args.log, args.thresh, args.one_sided)
