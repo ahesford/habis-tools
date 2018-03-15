@@ -8,7 +8,6 @@ import uptime
 import yaml
 import glob
 
-
 from collections import OrderedDict
 
 def habistat():

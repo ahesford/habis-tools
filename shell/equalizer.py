@@ -9,8 +9,6 @@ import operator as op
 
 from numpy import ma
 
-
-
 from pycwp import process
 
 from habis.formats import WaveformSet

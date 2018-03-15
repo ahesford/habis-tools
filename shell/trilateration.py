@@ -8,8 +8,6 @@ import multiprocessing
 
 from numpy.linalg import norm
 
-
-
 from pycwp import process
 
 from habis import trilateration

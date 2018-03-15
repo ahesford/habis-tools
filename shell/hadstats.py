@@ -7,8 +7,6 @@ import numpy as np, os, sys, getopt, pickle
 
 from numpy import fft, linalg as la
 
-
-
 from scipy.signal import hilbert
 
 import multiprocessing, queue

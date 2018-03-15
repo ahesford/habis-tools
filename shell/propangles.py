@@ -8,8 +8,6 @@ import multiprocessing, queue
 
 from numpy import ma
 
-
-
 from pycwp import process
 
 from habis.habiconf import HabisConfigError, HabisConfigParser

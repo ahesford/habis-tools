@@ -1,4 +1,4 @@
-#!/usr/bin/env python 
+#!/usr/bin/env python
 
 import numpy as np, getopt, sys, os
 
@@ -8,13 +8,15 @@ from argparse import ArgumentParser
 
 from scipy.signal import hilbert
 
+import itertools
+
 import progressbar
 
 from collections import defaultdict
 
 from habis.habiconf import matchfiles
 from habis.sigtools import Waveform, Window
-from habis.formats import loadmatlist, WaveformSet
+from habis.formats import loadkeymat, WaveformSet
 
 def plotframes(output, waves, atimes, dwin=None,
 		equalize=False, cthresh=None, bitrate=-1, one_sided=False):
@@ -355,38 +357,38 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 
 def getatimes(atarg, freq=1, scalar=True, cols=None):
 	'''
-	Given a glob with an optional ":<column>,<column>,..." suffix of
-	integer indices, try to open arrival-time maps matching the glob with
-	habis.formats.loadmatlist() and pull the specified columns. Keys of the
-	map should be transmit-receive pairs (t, r).
+	Given a list of files or globs, try to open arrival-time maps matching
+	the globs with habis.formats.loadkeymat() and pull the columns
+	specified in the sequence cols. If cols is None, all columns will be
+	picked. Keys of each map should be transmit-receive pairs (t, r).
 
-	A glob matching the full name in atarg will first be checked. If no
-	matches exist or the file cannot be opened, and the name
-	constains a suffix of integer indices, a file whose name matches atarg
-	up to the suffix will be checked and the specified column will be
-	pulled.
+	Files are loaded in lexical order. If the same key is present in
+	multiple files, the values for that key will a concatenation of the
+	values for individual files (each considered as a list) that preserves
+	the lexical ordering.
 
-	If no suffix is specified, the first column will be pulled.
+	If the lengths of value lists for keys in the composite arrivla-time
+	map, only those keys with maximum-length values will be retained.
 
 	The times are scaled by the frequency to convert the times to samples.
 
-	If scalar is True, values in the returned map will be scalars.
-	Otherwise, the returned values will be arrays.
+	If scalar is True, values in the returned map will be scalars if a
+	single column is pulled. Otherwise, the returned values will always be
+	arrays.
 	'''
-	acols = [0]
+	# Try to load the files one-by-one
+	atfiles = sorted(matchfiles(atarg, forcematch=True))
 
-	# Try to load the files
-	atfiles = matchfiles(atarg, forcematch=True)
-	atmap = loadmatlist(atfiles, scalar=False, nkeys=2)
+	# Concatenate values to accommodate repeat keys, track max column count
+	ncols = 0
+	atmap = defaultdict(list)
+	for atfile in atfiles:
+		for k, v in loadkeymat(atfile, scalar=False, nkeys=2).items():
+			atmap[k].extend(vv for vv in v)
+			ncols = max(ncols, len(atmap[k]))
 
 	if cols is None:
-		ait = iter(atmap.values())
-		try: ncol = len(next(ait))
-		except StopIteration: ncol = 1
-		for v in ait:
-			if ncol != len(v):
-				raise ValueError('Specify cols if arrival-time records have different lengths')
-		acols = list(range(ncol))
+		acols = list(range(ncols))
 	else:
 		acols = cols
 		print(f'Using columns {acols} from arrival-time records')
@@ -396,7 +398,8 @@ def getatimes(atarg, freq=1, scalar=True, cols=None):
 			raise ValueError('Scalar arrival-time map requires a single column specification')
 		acols = acols[0]
 
-	return { k: freq * v[acols] for k, v in atmap.items() }
+	return { k: freq * np.array(v)[acols]
+			for k, v in atmap.items() if len(v) == ncols }
 
 
 def shiftgrps(wavegrps, atimes, suppress=False):
@@ -407,9 +410,12 @@ def shiftgrps(wavegrps, atimes, suppress=False):
 	(t, r) pair. If suppress is True, any (t,r) pair in wavegrps without a
 	corresponding list atimes[t,r] will be excluded from the output.
 
-	If atimes[t,r] exists but its length does not match the length of
-	wavegrps[t,r], an IndexError will be raised unless the length of
-	wavegrps[t,r] is unity (i.e., no waveforms would be shifted).
+	If the length of atimes[t,r] is unity or the length of wavegrps[t,r] is
+	unity, no shift will be performed, but the list of waveforms will be
+	included in the output regardless of the value of suppress.
+
+	If both atimes[t,r] and waevgrps[t,r] have non-unit length but the
+	lengths do not match,an IndexError will be raised.
 	'''
 	output = { }
 	for (t,r) in wavegrps.keys():
@@ -418,11 +424,16 @@ def shiftgrps(wavegrps, atimes, suppress=False):
 
 		# Pull the arrival-time list, if possible
 		try: atlist = atimes[t,r]
-		except KeyError: 
+		except KeyError:
 			if not suppress: output[t,r] = waves
 			continue
 
-		if len(waves) > 1 and len(atlist) != len(waves):
+		# With a single time or waveform, no shifting is performed
+		if len(atlist) == 1 or len(waves) == 1:
+			output[t,r] = waves
+			continue
+
+		if len(atlist) != len(waves):
 			raise IndexError('Length of arrival-time list does not match '
 					f'length of wave-group list for pair {(t,r)}')
 
@@ -540,7 +551,7 @@ def getwave(infile, nsamp=None):
 	if nsamp: wf.nsamp = nsamp
 
 	# Shift out the F2C
-	dwin = wf.datawin 
+	dwin = wf.datawin
 	wf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
 
 	return (tx, rx), wf

@@ -6,8 +6,6 @@
 import sys, numpy as np, os, getopt
 import multiprocessing
 
-
-
 from pycwp import process
 from habis.habiconf import matchfiles, buildpaths, numrange
 from habis.formats import WaveformSet

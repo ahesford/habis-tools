@@ -8,8 +8,6 @@ from numpy.linalg import norm
 
 import time
 
-
-
 from mpi4py import MPI
 
 from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles

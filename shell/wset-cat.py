@@ -6,7 +6,6 @@
 import sys, numpy as np, os, getopt
 import multiprocessing
 
-
 from collections import defaultdict
 
 from habis.habiconf import matchfiles, buildpaths
