@@ -185,8 +185,9 @@ def plotframes(output, waves, atimes, dwin=None,
 
 			# Plot an arrival time, if possible
 			try:
-				atelts = [int(v) for v in atimes[pair]]
+				atelts = tuple(int(v) for v in atimes[pair])
 			except (KeyError, TypeError, IndexError):
+				atelts = None
 				for apoint in apoints: apoint.set_visible(False)
 				for aline in alines: aline.set_visible(False)
 			else:
@@ -197,7 +198,16 @@ def plotframes(output, waves, atimes, dwin=None,
 					aln.set_xdata([ate, ate])
 					aln.set_visible(True)
 
-			ax.set_title(f'Waveform {pair}', fontsize=14)
+			title = f'Waveform {pair}'
+			if atelts:
+				multi = int(len(atelts) > 1)
+				tstr = 'times'
+				if not multi:
+					tstr = 'time'
+					atelts = atelts[0]
+				title += f', arrival {tstr} {atelts} samples'
+
+			ax.set_title(title, fontsize=14)
 
 			# Capture the frame
 			writer.grab_frame()
@@ -642,7 +652,7 @@ if __name__ == '__main__':
 			# Shift waveforms if arrival times are provided
 			wavegrps = shiftgrps(wavegrps, args.atimes, args.suppress)
 			# Strip out the subsequent (realigned) times
-			args.atimes = { k: [v[0]] for k, v in atimes.items() }
+			args.atimes = { k: [v[0]] for k, v in args.atimes.items() }
 			print('Shifted waveform groups')
 		print('Storing waveform video to file', args.output)
 		plotframes(args.output, wavegrps, args.atimes,
