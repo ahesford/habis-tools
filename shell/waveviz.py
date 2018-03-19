@@ -22,15 +22,24 @@ def plotframes(output, waves, atimes, dwin=None,
 		equalize=False, cthresh=None, bitrate=-1, one_sided=False):
 	'''
 	Prepare, using the ffmpeg writer in matplotlib.animation, a video with
-	the given bitrate in which each frame depicts aligned waveforms
-	received by a common element. The argument waves should be a mapping
-	from transmit-receive pairs to a list of Waveform objects, prealigned
-	if alignment is desired.
+	the given bitrate in which each frame depicts a collection of waveforms
+	and, optionally, a number of arrival times.
 
-	The argument atimes should be a mapping from element index to a list of
-	at least one arrival time. If the mapping contains at least one arrival
-	time for a given element index, the first arrival time for the element
-	will be plotted along with the corresponding waveforms.
+	The argument waves should be a mapping from transmit-receive pairs to a
+	list of Waveform objects to plot simultaneously in a single frame. The
+	argument atimes should be a similar mapping, from transmit-receive
+	pairs to a list of arrival times to plot alongside any waveforms for
+	that pair. The number of waveforms must be equal for all values in
+	waves; likewise, the number of arrival times must be equal for all
+	values in atimes.
+
+	Each arrival time is plotted as a vertical dashed line. If possible, a
+	marker will be placed on the waveform where it intersects the arrival
+	line. Tthe marker for atimes[t,r][i] will be placed on the waveform
+	waves[t,r][i] if i < len(waves[t,r]) and len(waves[t,r]) > 1; if
+	len(waves[t,r]) == 1, then all markers will be on the sole waveform,
+	regardless of the length of atimes[t,r]; if i > len(waves[t,r]) > 0,
+	the marker will be placed at y=0.
 
 	If dwin = (start, win) is specified, it defines an absolute window
 	(when atimes is None) or relative window (when atimes is defined) over
@@ -70,19 +79,17 @@ def plotframes(output, waves, atimes, dwin=None,
 
 	# Ensure all data sets are equally sized
 	wvit = iter(waves.values())
-	try: nsets = len(next(wvit))
-	except StopIteration: nsets = 0
-	if any(len(v) != nsets for v in wvit):
+	try: nwaves = len(next(wvit))
+	except StopIteration: nwaves = 0
+	if any(len(v) != nwaves for v in wvit):
 		raise ValueError('All waveform lists must be equally sized')
 
-	if nsets < 2 and atimes is not None:
+	if atimes is not None:
 		atit = iter(atimes.values())
 		try: ntimes = len(next(atit))
 		except StopIteration: ntimes = 0
 		if any(len(v) != ntimes for v in atit):
 			raise ValueError('All arrival time lists must be equally sized')
-	elif atimes is not None:
-		ntimes = 1
 	else: ntimes = 0
 
 	# Prepare the axes for a 1080p frame
@@ -113,15 +120,10 @@ def plotframes(output, waves, atimes, dwin=None,
 		if atimes is not None:
 			# The window is relative to the arrival-time range
 			cpairs = set(waves.keys()).intersection(iter(atimes.keys()))
-			if nsets > 1:
-				# With more than one waveform, first time is relevant
-				dstart = min(atimes[pair][0] for pair in cpairs)
-				dend = max(atimes[pair][0] for pair in cpairs)
-			else:
-				# With a single waveform, all times will be shown
-				dstart = min(min(atimes[pair]) for pair in cpairs)
-				dend = max(max(atimes[pair]) for pair in cpairs)
-			dwin = Window(max(0, int(dstart + dwin[0])), end=int(dend + dwin[1]))
+			dstart = min(min(atimes[pair]) for pair in cpairs)
+			dend = max(max(atimes[pair]) for pair in cpairs)
+			dwin = Window(max(0, int(dstart + dwin[0])),
+						end=int(dend + dwin[1]))
 		else:
 			dwin = Window(dwin[0], end=dwin[1])
 
@@ -146,19 +148,19 @@ def plotframes(output, waves, atimes, dwin=None,
 	# Build the common time axis
 	taxis = np.arange(dwin.start, dwin.end)
 
-	print(f'Waveform count: {nsets}; arrival-time count: {ntimes}')
+	print(f'Waveform count: {nwaves}; arrival-time count: {ntimes}')
 	print(f'Display frame is [{dwin.start}, {dwin.end}, {vmin:g}, {vmax:g}]')
 
 	# Create the frames and write the video
 	with writer.saving(fig, output, fig.get_dpi()):
 		# Create the empty plot for efficiency
-		lines = ax.plot(*[[] for i in range(2 * nsets)])
+		lines = ax.plot(*[[] for i in range(2 * nwaves)])
 
 		# Create empty plots for arrival times, with vertical lines
 		cycler = mpl.rcParams['axes.prop_cycle']()
 
 		# Skip past the number of colors already used
-		for i in range(nsets): next(cycler)
+		for i in range(nwaves): next(cycler)
 
 		# Set lines for arrival times, with colors in the cycle
 		apoints, alines = [ ], [ ]
@@ -183,13 +185,14 @@ def plotframes(output, waves, atimes, dwin=None,
 
 			# Plot an arrival time, if possible
 			try:
-				atelts = [int(v) for v in atimes[pair][:ntimes]]
+				atelts = [int(v) for v in atimes[pair]]
 			except (KeyError, TypeError, IndexError):
 				for apoint in apoints: apoint.set_visible(False)
 				for aline in alines: aline.set_visible(False)
 			else:
-				for apt, aln, ate in zip(apoints, alines, atelts):
-					apt.set_data([ate], [wlist[0][ate]])
+				for j, (apt, aln, ate) in enumerate(zip(apoints, alines, atelts)):
+					try: apt.set_data([ate], [wlist[j][ate]])
+					except IndexError: apt.set_data([ate], [0])
 					apt.set_visible(True)
 					aln.set_xdata([ate, ate])
 					aln.set_visible(True)
@@ -470,7 +473,7 @@ def eqwavegrps(wavegrps, individual=False):
 	if not individual:
 		# Reduce all peak amplitudes to one per group
 		pkamps = { k: max(v) for k, v in pkamps.items() }
-		
+
 		# Find low-amplitude threshold
 		minamp *= max(pkamps.values())
 
@@ -595,6 +598,9 @@ if __name__ == '__main__':
 	parser.add_argument('--one-sided', action='store_true',
 			help='Use a one-sided color or amplitude scale')
 
+	parser.add_argument('-r', '--skip-alignment', action='store_true',
+			help='Do not align waveforms, but show times (video only)')
+
 	parser.add_argument('-e', '--equalize', action='count',
 			help='Equalize waveforms (in videos, use twice to '
 				'equalize all waves in each frame independently')
@@ -632,9 +638,11 @@ if __name__ == '__main__':
 	if vidmode:
 		# Load the backscatter waves in groups by element
 		wavegrps = getwavegrps(args.inputs, args.nsamp)
-		# Shift waveforms if arrival times are provided
-		if args.atimes:
+		if args.atimes and not args.skip_alignment:
+			# Shift waveforms if arrival times are provided
 			wavegrps = shiftgrps(wavegrps, args.atimes, args.suppress)
+			# Strip out the subsequent (realigned) times
+			args.atimes = { k: [v[0]] for k, v in atimes.items() }
 			print('Shifted waveform groups')
 		print('Storing waveform video to file', args.output)
 		plotframes(args.output, wavegrps, args.atimes,
