@@ -216,9 +216,7 @@ class Waveform(object):
 			wset = WaveformSet.fromfile(f)
 			if wset.ntx != 1 or wset.nrx != 1:
 				raise TypeError('WaveformSet contains more than one waveform')
-			rid = wset.rxidx[0]
-			tid = wset.txstart
-			return wset.getwaveform(rid, tid)
+			return next(wset.allwaveforms())[1]
 		except ValueError: pass
 
 		# As a fallback, try a 1-D binary array

@@ -13,7 +13,7 @@ import struct
 from itertools import repeat
 
 from collections import OrderedDict, defaultdict, namedtuple
-from functools import reduce
+from functools import reduce, partial
 
 import warnings
 
@@ -944,11 +944,11 @@ class WaveformSet(object):
 		Write the WaveformSet object to the data file in f (either a
 		name or a file-like object that allows writing).
 
-		If append is True, an unopened file is opened for appends
-		instead of cloberring an existing file. In this case, writing
-		of the file-level header is skipped. It is the caller's
-		responsibility to assure that an existing file header is
-		consistent with records written by this method in append mode.
+		If append is True, the file-level header is not written. An
+		unopened file is opened for appends instead of truncating an
+		existing file. It is the caller's responsibility to assure that
+		an existing file header is consistent with records written by
+		this method in append mode.
 
 		** NOTE **
 		Because the WaveformSet may map some input file for waveform
@@ -993,8 +993,6 @@ class WaveformSet(object):
 
 			f.write(hbytes)
 
-		f.seek(0, 2)
-
 		# Write each record in turn
 		for idx in sorted(self.rxidx):
 			hdr, waveforms = self._get_record_raw(idx)
@@ -1018,7 +1016,19 @@ class WaveformSet(object):
 			f.write(wbytes)
 			f.flush()
 
-		f.close()
+
+	@staticmethod
+	def _funpack(f, fmt):
+		'''
+		Read from the file pointer f (using f.read) the appropriate
+		number of bytes to unpack the struct described by the format
+		string fmt.
+
+		The file must already be open. All read and unpack errors are
+		passed through to the caller.
+		'''
+		sz = struct.calcsize(fmt)
+		return struct.unpack(fmt, f.read(sz))
 
 
 	def load(self, f, force_dtype=None, allow_duplicates=False,
@@ -1083,17 +1093,16 @@ class WaveformSet(object):
 		making this mode suitable for compressed input. (This method
 		will not attempt to open compressed files, so the argument f
 		should be a GzipFile, BZ2File or similar instance if inline
-		decompression is desired. Note that, in stream mode,
+		decompression is desired.)
 		'''
 		# Open the file if it is not open
 		if isinstance(f, str):
 			f = open(f, mode='rb')
 
-		def funpack(fmt):
-			sz = struct.calcsize(fmt)
-			return struct.unpack(fmt, f.read(sz))
-
 		f32size = np.dtype('float32').itemsize
+
+		# Convenience: attach the file to funpack
+		funpack = partial(self._funpack, f)
 
 		# Read the magic number and file version
 		magic, major, minor = funpack('<4s2I')
@@ -1137,6 +1146,9 @@ class WaveformSet(object):
 
 		# Clear any group configuration for now
 		self.txgrps = None
+
+		# Clear any context
+		self.context = { }
 
 		if minor > 1:
 			# Read the group configuration
@@ -1196,7 +1208,7 @@ class WaveformSet(object):
 			encountered = set()
 
 		# Parse through the specified number of receive records
-		while True:
+		while self.nrx < nrx:
 			if minor == 2:
 				# Update running index
 				idx += 1
