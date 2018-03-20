@@ -25,8 +25,9 @@ try: import pyfftw
 except ImportError: fft = np.fft
 else: fft = pyfftw.interfaces.numpy_fft
 
-from pycwp import cutil, mio, signal, stats
+from pycwp import cutil, signal, stats
 
+from .formats import WaveformSet, WaveformSetIOError
 from .stft import stft, istft
 
 @functools.lru_cache(maxsize=32)
@@ -191,36 +192,48 @@ class Waveform(object):
 		return cls(wave.nsamp)
 
 
+	@staticmethod
+	def _wset2wave(wset):
+		'''
+		Verify that the WaveformSet object wset contains exactly one
+		transmit and one receive index, then return the only waveform
+		associated with these indices.
+		'''
+		if wset.ntx != 1 or wset.nrx != 1:
+			raise TypeError('WaveformSet contains more than one waveform')
+		return next(wset.allwaveforms())[1]
+
+
 	@classmethod
-	def fromfile(cls, f):
+	def allwaves(cls, f, *args, **kwargs):
 		'''
-		Attempt to read a single wavefrom from a file containing either
-		a habis.formats.WaveformSet object or a binary array readable
-		by pycwp.mio.readbmat.
+		Return a generator that yields Waveforms from a file f
+		containing one or more habis.formats.WaveformSet objects as
+		returned by WaveformSet.allsets(f, *args, **kwargs).
 
-		If the file is a WaveformSet, it must specify exactly one
-		transmit index and one receive index. (The values of these
-		indices are ignored.) The resulting waveform is the output of
-		WaveformSet.getwaveform(rid, tid) for the only valid indices.
-
-		If the file is a binary array, it is read by mio.readbmat()
-		with the argument dim=1 to force 1-D interpretation. The
-		automatic dtype detection rules apply.
-
-		As per each of these dependent I/O functions, f can either be a
-		file name or a file-like object.
+		Each WaveformSet yields a single Waveform instance as if
+		Waveform.fromfile were called on only the portion of the file
+		corresponding to that Waveform.
 		'''
-		try:
-			from .formats import WaveformSet
-			# First assume the file is a WaveformSet
-			wset = WaveformSet.fromfile(f)
-			if wset.ntx != 1 or wset.nrx != 1:
-				raise TypeError('WaveformSet contains more than one waveform')
-			return next(wset.allwaveforms())[1]
-		except ValueError: pass
+		for wset in WaveformSet.allsets(f, *args, **kwargs):
+			yield cls._wset2wave(wset)
 
-		# As a fallback, try a 1-D binary array
-		return cls(signal=mio.readbmat(f, dim=1))
+
+	@classmethod
+	def fromfile(cls, f, *args, **kwargs):
+		'''
+		Attempt to read a Wavefrom from a file containing a single
+		habis.formats.WaveformSet object. The WaveformSet must specify
+		exactly one transmit index and one receive index. (The values
+		of these indices are ignored.) The resulting waveform is the
+		output of WaveformSet.getwaveform(rid, tid) for the only valid
+		indices.
+
+		All extra arguments are passed to WaveformSet.fromfile to
+		govern the parsing.
+		'''
+		wset = WaveformSet.fromfile(f, *args, **kwargs)
+		return cls._wset2wave(wset)
 
 
 	def __init__(self, nsamp=0, signal=None, start=0):
@@ -323,25 +336,20 @@ class Waveform(object):
 		except AttributeError: return Waveform(self.nsamp)
 
 
-	def store(self, f, waveset=True):
+	def store(self, f, compression=None, **kwargs):
 		'''
 		Store the contents of the waveform to f, which may be a file
-		name or a file-like object.
+		name or a file-like object. The waveform is first wrapped in a
+		habis.formats.WaveformSet object using
 
-		If waveset is True, the waveform is first wrapped in a
-		habis.formats.WaveformSet object using the fromwaveform()
-		factory and then written using WaveformSet.store(f).  No
-		additional arguments to store() are supported.
+		  WaveformSet.fromwaveform(self, copy=False, **kwargs)
 
-		If waveset is False, the full waveform is stored in a 1-D
-		binary matrix by calling pycwp.mio.writebmat(s, f), where the
-		signal s is the output of self.getsignal().
+		and written with WaveformSet.store(f, compression=compression).
+		Because copy=False is set in WaveformSet.fromwaveform, this
+		argument must not appear in kwargs.
 		'''
-		if waveset:
-			from .formats import WaveformSet
-			WaveformSet.fromwaveform(self).store(f)
-		else:
-			pycwp.mio.writebmat(self.getsignal(forcecopy=False), f)
+		wset = WaveformSet.fromwaveform(self, copy=False, **kwargs)
+		wset.store(f, compression=compression)
 
 
 	def copy(self):
@@ -1759,7 +1767,7 @@ class Waveform(object):
 		The sampling frequency of the signal is specified in fs, which
 		is used to convert the values flo and fhi in the noise window
 		into DFT bin indices.
-		
+
 		The noise window must satsify 0 <= flo < fhi <= fs / 2 and
 		0 <= tlo < thi < self.nsamp.
 

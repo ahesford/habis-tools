@@ -41,11 +41,7 @@ def bsextract(wsets, outspec=None):
 		for rx in wset.rxidx:
 			try: wf = wset.getwaveform(rx, rx, maptids=True)
 			except KeyError: continue
-
-			hdr = wset.getheader(rx).copy(txgrp=None)
-			bsw = WaveformSet.fromwaveform(wf, hdr=hdr, tid=rx, f2c=wset.f2c)
-
-			bsw.store(obase.format(rx))
+			wf.store(obase.format(rx), rid=rx, tid=rx, f2c=wset.f2c)
 
 
 def trextract(wsets, trmap, random=None, outspec=None):
@@ -105,10 +101,7 @@ def trextract(wsets, trmap, random=None, outspec=None):
 		for t, r in trlist:
 			try: wf = wset.getwaveform(r, t, maptids=True)
 			except KeyError: continue
-
-			hdr = wset.getheader(r).copy(txgrp=None)
-			trw = WaveformSet.fromwaveform(wf, hdr=hdr, tid=t, f2c=wset.f2c)
-			trw.store(obase.format(t, r))
+			wf.store(obase.format(t, r), rid=r, tid=t, f2c=wset.f2c)
 
 
 if __name__ == '__main__':

@@ -17,8 +17,9 @@ from functools import reduce, partial
 
 import warnings
 
-# Warnings related to WaveformSet I/O
+# Warnings and errors related to WaveformSet I/O
 class WaveformSetIOWarning(UserWarning): pass
+class WaveformSetIOError(Exception): pass
 
 def _strict_int(x):
 	ix = int(x)
@@ -671,23 +672,94 @@ class WaveformSet(object):
 	typecodes = bidict({b'I2': 'int16', b'I4': 'int32', b'I8': 'int64', b'F2': 'float16',
 			b'F4': 'float32', b'F8': 'float64', b'C4': 'complex64', b'C8': 'complex128'})
 
+	@staticmethod
+	def _get_open(f=None, compression=None):
+		'''
+		Return the appropriate open function to handle optionally
+		compressed files and a Boolean that is True iff compression was
+		detected or requested.
+
+		If f is not None, it should be the name of an existing file.
+		The python-magic module will be used to determine whether
+		gzip.open, bz2.open or the regular open should be used to read
+		the file. The "compression" argument in this case is ignored.
+
+		If f is None, then compression should be one of None, 'gzip' or
+		'bz2'.
+		'''
+		import bz2, gzip
+		openers = { 'bz2': bz2.open, 'gzip': gzip.open, '': open }
+
+		if not f:
+			compression = (compression or '').strip().lower()
+			errmsg = 'Value of compression must be None, "gzip" or "bz2"'
+		else:
+			try: import magic
+			except ImportError: mime = ''
+			else: mime = magic.Magic(mime=True).from_file(f).lower()
+
+			compression = { 'application/x-gzip': 'gzip',
+					'application/x-bzip2': 'bz2' }.get(mime, '')
+			errmsg = 'Unable to determine file compression scheme'
+
+		try: return (openers[compression], compression != '')
+		except KeyError: raise ValueError(errmsg)
+
+
+	@classmethod
+	def allsets(cls, f, *args, **kwargs):
+		'''
+		Return a generator that repeatedly creates and yields
+		WaveformSet objects from a file (optionally compressed) by
+		calling cls.fromfile(f, *args, **kwargs) until a peek() on the
+		file returns no data. This enables processing of concatenated
+		WaveformSet files.
+		'''
+		if isinstance(f, str):
+			opener, needs_stream = cls._get_open(f)
+			f = opener(f, 'rb')
+			if needs_stream: kwargs['stream_mode'] = True
+
+		while f.peek(1):
+			yield cls.fromfile(f, *args, **kwargs)
+
+
 	@classmethod
 	def fromfile(cls, f, *args, **kwargs):
 		'''
-		Create a new WaveformSet object and use load() to populate the
-		object with the contents of the specified file (a file-like
-		object or a string naming the file).
+		Create and return a single new WaveformSet object and use
+		load() to populate the object with the contents of the
+		specified file (a file-like object or a string naming the
+		file).
+
+		If f is a string, the python-magic module will attempt to
+		determine whether the file is gzip- or bz2-compressed. If so,
+		the file will be opened and decompressed, with the contents
+		parsed in stream mode.
 
 		Extra args and kwargs are passed to the load() method.
+
+		If stream mode is required (i.e., the argument f was a string
+		naming a compressed file), the stream_mode argument will be
+		added to kwargs before calling load(). Thus, care should be
+		taken when passing a positional value for stream_mode, because
+		forced addition of stream_mode=True to the kwargs will conflict
+		with a positional declaration.
 		'''
+		if isinstance(f, str):
+			opener, needs_stream = cls._get_open(f)
+			f = opener(f, 'rb')
+			if needs_stream: kwargs['stream_mode'] = True
+
 		# Create an empty set, then populate from the file
 		wset = cls()
 		wset.load(f, *args, **kwargs)
+
 		return wset
 
 
 	@classmethod
-	def fromwaveform(cls, wave, copy=False, hdr=None, tid=0, f2c=0):
+	def fromwaveform(cls, wave, copy=False, hdr=None, rid=0, tid=0, f2c=0):
 		'''
 		Create a new WaveformSet object with a single transmit index
 		and a single receive index with a sample count and data type
@@ -701,9 +773,11 @@ class WaveformSet(object):
 		If hdr is not None, it should be a receive-channel header that
 		will be used for the single receive-channel record in the
 		output WaveformSet. The value of hdr.win will be overwritten
-		with wave.datawin. If hdr is None, a default value
+		with wave.datawin, and the value of rid will be ignored.
 
-			(0, [0., 0., 0.], wave.datawin)
+		If hdr is None, a default header
+
+			(rid, [0., 0., 0.], wave.datawin)
 
 		will be used.
 
@@ -718,7 +792,7 @@ class WaveformSet(object):
 
 		if hdr is None:
 			# Create a default header
-			hdr = RxChannelHeader(0, [0.]*3, wave.datawin)
+			hdr = RxChannelHeader(rid, [0.]*3, wave.datawin)
 		else:
 			# Ensure hdr is RxChannelHeader, then set datawin
 			hdr = RxChannelHeader(*hdr).copy(win=wave.datawin)
@@ -928,18 +1002,18 @@ class WaveformSet(object):
 
 		if not write:
 			# Support all currently defined formats for reading
-			if not (0 <= minor < 6):
+			if not (0 <= minor < 7):
 				raise ValueError('Unsupported minor version for reading')
 			return (major, minor)
 
-		# Only version-5 writes are supported
-		if minor != 5:
+		# Only version-6 writes are supported
+		if minor != 6:
 			raise ValueError('Unsupported minor version for writing')
 
 		return major, minor
 
 
-	def store(self, f, append=False, ver=(1,5)):
+	def store(self, f, append=False, ver=(1,6), compression=None):
 		'''
 		Write the WaveformSet object to the data file in f (either a
 		name or a file-like object that allows writing).
@@ -950,6 +1024,14 @@ class WaveformSet(object):
 		an existing file header is consistent with records written by
 		this method in append mode.
 
+		The compression argument should be None, 'gzip' or 'bz2'. If
+		compression is not None, f is a string and append is False, the
+		file will be opened as a gzip.GzipFile (for 'gzip') or
+		bz2.BZ2File (for 'bz2'). It is a ValueError to specify a
+		non-None value for compression and a string for f when append
+		mode is True. When f is not a string, the value of compression
+		is ignored.
+
 		** NOTE **
 		Because the WaveformSet may map some input file for waveform
 		arrays after calling load(), calling store() with the same file
@@ -957,9 +1039,12 @@ class WaveformSet(object):
 		'''
 		# Open the file if it is not open
 		if isinstance(f, str):
-			f = open(f, mode=('wb' if not append else 'ab'))
+			opener, compressed = self._get_open(None, compression)
+			if compressed and append:
+				raise ValueError('Append mode with compression is not supported')
+			f = opener(f, ('ab' if append else 'wb'))
 
-		# Only version (1,5) is supported for output
+		# Verify that the output version is supported
 		major, minor = self._verify_file_version(ver, write=True)
 
 		# A missing transmit-group configuration takes the special value (0,0)
@@ -982,14 +1067,17 @@ class WaveformSet(object):
 			hbytes += struct.pack('<4I2HI', self.f2c, self.nsamp,
 					self.nrx, self.ntx, gcount, gsize, self.txstart)
 
-			# Unspecified TGC parameters default to 0
-			try: tgc = self.context['tgc']
-			except KeyError: tgc = np.zeros(256, dtype=np.float32)
-
-			if len(tgc) != 256:
-				raise ValueError('File version (1,4) requires 256 TGC floats')
-
-			hbytes += tgc.tobytes()
+			try:
+				# Make sure TGC is a 1-D array
+				tgc = np.asarray(self.context['tgc'], dtype=np.float32).squeeze()
+			except KeyError:
+				# Header contains no TGC records
+				hbytes += struct.pack('<I', 0)
+			else:
+				if tgc.ndim != 1:
+					raise ValueError('TGC must be a 1-D array of floats')
+				hbytes += struct.pack('<I')
+				hbytes += tgc.tobytes()
 
 			f.write(hbytes)
 
@@ -1024,11 +1112,40 @@ class WaveformSet(object):
 		number of bytes to unpack the struct described by the format
 		string fmt.
 
-		The file must already be open. All read and unpack errors are
-		passed through to the caller.
+		The file must already be open. Any exception is caught and
+		converted into a WaveformSetIOError.
 		'''
-		sz = struct.calcsize(fmt)
-		return struct.unpack(fmt, f.read(sz))
+		try:
+			sz = struct.calcsize(fmt)
+			return struct.unpack(fmt, f.read(sz))
+		except Exception as err:
+			raise WaveformSetIOError(f'Failure to unpack bytes: {err}')
+
+
+	@staticmethod
+	def _npunpack(f, dtype, count):
+		'''
+		Read from the file point f (using f.read) the approriate number
+		of bytes to built a 1-D Numpy array of the specified type and
+		count. The count must be nonnegative. If count is 0, the
+		returned array will be empty.
+
+		The file must alread by open. Any exception raised by the I/O
+		and Numpy bytes-to-array conversion is caught and converted
+		into a WaveformSetIOError.
+		'''
+		if count < 0:
+			raise ValueError(f'Cannot read {count} bytes into Numpy array')
+		elif count < 1:
+			return np.array([], dtype=dtype)
+
+		dtype = np.dtype(dtype)
+
+		try:
+			rbytes = f.read(dtype.itemsize * count)
+			return np.frombuffer(rbytes, dtype, count)
+		except Exception as err:
+			raise WaveformSetIOError(f'Failure to read array: {err}')
 
 
 	def load(self, f, force_dtype=None, allow_duplicates=False,
@@ -1043,6 +1160,9 @@ class WaveformSet(object):
 		the WaveformSet (arguments to the constructor) will be reset to
 		values specified in the file header. Failure to parse the file
 		completely may result in the instance being corrupted.
+
+		In general, any error will cause a WaveformSetIOError exception
+		to be raised.
 
 		Each block of waveform data is memory-mapped (except when
 		stream_mode is True; see below) from the source file. This
@@ -1070,8 +1190,8 @@ class WaveformSet(object):
 		It is an error if the number of parsed receive-channel records
 		does not equal the number of records enconcoded in the file
 		header. If warn_on_error is True, this error will cause a
-		warning to be issued. Otherwise, a ValueError will be raised in
-		case this error is encountered.
+		warning to be issued. Otherwise, a WaveformSetIOError will be
+		raised in case this error is encountered.
 
 		If header_only is True, the contents of the WaveformSet header
 		header will be read from the file, but processing will stop
@@ -1099,31 +1219,33 @@ class WaveformSet(object):
 		if isinstance(f, str):
 			f = open(f, mode='rb')
 
-		f32size = np.dtype('float32').itemsize
-
-		# Convenience: attach the file to funpack
+		# Convenience: attach the file to funpack and npunpack
 		funpack = partial(self._funpack, f)
+		npunpack = partial(self._npunpack, f)
 
 		# Read the magic number and file version
-		magic, major, minor = funpack('<4s2I')
+		try:
+			magic, major, minor = funpack('<4s2I')
+			if magic != b'WAVE': raise WaveformSetIOError
+		except WaveformSetIOError:
+			raise WaveformSetIOError('Unable to identify WAVE header')
 
-		if magic != b'WAVE':
-			raise ValueError('Invalid magic number in file')
-
-		major, minor = self._verify_file_version((major, minor))
+		try: major, minor = self._verify_file_version((major, minor))
+		except ValueError as err:
+			raise WaveformSetIOError(f'Unsupported WAVE format: {err}')
 
 		if minor > 4:
 			# Read temperature context
-			try:
-				rcount = 2
-				rbytes = f.read(f32size * rcount)
-				self.context['temps'] = np.frombuffer(rbytes, 'float32', rcount)
-			except ValueError:
-				raise ValueError('Temperature section of header must contain 2 floats')
+			try: self.context['temps'] = npunpack('float32', 2)
+			except WaveformSetIOError as err:
+				raise WaveformSetIOError(f'Invalid temperature: {err}')
 
 		# Read the type code for this file
-		typecode = funpack('<2s')[0]
-		dtype = np.dtype(self.typecodes[typecode])
+		try:
+			typecode = funpack('<2s')[0]
+			dtype = np.dtype(self.typecodes[typecode])
+		except (WaveformSetIOError, KeyError) as err:
+			raise WaveformSetIOError(f'Invalid typecode: {err}')
 
 		if force_dtype is not None:
 			# Force a dtype conversion, if necessary
@@ -1163,28 +1285,32 @@ class WaveformSet(object):
 				if size == 0:
 					size = 10240 // count
 					if size * count != 10240:
-						raise ValueError('Cannot infer group size for %d groups' % count)
+						msg = f'Unable to infer size for {count} groups'
+						raise WaveformIOError(msg)
 
 				self.txgrps = count, size
 
 			# For version (1,4) and above, read an explicit txstart
 			if minor >= 4: self.txstart = funpack('<I')[0]
 
-			# Read 256 TGC parameters in the header
-			try:
-				rcount = 256
-				rbytes = f.read(f32size * rcount)
-				self.context['tgc'] = np.frombuffer(rbytes, 'float32', rcount)
-			except ValueError:
-				raise ValueError('TGC section of header must contain 256 floats')
+			# Minor versions below 6 used fixed 256-value TGC records
+			if minor < 6: rcount = 256
+			else: rcount = funpack('<I')[0]
+
+			if rcount:
+				try: tgc = npunpack('float32', rcount)
+				except WaveformSetIOError as err:
+					msg = f'Unable to read {rcount} TGC values: {err}'
+					raise WaveformSetIOError(msg)
+				# For minor versions < 6, don't keep all-zero TGC
+				if minor > 5 or np.count_nonzero(tgc):
+					self.context['tgc'] = tgc
 		elif minor == 0:
 			# Verion 0 uses an explicit 1-based transmit-index list
-			try:
-				rbytes = f.read(np.dtype('uint32').itemsize * ntx)
-				self.txidx = np.frombuffer(rbytes, 'uint32', ntx) - 1
-			except ValueError:
-				raise ValueError(f'Transmit-index list in header '
-						'must contain {ntx} uint32 values')
+			try: self.txidx = npunpack('uint32', ntx) - 1
+			except WaveformSetIOError:
+				msg = 'Tx list must contain {ntx} values: {err}'
+				raise WaveformSetIOError(msg)
 
 		# Skip processing of records in header_only mode
 		if header_only: return nrx
@@ -1216,13 +1342,13 @@ class WaveformSet(object):
 				# Read a global channel index
 				# Correct 1-based indexing in early versions
 				try: idx = funpack('<I')[0] - int(minor < 2)
-				except struct.error: break
+				except WaveformSetIOError: break
 
 			# Read element position and data window parameters
 			if minor > 1:
 				# Also read transmission group configuration
 				try: i, g, px, py, pz, ws, wl = funpack('<2I3f2I')
-				except struct.error: break
+				except WaveformSetIOError: break
 
 				txgrp = (i, g) if usegrps else None
 				if minor == 2:
@@ -1230,7 +1356,7 @@ class WaveformSet(object):
 					if wl == nsamp and ws == 1: ws = 0
 			else:
 				try: px, py, pz, ws, wl = funpack('<3f2I')
-				except struct.error: break
+				except WaveformSetIOError: break
 				txgrp = None
 
 			# Build the channel header
@@ -1251,7 +1377,7 @@ class WaveformSet(object):
 			if not stream_mode:
 				# Return a view into the map
 				fsmap = f.tell()
-				
+
 				try:
 					wavemap = np.ndarray(waveshape,
 							dtype=dtype, buffer=buf,
@@ -1265,11 +1391,8 @@ class WaveformSet(object):
 				# Read into a new array
 				nvals = waveshape[0] * waveshape[1]
 
-				try:
-					wavemap = f.read(nvals * dtype.itemsize)
-					wavemap = np.frombuffer(wavemap, dtype, nvals)
-					wavemap = wavemap.reshape(waveshape, order='C')
-				except (ValueError, TypeError, IOError): break
+				try: wavemap = npunpack(dtype, nvals).reshape(waveshape, order='C')
+				except WaveformSetIOError: break
 
 			if not skip_zero_length or wavemap.nbytes != 0:
 				if force_dtype is not None:
@@ -1284,7 +1407,7 @@ class WaveformSet(object):
 		if nrx and self.nrx != nrx:
 			err = f'Header specifies {nrx} records, but read {self.nrx}'
 			if warn_on_error: warnings.warn(WaveformSetIOWarning(err))
-			else: raise ValueError(err)
+			else: raise WaveformSetIOError(err)
 
 
 	@property
