@@ -1031,13 +1031,21 @@ class Waveform(object):
 		'''
 		Perform an integer shift without spectral manipulations by
 		rewrapping data windows.
+		
+		The shift d must be an integer within the precision implied by
+		an inexact dtype (which will take the value self.dtype when
+		dtype is None). If the dtype is not inexact, double precision
+		is assumed.
 
 		If cyclic is False, portions of the shifted signal that would
 		fall outside of the range [0, self.nsamp) will be truncated;
 		otherwise, the signal is shifted cyclically.
 		'''
-		if int(d) != d:
-			raise TypeError('Shift amount must be an integer')
+		try: eps = np.finfo(dtype or self.dtype).eps
+		except ValueError: eps = np.finfo('float64').eps
+
+		if not abs(d - int(d)) < eps * abs(d):
+			raise TypeError('Shift amount must be an approximate integer')
 
 		d = int(d)
 		dwin = self.datawin
