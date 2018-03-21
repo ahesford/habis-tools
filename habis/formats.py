@@ -876,28 +876,6 @@ class WaveformSet(object):
 		return major, minor
 
 
-	@classmethod
-	def storeall(cls, dataseq, f, compression=None):
-		'''
-		Store all objects in the sequence dataseq that are WaveformSet
-		instances into the file f, which may be a file-like object or a
-		string naming the file. If f is a string, it will be opened
-		with optional compression according to the value of the
-		compression argument. (See WaveformSet.store for more
-		information.)
-
-		Any objects in dataseq that are not WaveformSet instances will
-		be ignored.
-
-		The file will be truncated.
-		'''
-		if isinstance(f, str):
-			f = cls._get_open(None, compression)[0](f, 'wb')
-
-		for seq in iter(dataseq):
-			if isinstance(seq, cls): seq.store(f)
-
-
 	def store(self, f, append=False, ver=(1,6), compression=None):
 		'''
 		Write the WaveformSet object to the data file in f (either a
