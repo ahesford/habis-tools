@@ -192,33 +192,6 @@ class Waveform(object):
 		return cls(wave.nsamp)
 
 
-	@staticmethod
-	def _wset2wave(wset):
-		'''
-		Verify that the WaveformSet object wset contains exactly one
-		transmit and one receive index, then return the only waveform
-		associated with these indices.
-		'''
-		if wset.ntx != 1 or wset.nrx != 1:
-			raise TypeError('WaveformSet contains more than one waveform')
-		return next(wset.allwaveforms())[1]
-
-
-	@classmethod
-	def allwaves(cls, f, *args, **kwargs):
-		'''
-		Return a generator that yields Waveforms from a file f
-		containing one or more habis.formats.WaveformSet objects as
-		returned by WaveformSet.allsets(f, *args, **kwargs).
-
-		Each WaveformSet yields a single Waveform instance as if
-		Waveform.fromfile were called on only the portion of the file
-		corresponding to that Waveform.
-		'''
-		for wset in WaveformSet.allsets(f, *args, **kwargs):
-			yield cls._wset2wave(wset)
-
-
 	@classmethod
 	def fromfile(cls, f, *args, **kwargs):
 		'''
@@ -233,7 +206,9 @@ class Waveform(object):
 		govern the parsing.
 		'''
 		wset = WaveformSet.fromfile(f, *args, **kwargs)
-		return cls._wset2wave(wset)
+		if wset.ntx != 1 or wset.nrx != 1:
+			raise TypeError('WaveformSet contains more than one waveform')
+		return next(wset.allwaveforms())[1]
 
 
 	def __init__(self, nsamp=0, signal=None, start=0):

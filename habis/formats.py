@@ -707,26 +707,6 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def allsets(cls, f, *args, **kwargs):
-		'''
-		Return a generator that repeatedly creates and yields
-		WaveformSet objects from a file (optionally compressed) by
-		calling cls.fromfile(f, *args, **kwargs) until a peek() on the
-		file returns no data. This enables processing of concatenated
-		WaveformSet files.
-
-		Concatenated WaveformSet files require loading in stream mode,
-		so this method sets the stream_mode keyword argument to True.
-		The caller should not provide a value for stream_mode.
-		'''
-		if isinstance(f, str):
-			f = cls._get_open(f)[0](f, 'rb')
-
-		while f.peek(1):
-			yield cls.fromfile(f, *args, stream_mode=True, **kwargs)
-
-
-	@classmethod
 	def fromfile(cls, f, *args, **kwargs):
 		'''
 		Create and return a single new WaveformSet object and use
