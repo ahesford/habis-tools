@@ -12,7 +12,8 @@ import struct
 
 from itertools import repeat
 
-from collections import OrderedDict, defaultdict, namedtuple
+from collections import OrderedDict
+
 from functools import reduce, partial
 
 import warnings

@@ -5,7 +5,9 @@ Routines for manipulating HABIS signals.
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import numpy as np, math
+import sys
+import math
+import numpy as np
 import collections
 
 import scipy
@@ -27,7 +29,8 @@ else: fft = pyfftw.interfaces.numpy_fft
 
 from pycwp import cutil, signal, stats
 
-from .formats import WaveformSet, WaveformSetIOError
+from .formats import (WaveformSet, WaveformSetIOError,
+			_strict_nonnegative_int, _strict_int)
 from .stft import stft, istft
 
 @functools.lru_cache(maxsize=32)
@@ -146,8 +149,6 @@ class Window(tuple):
 		except TypeError:
 			raise ValueError("Window start, length and end must be integers")
 
-		from .formats import _strict_nonnegative_int, _strict_int
-
 		try:
 			if nonneg: start = _strict_nonnegative_int(start)
 			else: start = _strict_int(start)
@@ -237,10 +238,12 @@ class Waveform(object):
 
 	@nsamp.setter
 	def nsamp(self, value):
-		from .formats import _strict_nonnegative_int
 		value = _strict_nonnegative_int(value)
-		if value < self.datawin.end:
-			raise ValueError('Waveform length must meet or exceed length of data window')
+
+		# Make sure the change won't conflict with data window
+		if value < self._nsamp and value < self.datawin.end:
+			raise ValueError('Value of nsamp would truncate data')
+
 		self._nsamp = value
 
 
@@ -327,13 +330,18 @@ class Waveform(object):
 		wset.store(f, compression=compression)
 
 
-	def copy(self):
+	def copy(self, copydata=True):
 		'''
-		Return a copy of this waveform.
+		Return a copy of this waveform. If copydata is True, the
+		underlying data is copied; otherwise, only the surrounding
+		structure is copied, while the data in the new Waveform is just
+		a reference to the existing data.
 		'''
-		datawin = self.datawin
-		data = self.getsignal(datawin, forcecopy=True)
-		return Waveform(self.nsamp, data, datawin.start)
+		if copydata and self._data is not None:
+			data = self._data.copy()
+		else: data = self._data
+
+		return Waveform(self._nsamp, data, self._datastart)
 
 
 	def __iter__(self):
@@ -563,7 +571,6 @@ class Waveform(object):
 			return
 
 		# Ensure the start of the data window is always nonnegative
-		from .formats import _strict_nonnegative_int
 		start = _strict_nonnegative_int(start)
 
 		# Ensure signal is 1-D
@@ -1031,7 +1038,7 @@ class Waveform(object):
 		'''
 		Perform an integer shift without spectral manipulations by
 		rewrapping data windows.
-		
+
 		The shift d must be an integer within the precision implied by
 		an inexact dtype (which will take the value self.dtype when
 		dtype is None). If the dtype is not inexact, double precision
@@ -1998,6 +2005,388 @@ class Waveform(object):
 			# Convert the peak amplitude, in dB, and subtract noise dB
 			return 20. * np.log10(env) - nf
 		else: return np.max(self.rolling_snr(noisewin)._data)
+
+
+class WaveformMap(collections.abc.MutableMapping):
+	'''
+	A class to represent a mapping from transmit receive pairs (t, r) to
+	Waveform objects, where t and r are both nonnegative integers, along
+	with an overall sample count that defines the maximum time window
+	(starting from an implicit zero-time reference) represented by all
+	enclosed Waveforms.
+	'''
+	def __init__(self, nsamp=0, *args):
+		'''
+		Initialize a WaveformMap with the given sample duration and an
+		optional mapping/iterable E = args[0] (if provided).
+		'''
+		# Copy the sample size
+		self._nsamp = nsamp
+
+		# Create a new underlying map
+		self._wavemap = { }
+
+		# Process any constructor arguments
+		self.update(*args)
+
+
+	@property
+	def nsamp(self):
+		'''
+		The length of the time window, in samples, spanned by all
+		Waveforms in the mapping.
+		'''
+		return self._nsamp
+
+
+	@nsamp.setter
+	def nsamp(self, nsamp):
+		'''
+		Ensure that the value of nsamp is a nonnegative integer and
+		agrees with any existing records already in the mapping. If so,
+		update the value.
+		'''
+		nsamp = _strict_nonnegative_int(nsamp)
+
+		# No need to update the value if it matches
+		if self._nsamp == nsamp: return
+
+		try:
+			# Try to update durations for all existing waveforms
+			for wave in self._wavemap.values(): wave.nsamp = nsamp
+		except ValueError:
+			# Failure! Reset the durations
+			for wave in self._wavemap.values(): wave.nsamp = self._nsamp
+			raise
+		else:
+			# Success! Update this record
+			self._nsamp = nsamp
+
+
+	def __len__(self):
+		'''
+		Return the number of Waveform objects in this mapping.
+		'''
+		return len(self._wavemap)
+
+
+	def __iter__(self):
+		'''
+		Return an iterator over the keys of the WaveformMap.
+		'''
+		return iter(self._wavemap)
+
+
+	@classmethod
+	def _verify_key(cls, key):
+		'''
+		Ensure that a key for mapping set/get/delete methods is a
+		two-sequence of nonnegative integers, and return them in a
+		tuple.
+
+		If key is not of the expected form, a TypeError will be raised.
+		'''
+		try:
+			t, r = key
+			t = _strict_nonnegative_int(t)
+			r = _strict_nonnegative_int(r)
+		except Exception:
+			raise TypeError(f'{cls.__name__} keys must be '
+					'2-tuple of nonnegative integers')
+		return t, r
+
+
+	def __delitem__(self, key):
+		'''
+		Attempt to remove the provided key from the WaveformMap.
+		'''
+		del self._wavemap[self._verify_key(key)]
+
+
+	def __getitem__(self, key):
+		'''
+		Get the Waveform object associated with the given key. A
+		shallow copy of the Waveform is made (i.e., the underlying data
+		may be shared with the internal value).
+		'''
+		return self._wavemap[self._verify_key(key)].copy(False)
+
+
+	def __setitem__(self, key, value):
+		'''
+		Associate the value, which must be a Waveform object, to the
+		key. If the value has an nsamp parameter that is larger than
+		the WaveformMap nsamp parameter, the map's nsamp will be
+		increased. Otherwise, the Waveform object's nsamp parameter
+		will be increased.
+
+		A shallow copy of the value will be made (i.e., the underlying
+		data associatd with the input value may be shared with the
+		stored Waveform object).
+		'''
+		#  Verify key and value, then make a shallow copy of the value
+		key = self._verify_key(key)
+		if not isinstance(value, Waveform):
+			raise TypeError('Value must be a Waveform instance')
+		value = value.copy(False)
+
+		# Adjust sample window
+		if self.nsamp > value.nsamp:
+			value.nsamp = self.nsamp
+		elif self.nsamp < value.nsamp:
+			self.nsamp = value.nsamp
+
+		# Record the waveform
+		self._wavemap[key] = value
+
+
+	def update(self, *args, **kwds):
+		'''
+		Override collections.abc.MutableMapping.update to enforce empty
+		keyword arguments. Keyword arguments require string keys, which
+		are incompatible with the 2-tuple of integers expected here.
+
+		The behavior of update with positional-only arguments is
+		identical to that of collections.abc.MutableMapping.update.
+		'''
+		if kwds:
+			raise TypeError(f'{type(self).__name__}.update '
+					'does not support keyword arguments')
+		return super().update(*args)
+
+	@classmethod
+	def _serializer_prefixes(cls):
+		'''
+		A tuple (hdr, data) of name prefixes for the header and data
+		portions of serialized WaveformMap representations.
+		'''
+		return ('com.habicoinc.WaveformMap.header',
+				'com.habicoinc.WaveformMap.data')
+
+
+	@classmethod
+	def _store_chunk(cls, zf, hdr, data):
+		'''
+		A helper used by WaveformMap.store to write chunks of data.
+		'''
+		from uuid import uuid4
+		from json import dumps
+
+		# Identify this store operation
+		storeid = uuid4().hex
+
+		# Identifying prefix
+		hpre, dpre = cls._serializer_prefixes()
+		zf.writestr(f'{hpre}.{storeid}', dumps(hdr))
+		zf.writestr(f'{dpre}.{storeid}', data)
+
+
+	def store(self, f, compression=None, append=False):
+		'''
+		Serialize the contents of the WaveformMap to a specially
+		crafted ZIP file given by f, which should be a string or a
+		file-like object. The file should not be a ZipFile object,
+		because it will be opened anew.
+
+		The value of compression can be None, 'deflate', 'lzma' or
+		'bzip2'. When opening the zipfile, this will determine the
+		compression method used.
+
+		If append is True, the ZipFile will be opened in append ('a')
+		mode. Otherwise, the file will be opened in write ('w') mode
+		that will truncate any existing output.
+
+		In append mode, multiple WaveformMap objects may be serialized
+		independently. The ZIP archive contains some header information
+		and a collection of Waveform data for each store operation,
+		indexed by a random UUID that should avoid conflicts.
+
+		A single call to this method may behave as if the WaveformMap
+		were arbitrarily split into several disjoint submaps, each
+		written with an independent call WaveformMap.store with
+		append=True.
+		'''
+		import zipfile
+
+		try:
+			compression = (compression or '').strip().lower()
+			compression = { '': zipfile.ZIP_STORED,
+					'deflate': zipfile.ZIP_DEFLATED,
+					'bzip2': zipfile.ZIP_BZIP2,
+					'lzma': zipfile.ZIP_LZMA }[compression]
+		except KeyError:
+			raise ValueError('Unrecognized compression scheme')
+
+		if isinstance(f, zipfile.ZipFile):
+			raise TypeError('Output file cannot be a ZipFile instance')
+
+		byteorder = { 'little': '<', 'big': '>' }.get(sys.byteorder, 'unknown')
+
+		# Only write 1024 records at a time
+		chunksize = 1024
+
+		zipmode = 'a' if append else 'w'
+		with zipfile.ZipFile(f, mode=zipmode, compression=compression) as zf:
+
+			# Start the header and the accumulation of bytes
+			header = { 'nsamp': self.nsamp, 'records': [ ] }
+			data = b''
+
+			# Process each waveform record in turn
+			for idx, ((t, r), wave) in enumerate(self.items()):
+				if data and not idx % chunksize:
+					# Write existing chunk
+					self._store_chunk(zf, header, data)
+					# Start with a fresh accumulation
+					data = b''
+					header['records'] = []
+
+				record = { 't': t, 'r': r }
+
+				dwin = wave.datawin
+				record['datastart'] = dwin.start
+				record['datalength'] = dwin.length
+
+				dtype = wave.dtype
+				record['typechar'] = dtype.char
+				rbo = dtype.byteorder
+				if rbo == '=' and byteorder != 'unknown':
+					rbo = byteorder
+				record['byteorder'] = rbo
+
+				record['offset'] = len(data)
+				data += wave.getsignal(dwin, forcecopy=False).tobytes()
+
+				header['records'].append(record)
+
+			# Write any remaining chunk
+			if data: self._store_chunk(zf, header, data)
+
+
+	@classmethod
+	def _load_chunk(cls, header, data, nsamp, recid):
+		'''
+		A helper function used by WaveformMap.load to generate (t, r)
+		pairs and Waveform objects from a serialized WaveformMap header
+		and associated data block.
+		'''
+		# Process records in data-offset order to check contiguous access
+		try:
+			records = sorted(header['records'], key=lambda x: x['offset'])
+		except (KeyError, TypeError):
+			raise IOError(f'Header {recid} has no records or is malformed')
+
+		# Track the final offset of the last record
+		last_offset = 0
+		for record in records:
+			try:
+				# Read the record header fields
+				t, r = record['t'], record['r']
+				dstart = record['datastart']
+				dlen = record['datalength']
+				typecode = record['byteorder'] + record['typechar']
+				offset = record['offset']
+			except KeyError:
+				raise IOError(f'Malformed record {recid}')
+
+			recpair = f'pair {t,r} of record {recid}'
+
+			if offset != last_offset:
+				raise IOError(f'Non-contiguous data offset in {recpair}')
+
+			try:
+				dtype = np.dtype(typecode)
+			except TypeError:
+				raise IOError(f'Unknown type {typecode} in {recpair}')
+
+			# Convert the block of bytes to an array
+			nbytes = dtype.itemsize * dlen
+			try:
+				dblock = data[offset:offset+nbytes]
+				dblock = np.frombuffer(dblock, dtype=dtype, count=dlen)
+			except ValueError:
+				raise IOError(f'Unable to read data in {recpair}')
+
+			# Update the final offset
+			last_offset += nbytes
+
+			# Yield the waveform and transmit-receive indices
+			yield (t,r), Waveform(nsamp, dblock, dstart)
+
+
+	@classmethod
+	def load(cls, f):
+		'''
+		Deserialize a WaveformMap instance from a specially crafted ZIP
+		file given by f, which should be a string or a file-like
+		object. The contents of f should have been produced by a prior
+		call to WaveformMap.store. The file should not be a ZipFile
+		object, because it will be opened anew.
+
+		The contents of f may contain several serialized WaveformMap
+		objects. These will be concatenated into a single instance. The
+		largest value of "nsamp" encountered in the file will be
+		assigned to the instance. If multiple records are associated
+		with a single key, the most recently encoded record will be
+		used.
+
+		An IOError will be raised if the contents of the input cannot
+		be used to reconstruct any records.
+		'''
+		import zipfile, json
+
+		if isinstance(f, zipfile.ZipFile):
+			raise TypeError('Input file cannot be a ZipFile instance')
+
+		# Create an empty map
+		wmap = cls()
+
+		# Parse the file
+		with zipfile.ZipFile(f, mode='r') as zf:
+			# Get the name prefixes with an added dot
+			hpfx, dpfx = (c + '.' for c in cls._serializer_prefixes())
+			# Build a list of matching header-data chunks
+			chunks = collections.OrderedDict()
+			for name in zf.namelist():
+				if name.startswith(hpfx):
+					recid = name.replace(hpfx, '')
+					rectype = 'header'
+				elif name.startswith(dpfx):
+					recid = name.replace(dpfx, '')
+					rectype = 'data'
+				else: continue
+
+				# Record the file for this chunk
+				if recid not in chunks:
+					chunks[recid] = { }
+				if rectype in chunks[recid]:
+					raise IOError(f'Duplicate {rectype} '
+							'entry for record {recid}')
+				chunks[recid][rectype] = name
+
+			# Process each chunk that contains a header and data
+			for recid, names in chunks.items():
+				try:
+					hname = names['header']
+					dname = names['data']
+				except KeyError:
+					continue
+
+				header = json.loads(zf.read(hname))
+				data = zf.read(dname)
+
+				try: nsamp = header['nsamp']
+				except (KeyError, TypeError):
+					raise IOError(f'Unable to parse nsamp from header {recid}')
+
+				# Update the nsamp value if appropriate
+				if wmap.nsamp < nsamp: wmap.nsamp = nsamp
+				else: nsamp = wmap.nsamp
+
+				# Process each waveform and update the map
+				wmap.update(cls._load_chunk(header, data, nsamp, recid))
+
+		return wmap
 
 
 def dimcompat(sig, ndim=1):
