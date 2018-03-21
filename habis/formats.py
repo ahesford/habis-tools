@@ -714,14 +714,16 @@ class WaveformSet(object):
 		calling cls.fromfile(f, *args, **kwargs) until a peek() on the
 		file returns no data. This enables processing of concatenated
 		WaveformSet files.
+
+		Concatenated WaveformSet files require loading in stream mode,
+		so this method sets the stream_mode keyword argument to True.
+		The caller should not provide a value for stream_mode.
 		'''
 		if isinstance(f, str):
-			opener, needs_stream = cls._get_open(f)
-			f = opener(f, 'rb')
-			if needs_stream: kwargs['stream_mode'] = True
+			f = cls._get_open(f)[0](f, 'rb')
 
 		while f.peek(1):
-			yield cls.fromfile(f, *args, **kwargs)
+			yield cls.fromfile(f, *args, stream_mode=True, **kwargs)
 
 
 	@classmethod
@@ -1011,6 +1013,28 @@ class WaveformSet(object):
 			raise ValueError('Unsupported minor version for writing')
 
 		return major, minor
+
+
+	@classmethod
+	def storeall(cls, dataseq, f, compression=None):
+		'''
+		Store all objects in the sequence dataseq that are WaveformSet
+		instances into the file f, which may be a file-like object or a
+		string naming the file. If f is a string, it will be opened
+		with optional compression according to the value of the
+		compression argument. (See WaveformSet.store for more
+		information.)
+
+		Any objects in dataseq that are not WaveformSet instances will
+		be ignored.
+
+		The file will be truncated.
+		'''
+		if isinstance(f, str):
+			f = cls._get_open(None, compression)[0](f, 'wb')
+
+		for seq in iter(dataseq):
+			if isinstance(seq, cls): seq.store(f)
 
 
 	def store(self, f, append=False, ver=(1,6), compression=None):
@@ -1334,7 +1358,8 @@ class WaveformSet(object):
 			encountered = set()
 
 		# Parse through the specified number of receive records
-		while self.nrx < nrx:
+		# As a special case, when nrx is zero, read all possible records
+		while nrx == 0 or self.nrx < nrx:
 			if minor == 2:
 				# Update running index
 				idx += 1
