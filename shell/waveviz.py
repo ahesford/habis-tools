@@ -15,8 +15,8 @@ import progressbar
 from collections import defaultdict
 
 from habis.habiconf import matchfiles
-from habis.sigtools import Waveform, Window
-from habis.formats import loadkeymat, WaveformSet
+from habis.sigtools import Waveform, Window, WaveformMap
+from habis.formats import loadkeymat
 
 def plotframes(output, waves, atimes, dwin=None,
 		equalize=False, cthresh=None, bitrate=-1, one_sided=False):
@@ -505,13 +505,15 @@ def eqwavegrps(wavegrps, individual=False):
 
 def getwavegrps(infiles, nsamp=None):
 	'''
-	For a sequence infiles of input WaveformSet files that each contain a
-	single waveform, prepare a mapping from transmit-receiver pairs to a
-	list of Waveform objects representing backscatter waves observed at the
-	pair. The pair is given by (wset.rxidx[0], wset.txidx.next()) for each
-	file. Waveforms are ordered according to a lexicographical ordering of
-	infiles. If nsamp is not None, the nsamp property of each Waveform
-	object will be overridden.
+	For a sequence infiles of input WaveformMap files, prepare a mapping
+	from transmit-receiver pairs to a list of Waveform objects representing
+	backscatter waves observed at the pair. If the same WaveformMap key is
+	duplicated in multiple input files, the list corresponding to that key
+	will contain each Waveform in an order tha tmatches the lexicographical
+	ordering of the inputs. 
+	
+	If nsamp is not None, the nsamp property of each Waveform object will
+	be overridden.
 
 	Only element indices whose Waveform lists have a length that matches
 	that of the longest Waveform list will be included.
@@ -519,55 +521,14 @@ def getwavegrps(infiles, nsamp=None):
 	wavegrps = defaultdict(list)
 
 	for infile in sorted(infiles):
-		wset = WaveformSet.fromfile(infile, force_dtype='float64')
-		f2c = wset.f2c
-
-		if wset.ntx != 1 or wset.nrx != 1:
-			raise IOError(f'Input {infile} must contain a single waveform')
-
-		(tx, rx), wf = next(wset.allwaveforms())
-		if nsamp: wf.nsamp = nsamp
-
-		# Remove F2C
-		dwin = wf.datawin
-		nwf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
-		wavegrps[tx,rx].append(nwf)
+		wmap = WaveformMap.load(infile, dtype='float64')
+		if nsamp: wmap.nsamp = nsamp
+		for (t, r), wave in wmap.items():
+			wavegrps[t,r].append(wave)
 
 	# Filter the list to exclude short lists
 	maxlen = max(len(w) for w in wavegrps.values())
 	return { k: v for k, v in wavegrps.items() if len(v) == maxlen }
-
-
-def getwave(infile, nsamp=None):
-	'''
-	For an input WaveformSet file infile that contains a single waveform,
-	return the (t, r) index pair stored in the file and the waveform it
-	contains. The (t, r) index pair is given by the tuple
-	(wset.rxidx[0], wset.txidx.next()).
-
-	If nsamp is not None, the nsamp property of each read wavefrom is
-	replaced with the specified value.
-
-	If equalize is True, each waveform will be scaled by the inverse of its
-	peak amplitude as long as the peak amplitude is larger than the value
-	sqrt(sys.float_info.epsilon).
-
-	An IOError will be raised if the file contains more than one waveform.
-	'''
-	wset = WaveformSet.fromfile(infile, force_dtype='float64')
-	f2c = wset.f2c
-
-	if wset.ntx != 1 or wset.nrx != 1:
-		raise IOError(f'Input {infile} must contain a single waveform')
-
-	(tx, rx), wf = next(wset.allwaveforms())
-	if nsamp: wf.nsamp = nsamp
-
-	# Shift out the F2C
-	dwin = wf.datawin
-	wf = Waveform(wf.nsamp + f2c, wf.getsignal(dwin), dwin.start + f2c)
-
-	return (tx, rx), wf
 
 
 if __name__ == '__main__':
@@ -660,7 +621,11 @@ if __name__ == '__main__':
 				args.thresh, args.bitrate, args.one_sided)
 	else:
 		# Load the waveforms
-		waves = dict(getwave(inf, args.nsamp) for inf in args.inputs)
+		waves = WaveformMap()
+		for inf in args.inputs:
+			wm = WaveformMap.load(inf, dtype='float64')
+			if args.nsamp: wm.nsamp = args.nsamp
+			waves.update(wm)
 
 		# There is no mean arrival time unless arrival times are provided
 		mtime = None

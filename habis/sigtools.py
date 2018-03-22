@@ -197,19 +197,15 @@ class Waveform(object):
 	def fromfile(cls, f, *args, **kwargs):
 		'''
 		Attempt to read a Wavefrom from a file containing a single
-		habis.formats.WaveformSet object. The WaveformSet must specify
-		exactly one transmit index and one receive index. (The values
-		of these indices are ignored.) The resulting waveform is the
-		output of WaveformSet.getwaveform(rid, tid) for the only valid
-		indices.
+		WaveformMap object. The WaveformMap must hold exactly one
+		Waveform. (The transmit-receive key is ignored.)
 
-		All extra arguments are passed to WaveformSet.fromfile to
-		govern the parsing.
+		Extra arguments are passed to WaveformMap.load.
 		'''
-		wset = WaveformSet.fromfile(f, *args, **kwargs)
-		if wset.ntx != 1 or wset.nrx != 1:
-			raise TypeError('WaveformSet contains more than one waveform')
-		return next(wset.allwaveforms())[1]
+		wmap = WaveformMap.load(f, *args, **kwargs)
+		if len(wmap) != 1:
+			raise TypeError('WaveformMap must contain exactly one value')
+		return next(iter(wmap.values()))
 
 
 	def __init__(self, nsamp=0, signal=None, start=0):
@@ -2264,7 +2260,7 @@ class WaveformMap(collections.abc.MutableMapping):
 
 
 	@classmethod
-	def _load_chunk(cls, header, data, nsamp, recid):
+	def _load_chunk(cls, header, data, nsamp, force_dtype, recid):
 		'''
 		A helper function used by WaveformMap.load to generate (t, r)
 		pairs and Waveform objects from a serialized WaveformMap header
@@ -2307,6 +2303,9 @@ class WaveformMap(collections.abc.MutableMapping):
 			except ValueError:
 				raise IOError(f'Unable to read data in {recpair}')
 
+			if force_dtype is not None:
+				dblock = dblock.astype(force_dtype)
+
 			# Update the final offset
 			last_offset += nbytes
 
@@ -2315,7 +2314,7 @@ class WaveformMap(collections.abc.MutableMapping):
 
 
 	@classmethod
-	def load(cls, f):
+	def load(cls, f, dtype=None):
 		'''
 		Deserialize a WaveformMap instance from a specially crafted ZIP
 		file given by f, which should be a string or a file-like
@@ -2330,6 +2329,9 @@ class WaveformMap(collections.abc.MutableMapping):
 		with a single key, the most recently encoded record will be
 		used.
 
+		If dtype is not None, all waveforms will be coerced to the
+		specified type after loading.
+
 		An IOError will be raised if the contents of the input cannot
 		be used to reconstruct any records.
 		'''
@@ -2337,6 +2339,8 @@ class WaveformMap(collections.abc.MutableMapping):
 
 		if isinstance(f, zipfile.ZipFile):
 			raise TypeError('Input file cannot be a ZipFile instance')
+
+		if dtype is not None: dtype = np.dtype(dtype)
 
 		# Create an empty map
 		wmap = cls()
@@ -2384,7 +2388,8 @@ class WaveformMap(collections.abc.MutableMapping):
 				else: nsamp = wmap.nsamp
 
 				# Process each waveform and update the map
-				wmap.update(cls._load_chunk(header, data, nsamp, recid))
+				wmap.update(cls._load_chunk(header, data,
+								nsamp, dtype, recid))
 
 		return wmap
 
