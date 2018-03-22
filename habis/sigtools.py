@@ -310,22 +310,6 @@ class Waveform(object):
 		except AttributeError: return Waveform(self.nsamp)
 
 
-	def store(self, f, compression=None, **kwargs):
-		'''
-		Store the contents of the waveform to f, which may be a file
-		name or a file-like object. The waveform is first wrapped in a
-		habis.formats.WaveformSet object using
-
-		  WaveformSet.fromwaveform(self, copy=False, **kwargs)
-
-		and written with WaveformSet.store(f, compression=compression).
-		Because copy=False is set in WaveformSet.fromwaveform, this
-		argument must not appear in kwargs.
-		'''
-		wset = WaveformSet.fromwaveform(self, copy=False, **kwargs)
-		wset.store(f, compression=compression)
-
-
 	def copy(self, copydata=True):
 		'''
 		Return a copy of this waveform. If copydata is True, the
@@ -2218,8 +2202,8 @@ class WaveformMap(collections.abc.MutableMapping):
 
 		byteorder = { 'little': '<', 'big': '>' }.get(sys.byteorder, 'unknown')
 
-		# Only write 1024 records at a time
-		chunksize = 1024
+		# Try to write in chunks of 32 MB
+		chunksize = 0x1 << 25
 
 		zipmode = 'a' if append else 'w'
 		with zipfile.ZipFile(f, mode=zipmode, compression=compression) as zf:
@@ -2230,7 +2214,7 @@ class WaveformMap(collections.abc.MutableMapping):
 
 			# Process each waveform record in turn
 			for idx, ((t, r), wave) in enumerate(self.items()):
-				if data and not idx % chunksize:
+				if len(data) > chunksize:
 					# Write existing chunk
 					self._store_chunk(zf, header, data)
 					# Start with a fresh accumulation

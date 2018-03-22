@@ -708,40 +708,6 @@ class WaveformSet(object):
 
 
 	@classmethod
-	def fromfile(cls, f, *args, **kwargs):
-		'''
-		Create and return a single new WaveformSet object and use
-		load() to populate the object with the contents of the
-		specified file (a file-like object or a string naming the
-		file).
-
-		If f is a string, the python-magic module will attempt to
-		determine whether the file is gzip- or bz2-compressed. If so,
-		the file will be opened and decompressed, with the contents
-		parsed in stream mode.
-
-		Extra args and kwargs are passed to the load() method.
-
-		If stream mode is required (i.e., the argument f was a string
-		naming a compressed file), the stream_mode argument will be
-		added to kwargs before calling load(). Thus, care should be
-		taken when passing a positional value for stream_mode, because
-		forced addition of stream_mode=True to the kwargs will conflict
-		with a positional declaration.
-		'''
-		if isinstance(f, str):
-			opener, needs_stream = cls._get_open(f)
-			f = opener(f, 'rb')
-			if needs_stream: kwargs['stream_mode'] = True
-
-		# Create an empty set, then populate from the file
-		wset = cls()
-		wset.load(f, *args, **kwargs)
-
-		return wset
-
-
-	@classmethod
 	def fromwaveform(cls, wave, copy=False, hdr=None, rid=0, tid=0, f2c=0):
 		'''
 		Create a new WaveformSet object with a single transmit index
@@ -849,7 +815,8 @@ class WaveformSet(object):
 		self.context = { }
 
 
-	def _verify_file_version(self, version, write=False):
+	@classmethod
+	def _verify_file_version(cls, version, write=False):
 		'''
 		Ensure that the provided version matches one supported by the
 		WaveformSet class. If version is unsupported, a ValueError is
@@ -1012,18 +979,14 @@ class WaveformSet(object):
 			raise WaveformSetIOError(f'Failure to read array: {err}')
 
 
-	def load(self, f, force_dtype=None, allow_duplicates=False,
+	@classmethod
+	def load(cls, f, force_dtype=None, allow_duplicates=False,
 			skip_zero_length=True, warn_on_error=True,
 			header_only=False, stream_mode=False):
 		'''
-		Associate the WaveformSet object with the data in f, a file-
-		like object or string specifying a file name. If f is a file-
-		like object, parsing starts from the current file position.
-
-		Existing waveform records will be eliminated. All parameters of
-		the WaveformSet (arguments to the constructor) will be reset to
-		values specified in the file header. Failure to parse the file
-		completely may result in the instance being corrupted.
+		Create a WaveformSet object with the data in f, a file-like
+		object or string specifying a file name. If f is a file-like
+		object, parsing starts from the current file position.
 
 		In general, any error will cause a WaveformSetIOError exception
 		to be raised.
@@ -1065,12 +1028,11 @@ class WaveformSet(object):
 		header), and no indication of the receive channels encoded in
 		the file will be available.
 
-		When header_only is False, this method returns None. Otherwise,
-		when header_only is True, this method returns the value of the
-		"nrx" property encoded in the file. (When only reading the
-		header, the value of this instance's "nrx" will be 0 because no
-		records will have been associated with the instance.)
-
+		When header_only is False, this method returns the WaveformSet
+		instance. When header_only is True, this method returns the
+		WaveformSet and the value of the "nrx" property encoded in the
+		file.
+		
 		If stream_mode is True, the waveform data will not be
 		memory-mapped, but will be copied into locally controlled
 		memory. Furthermore, seeks will not be performed on the input,
@@ -1081,11 +1043,14 @@ class WaveformSet(object):
 		'''
 		# Open the file if it is not open
 		if isinstance(f, str):
-			f = open(f, mode='rb')
+			opener, compressed = cls._get_open(f)
+			f = opener(f, mode='rb')
+			# Force stream mode for compressed input
+			if compressed: stream_mode = True
 
 		# Convenience: attach the file to funpack and npunpack
-		funpack = partial(self._funpack, f)
-		npunpack = partial(self._npunpack, f)
+		funpack = partial(cls._funpack, f)
+		npunpack = partial(cls._npunpack, f)
 
 		# Read the magic number and file version
 		try:
@@ -1094,20 +1059,23 @@ class WaveformSet(object):
 		except WaveformSetIOError:
 			raise WaveformSetIOError('Unable to identify WAVE header')
 
-		try: major, minor = self._verify_file_version((major, minor))
+		try: major, minor = cls._verify_file_version((major, minor))
 		except ValueError as err:
 			raise WaveformSetIOError(f'Unsupported WAVE format: {err}')
 
+		# Create some empty context
+		context = { }
+
 		if minor > 4:
 			# Read temperature context
-			try: self.context['temps'] = npunpack('float32', 2)
+			try: context['temps'] = npunpack('float32', 2)
 			except WaveformSetIOError as err:
 				raise WaveformSetIOError(f'Invalid temperature: {err}')
 
 		# Read the type code for this file
 		try:
 			typecode = funpack('<2s')[0]
-			dtype = np.dtype(self.typecodes[typecode])
+			dtype = np.dtype(cls.typecodes[typecode])
 		except (WaveformSetIOError, KeyError) as err:
 			raise WaveformSetIOError(f'Invalid typecode: {err}')
 
@@ -1116,25 +1084,13 @@ class WaveformSet(object):
 			force_dtype = np.dtype(force_dtype)
 			if force_dtype == dtype: force_dtype = None
 
-		# Clear the record array
-		self.clearall()
-
 		# Parse common transmission parameters
 		f2c, nsamp, nrx, ntx = funpack('<4I')
 
-		# Set the file-level parameters
-		self.dtype = force_dtype if force_dtype is not None else dtype
-		self.nsamp = nsamp
-		self.f2c = f2c
-		self.ntx = ntx
 		# By default, start the transmission indexing at 0
-		self.txstart = 0
-
+		txstart = 0
 		# Clear any group configuration for now
-		self.txgrps = None
-
-		# Clear any context
-		self.context = { }
+		txgrps = None
 
 		if minor > 1:
 			# Read the group configuration
@@ -1152,10 +1108,10 @@ class WaveformSet(object):
 						msg = f'Unable to infer size for {count} groups'
 						raise WaveformIOError(msg)
 
-				self.txgrps = count, size
+				txgrps = count, size
 
 			# For version (1,4) and above, read an explicit txstart
-			if minor >= 4: self.txstart = funpack('<I')[0]
+			if minor >= 4: txstart = funpack('<I')[0]
 
 			# Minor versions below 6 used fixed 256-value TGC records
 			if minor < 6: rcount = 256
@@ -1168,16 +1124,21 @@ class WaveformSet(object):
 					raise WaveformSetIOError(msg)
 				# For minor versions < 6, don't keep all-zero TGC
 				if minor > 5 or np.count_nonzero(tgc):
-					self.context['tgc'] = tgc
+					context['tgc'] = tgc
 		elif minor == 0:
 			# Verion 0 uses an explicit 1-based transmit-index list
-			try: self.txidx = npunpack('uint32', ntx) - 1
+			try: txidx = npunpack('uint32', ntx) - 1
 			except WaveformSetIOError:
 				msg = 'Tx list must contain {ntx} values: {err}'
 				raise WaveformSetIOError(msg)
 
+		# Now create the empty object and associate context
+		wset = cls(ntx=ntx, txstart=txstart, nsamp=nsamp, f2c=f2c,
+				dtype=(force_dtype or dtype), txgrps=txgrps)
+		wset.context = context
+
 		# Skip processing of records in header_only mode
-		if header_only: return nrx
+		if header_only: return wset, nrx
 
 		if not stream_mode:
 			# Use a single Python mmap buffer for backing data
@@ -1191,7 +1152,7 @@ class WaveformSet(object):
 
 		# If the set isn't configured for transmit groups,
 		# ignore any group spec in the receive-channel headers
-		usegrps = (self.txgrps is not None)
+		usegrps = (wset.txgrps is not None)
 
 		# Keep track of duplicate records, if necessary
 		if not allow_duplicates:
@@ -1199,7 +1160,7 @@ class WaveformSet(object):
 
 		# Parse through the specified number of receive records
 		# As a special case, when nrx is zero, read all possible records
-		while nrx == 0 or self.nrx < nrx:
+		while nrx == 0 or wset.nrx < nrx:
 			if minor == 2:
 				# Update running index
 				idx += 1
@@ -1264,15 +1225,17 @@ class WaveformSet(object):
 					wmap = wavemap.astype(force_dtype)
 				else: wmap = wavemap
 				# Add the record to the set
-				self.setrecord(hdr, wmap, copy=False)
+				wset.setrecord(hdr, wmap, copy=False)
 
 		if not stream_mode and f.tell() != fsrec:
 			warnings.warn(WaveformSetIOWarning('Junk at end of file'))
 
-		if nrx and self.nrx != nrx:
-			err = f'Header specifies {nrx} records, but read {self.nrx}'
+		if nrx and wset.nrx != nrx:
+			err = f'Header specifies {nrx} records, but read {wset.nrx}'
 			if warn_on_error: warnings.warn(WaveformSetIOWarning(err))
 			else: raise WaveformSetIOError(err)
+
+		return wset
 
 
 	@property
@@ -1751,7 +1714,7 @@ class WaveformSet(object):
 		return hdr.copy(win=window), output
 
 
-	def getwaveform(self, rid, tid, *args, **kwargs):
+	def getwaveform(self, rid, tid, *args, cyclic=False, **kwargs):
 		'''
 		Return, as one or more habis.sigtools.Waveform objects, the
 		waveform(s) recorded at receive-channel index rid from the
@@ -1761,7 +1724,12 @@ class WaveformSet(object):
 		Otherwise, if tid is an iterable or None (which pulls all
 		transmissions), a list of Waveform objects is returned.
 
-		If a keyword-only argument '' is
+		The Waveform time reference is the global time reference. In
+		other words, the Waveform is created from the raw record, then
+		shifted by self.f2c. If the shift moves the data window past
+		the end of the window (0, self.nsamp), some of the data will be
+		clipped. To instead cyclically wrap any samples that would be
+		clipped, pass cyclic=True to this method.
 
 		Extra args and kwargs are passed through to getrecord().
 		'''
@@ -1771,29 +1739,16 @@ class WaveformSet(object):
 
 		# Wrap a single desired signal in a Waveform object
 		if np.ndim(wform) == 1:
-			return Waveform(self.nsamp, wform, hdr.win.start)
+			wave = Waveform(self.nsamp, wform, hdr.win.start)
+			wave = wave.shift(self.f2c, cyclic=cyclic)
+			return wave
 		else:
-			return [Waveform(self.nsamp, w, hdr.win.start) for w in wform]
-
-
-	def __getitem__(self, key):
-		'''
-		For a scalar key, return self.record(key).
-
-		For a key (rid, tid), return self.getwaveform(rid, tid).
-
-		All other inputs are invalid.
-		'''
-		# Handle a single-integer index
-		try: len(key)
-		except TypeError: return self.getrecord(key)
-
-		# Split two-integer indices
-		try: rid, tid = key
-		except ValueError:
-			raise TypeError('Item key should be exactly one or two integers')
-
-		return self.getwaveform(rid, tid)
+			warr = [ ]
+			for w in wform:
+				wave = Waveform(self.nsamp, w, hdr.win.start)
+				wave = wave.shift(self.f2c, cyclic=cyclic)
+				warr.append(wave)
+			return warr
 
 
 	def delrecord(self, rid):
@@ -1892,27 +1847,6 @@ class WaveformSet(object):
 		self._records[hdr.idx] = (hdr, waveforms)
 
 
-	def setwaveform(self, rid, tid, wave, maptid=False):
-		'''
-		Replace the waveform at receive index rid and transmit index
-		tid with the provided habis.sigtools.Waveform wave. When replacing
-		the existing waveform, the signal will be padded and clipped as
-		necessary to fit into the window defined for the record.
-
-		If maptid is True, the tid will be converted from an element
-		index to a transmission index using self.element2tx().
-		'''
-		if maptid: tid = self.element2tx(tid)
-
-		tcidx = self.tx2row(tid)
-
-		# Pull the existing record
-		hdr, wfrec = self._get_record_raw(rid)
-
-		# Overwrite the transmit row with the input waveform
-		wfrec[tcidx,:] = wave.getsignal(window=hdr.win, dtype=wfrec.dtype)
-
-
 	def allrecords(self, *args, **kwargs):
 		'''
 		Return a generator that fetches each record, in channel-index
@@ -1929,24 +1863,3 @@ class WaveformSet(object):
 		'''
 		for rid in sorted(self.rxidx):
 			yield self.getheader(rid)
-
-
-	def allwaveforms(self, *args, **kwargs):
-		'''
-		Return a generator that fetches each waveform in the
-		WaveformSet by successive calls to
-
-			self.getwaveform(rid, tid, *args, **kwargs)
-
-		with tid cycling most rapidly through all values in
-		sorted(self.txidx) and least rapidly through all values in
-		sorted(self.rxidx).
-
-		Each yielded result is a tuple ((tid, rid), waveform).
-		'''
-		tids = sorted(self.txidx)
-		rids = sorted(self.rxidx)
-		for rid in rids:
-			# Pull all waveforms for the current receive record
-			waves = self.getwaveform(rid, tids, *args, **kwargs)
-			yield from zip(((tid, rid) for tid in tids), waves)

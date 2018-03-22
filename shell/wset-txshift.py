@@ -48,7 +48,7 @@ def txgrpshift(infile, outfile, subtri, shift, grpmap):
 	else:
 		print('Will create new input file', outfile)
 
-	wset = WaveformSet.fromfile(infile)
+	wset = WaveformSet.load(infile)
 
 	if wset.txgrps and not grpmap:
 		raise ValueError('Argument "grpmap" required when input uses transmit groups')
