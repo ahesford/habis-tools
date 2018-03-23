@@ -6,7 +6,7 @@
 import numpy as np, os, sys, fht, pyfftw, getopt
 
 from collections import defaultdict, OrderedDict
-from functools import partial
+from functools import partial, reduce
 
 import argparse
 
@@ -14,7 +14,7 @@ import multiprocessing
 
 from habis.habiconf import matchfiles, buildpaths
 from habis.formats import WaveformSet, loadkeymat, ArgparseLoader
-from habis.sigtools import Window, WaveformMap
+from habis.sigtools import Window, WaveformMap, Waveform
 from pycwp import process, mio, cutil
 
 def specwin(nsamp, freqs=None):
@@ -85,7 +85,7 @@ def fhfft(infile, outfile, **kwargs):
 	a DFT of the temporal samples. The Hadamard decoding follows the
 	grouping configuration stored in the file. The resulting transformed
 	records will be stored in the output outfile. The nature of outfile
-	depends on the optional argument trmap (see below). 
+	depends on the optional argument trmap (see below).
 
 	If trmap is not provided, all records will be written as a binary blob;
 	the outfile should be a single string providing the location of the
@@ -109,24 +109,28 @@ def fhfft(infile, outfile, **kwargs):
 
 	* grpmap (default: None): When not None, a mapping from output
 	  transmit index i and input transmit index
-	  
+
 	    j = grpmap[i][0] + grpmap[i][1] * wset.txgrps.size
-	    
+
 	  that will be applied to each input WaveformSet wset.
 
-	* freqs (default: None): When not None, a sequence (start, end) to be
-	  passed as slice(start, end) to record only a frequency of interest.
+	* freqs (default: None): When not None, a sequence (start, end)
+	  to be passed as slice(start, end) to bandpass filter the input after
+	  Hadamard decoding.
 
-	* nsamp (default: None): When not None, the nsamp property of the input
-	  WaveformSet is forced to this value prior to processing.
+	* rolloff (default: None): When not None, an integer that defines the
+	  half-width of a Hann window that rolls off the bandpass filter
+	  specified in freqs. Ignored if freqs is not provided.
 
-	* window (default: None): When not None, a sequence (start, length)
-	  that specifies the start (relative to a 0 f2c) and length of a global
-	  data window that will be extracted from all waveform records. The
-	  start must no less than the f2c of each input file because the
-	  file-local start of the window (start - wset.f2c) must be nonnegative.
+	* nsamp (default: None): The length of the time window over which
+	  waveforms are considered (and DFTs are performed), starting from
+	  global time 0 (i.e., without consideration for input F2C). If None,
+	  the value of nsamp in the input is used.
 
-	  This option and nsamp are mutually exclusive.
+	  ** NOTE: Because the time window always starts at global time 0,
+	  a waveform with a data window (start, length) will be cropped when
+	  (f2c + start + length) > nsamp, even if nsamp is the value encoded in
+	  the file.
 
 	* tgcsamps (default: 16 [for integer datatypes] or 0 [else]): The
 	  number of temporal samples to which a single TGC parameter applies.
@@ -189,11 +193,6 @@ def fhfft(infile, outfile, **kwargs):
 	'''
 	# Override acquisition window, if desired
 	nsamp = kwargs.pop('nsamp', None)
-	window = kwargs.pop('window', None)
-
-	# Enforce exclusivity
-	if window and nsamp is not None:
-		raise TypeError('Arguments "window" and "nsamp" are mutually exclusive')
 
 	# Grab synchronization mechanisms
 	try: lock = kwargs.pop('lock')
@@ -205,7 +204,13 @@ def fhfft(infile, outfile, **kwargs):
 	dofht = not kwargs.pop('skip_fht', False)
 	tdout = kwargs.pop('tdout', False)
 	freqs = kwargs.pop('freqs', None)
+	rolloff = kwargs.pop('rolloff', None)
 	dofft = (freqs is not None) or not tdout
+
+	if freqs is not None:
+		flo, fhi = freqs
+		if rolloff and not 0 < rolloff < (fhi - flo) // 2:
+			raise ValueError('Rolloff must be None or less than half bandwidth')
 
 	# Grab striding information
 	start = kwargs.pop('start', 0)
@@ -231,24 +236,9 @@ def fhfft(infile, outfile, **kwargs):
 	# Open the input and create a corresponding output
 	wset = WaveformSet.load(infile)
 
-	if not window:
-		if nsamp is not None:
-			# Force the sample count according to preference
-			wset.nsamp = nsamp
-		else:
-			# Record the sample count according to preference
-			nsamp = wset.nsamp
-
-		# Copy the f2c from the input
-		f2c = wset.f2c
-	else:
-		# Validate and unpack the window
-		try:
-			f2c, nsamp = window
-		except (TypeError, ValueError):
-			raise ValueError('Argument "window" must have form (start, length)')
-
-	ntx = wset.ntx
+	# Pull default sample count from input file
+	if nsamp is None: nsamp = wset.nsamp
+	elif wset.nsamp < nsamp: wset.nsamp = nsamp
 
 	if grpmap is not None:
 		# Make sure the WaveformSet has a local configuration
@@ -261,7 +251,8 @@ def fhfft(infile, outfile, **kwargs):
 		wset.groupmap = grpmap
 
 		# Map global indices to transmission number
-		outidx = OrderedDict(sorted((k, v[0] + gsize * v[1]) for k, v in grpmap.items()))
+		outidx = OrderedDict(sorted((k, v[0] + gsize * v[1])
+						for k, v in grpmap.items()))
 	else:
 		# Must specify a group map for FHT decoding
 		if dofht: raise ValueError('A valid Tx-group configuration is required')
@@ -269,6 +260,8 @@ def fhfft(infile, outfile, **kwargs):
 		gsize = 1
 		outidx = OrderedDict((i, i) for i in range(wset.ntx))
 
+	# Prepare a list of input rows to be copied to output
+	outrows = [wset.tx2row(i) for i in outidx.values()]
 
 	# Handle TGC compensation if necessary
 	try: tgc = np.asarray(wset.context['tgc'], dtype=np.float32)
@@ -288,31 +281,24 @@ def fhfft(infile, outfile, **kwargs):
 	tgc = ((10.**(-tgc[:,np.newaxis] / 20.) *
 		np.ones((len(tgc), tgcsamps), dtype=np.float32))).ravel('C')
 
-	if len(tgc):
-		# Figure out the data type of compensated waveforms
-		itype = np.dtype(wset.dtype.type(0) * tgc.dtype.type(0))
-	else:
-		itype = wset.dtype
+	# Figure out the data type of compensated waveforms
+	if len(tgc): itype = np.dtype(wset.dtype.type(0) * tgc.dtype.type(0))
+	else: itype = wset.dtype
 
 	# Create a WaveformSet object to hold the ungrouped data
 	ftype = _r2c_datatype(itype)
 	otype = ftype if not tdout else itype
-	oset = WaveformSet(len(outidx), 0, nsamp, f2c, otype)
-	# Check the output keys for sanity and set the transmit parameters in oset
-	oset.txidx = outidx.keys()
-
-	# Prepare a list of input rows to be copied to output
-	outrows = [wset.tx2row(i) for i in outidx.values()]
 
 	if dofht:
 		if gsize < 1 or (gsize & (gsize - 1)):
-			raise ValueError('Hadamard transform length must be a power of 2')
+			raise ValueError('Hadamard length must be a power of 2')
 
 		if signs is not None:
 			# Ensure signs has values 0 or 1 in the right type
 			signs = np.asarray([1 - 2 * s for s in signs], dtype=itype)
 			if signs.ndim != 1 or len(signs) != gsize:
-				raise ValueError('Sign array must have shape (wset.txgrps[1],)')
+				msg = f'Sign list must have shape ({wset.txgrps[1]},)'
+				raise ValueError(msg)
 
 		# Map input transmission groups to local and global indices
 		fhts = defaultdict(list)
@@ -323,38 +309,62 @@ def fhfft(infile, outfile, **kwargs):
 		# Sort indices in Hadamard index order
 		for i, v in fhts.items():
 			if len(v) != gsize:
-				raise ValueError('Hadamard group %d does not contain full channel set' % i)
+				raise ValueError('Incomplete Hadamard group {i}')
 			v.sort()
 			if any(j != vl[0] for j, vl in enumerate(v)):
-				raise ValueError('Hadamard group contains invalid local indices')
+				msg = f'Invalid local index in Hadamard group {i}'
+				raise ValueError(msg)
 
 	# Create intermediate (FHT) and output (FHFFT) arrays
 	# FFT axis is contiguous for FFT performance
-	b = pyfftw.n_byte_align_empty((ntx, nsamp),
-			pyfftw.simd_alignment, itype, order='C')
+	b = pyfftw.empty_aligned((wset.ntx, nsamp), dtype=itype, order='C')
 
 	if dofft:
 		# Create FFT output and a plan
-		cdim = (ntx, nsamp // 2 + 1)
-		c = pyfftw.n_byte_align_empty(cdim,
-				pyfftw.simd_alignment, ftype, order='C')
+		cdim = (wset.ntx, nsamp // 2 + 1)
+		c = pyfftw.empty_aligned(cdim, dtype=ftype, order='C')
 		fwdfft = pyfftw.FFTW(b, c, axes=(1,), direction='FFTW_FORWARD')
 
+		# Create an inverse FFT plan for time-domain output
 		if tdout:
-			# Create an inverse FFT plan for time-domain output
 			invfft = pyfftw.FFTW(c, b, axes=(1,), direction='FFTW_BACKWARD')
 
 		# Find the spectral window of interest
 		fswin = specwin(cdim[1], freqs)
 
 		# Try to build bandpass tails
-		try: tails = np.hanning(2 * freqs[2])
-		except (TypeError, IndexError): tails = np.array([])
+		if rolloff: tails = np.hanning(2 * int(rolloff))
+		else: tails = np.array([])
 
-	for rxc in wset.rxidx[start::stride]:
+	if trmap:
+		# Identify the subset of receive channels needed
+		allrx = reduce(set.union, (trm.keys() for trm in trmap.values()), set())
+		rxneeded = sorted(allrx.intersection(wset.rxidx))[start::stride]
+
+		# Build a set of WaveformMaps to hold results
+		wmaps = { k: WaveformMap() for k in trmap }
+	else: 
+		rxneeded = wset.rxidx[start::stride]
+		
+		# In blob mode, the first write must create a header
+		with lock:
+			if not event.is_set():
+				# Create a sliced binary matrix output
+				windim = (nsamp if tdout else fswin.length, wset.ntx, wset.nrx)
+				mio.Slicer(outfile, dtype=otype, trunc=True, dim=windim)
+				event.set()
+				
+		# Ensure the output header has been written
+		event.wait()
+
+		# Map receive channels to rows (slabs) in the output
+		row2slab = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
+		outbin = mio.Slicer(outfile)
+
+	for rxc in rxneeded:
 		# Find the input window relative to 0 f2c
 		iwin = wset.getheader(rxc).win.shift(wset.f2c)
-		owin = (oset.f2c, oset.nsamp)
+		owin = (0, nsamp)
 
 		try:
 			# Find overlap of global input and output windows
@@ -368,15 +378,14 @@ def fhfft(infile, outfile, **kwargs):
 			iwin = Window(istart, dlength, nonneg=True)
 			owin = Window(ostart, dlength, nonneg=True)
 
-		# Read the data on input and convert the header window to output
-		hdr, data = wset.getrecord(rxc, window=iwin)
-		hdr = hdr.copy(win=owin)
+		# Read the data over the input window
+		data = wset.getrecord(rxc, window=iwin)[1]
 
 		if len(tgc) and iwin.length:
 			# Time-gain compensation
-			owin = (0, len(tgc))
+			twin = (0, len(tgc))
 			try:
-				ostart, istart, dlength = cutil.overlap(owin, iwin)
+				ostart, istart, dlength = cutil.overlap(twin, iwin)
 				if dlength != iwin.length: raise ValueError
 			except (TypeError, ValueError):
 				raise ValueError('TGC curve does not encompass data window for channel %d' % (rxc,))
@@ -388,7 +397,7 @@ def fhfft(infile, outfile, **kwargs):
 
 		# Clear the data array
 		b[:,:] = 0.
-		ws, we = hdr.win.start, hdr.win.end
+		ws, we = owin.start, owin.end
 
 		if dofht and iwin.length:
 			# Ensure that the FHT axis is contiguous for performance
@@ -421,45 +430,40 @@ def fhfft(infile, outfile, **kwargs):
 			# Revert to time-domain representation if necessary
 			if tdout: invfft()
 
-		# Store the output record in a WaveformSet file
+		if not trmap:
+			# Write the binary blob for this receive channel
+			orow = row2slab[rxc]
+			with lock:
+				if tdout: outbin[orow] = b[outrows,:].T
+				else: outbin[orow] = c[outrows,fswin.start:fswin.end].T
+			# Nothing more to do in blob mode
+			continue
+
+		# Slice desired range from output data
 		if tdout:
-			hdr = hdr.copy(txgrp=None)
-			oset.setrecord(hdr, b[outrows,ws:we], copy=True)
+			dblock = b[:,ws:we]
+			dstart = ws
 		else:
-			hdr = hdr.copy(win=fswin, txgrp=None)
-			oset.setrecord(hdr, c[outrows,fswin.start:fswin.end], copy=True)
+			dblock = c[:,fswin.start:fswin.end]
+			dstart = fswin.start
 
-	if not trmap:
-		# In blob mode, the first write must create a header
-		with lock:
-			if not event.is_set():
-				# Create a sliced binary matrix output
-				windim = (fswin.length if dofft else nsamp, oset.ntx, wset.nrx)
-				mio.Slicer(outfile, dtype=otype, trunc=True, dim=windim)
-				event.set()
-
-		# Ensure the output header has been written
-		event.wait()
-
-		# Map receive channels to rows (slabs) in the output
-		rows = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
-		outbin = mio.Slicer(outfile)
-		for rxc in wset.rxidx[start::stride]:
-			if tdout: b = oset.getrecord(rxc, window=(0, nsamp))[1]
-			else: b = oset.getrecord(rxc, window=fswin)[1]
-			with lock: outbin[rows[rxc]] = b.T
-	else:
 		for label, trm in trmap.items():
-			wmap = WaveformMap()
-			for r in set(trm).intersection(oset.rxidx):
-				# Extract the desired waves and add to the map
-				tl = sorted(set(trm[r]).intersection(oset.txidx))
-				if not tl: continue
-				waves = oset.getwaveform(r, tl, maptids=True)
-				wmap.update(((t, r), wave) for t, wave in zip(tl, waves))
-			# Serialize output recording
-			if wmap:
-				with lock: wmap.store(outfile[label], append=True)
+			# Get any tx list for this map and rx channel
+			# Make sure tx indices are in bounds
+			try: tl = [t for t in trm[rxc] if 0 <= t < len(outrows)]
+			except KeyError: continue
+
+			for t in tl:
+				# Build output waveform and add to WaveformMap
+				wave = Waveform(nsamp, dblock[outrows[t]], dstart)
+				# Make a copy to break reference to reusable storage
+				wmaps[label][t, rxc] = wave.copy(True)
+
+	# In blob mode, the file has already been written
+	if not trmap: return
+	
+	for label, wmap in wmaps.items():
+		with lock: wmap.store(outfile[label], append=True)
 
 
 def in2out(infile, outpath, labels=None):
@@ -522,10 +526,6 @@ if __name__ == '__main__':
 	parser.add_argument('-s', '--signs', type=nptxtloader(dtype=bool),
 			help='List of signs applied before Hadamard decoding')
 
-	parser.add_argument('-w', '--window', type=int,
-			nargs=2, metavar=('START', 'LENGTH'),
-			help='Apply the indicated window to waveforms on output')
-
 	parser.add_argument('-l', '--tgc-length', dest='tgcsamps', type=int,
 			help='Number of TGC samples per TGC value in a WaveformSet')
 
@@ -548,11 +548,6 @@ if __name__ == '__main__':
 	parser.add_argument('input', nargs='+', help='List of input files to process')
 
 	args = parser.parse_args(sys.argv[1:])
-
-	# Special case: add optional rolloff to frequency band
-	if hasattr(args, 'rolloff'):
-		if hasattr(args, 'freqs'): args.freqs.append(args.rolloff)
-		delattr(args, 'rolloff')
 
 	# Special case: handle the T-R maps
 	trmap = getattr(args, 'trmap', [])
