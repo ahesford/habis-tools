@@ -18,6 +18,48 @@ from functools import reduce, partial
 
 import warnings
 
+class ArgparseLoader(object):
+	'''
+	A factory to load arguments provided to argparse.ArgumentParser using a
+	provided lodaer function with a defined set of options.
+	'''
+	def __init__(self, loader, *args, **kwargs):
+		'''
+		Create a callable that accepts a single string argument and,
+		when called, invokes the provided loader function with the
+		string as the first argument. All other positional and keyword
+		arguments are stored and passed to the loader following the
+		string.
+		'''
+		if not callable(loader):
+			raise TypeError('Argument "loader" must be callable')
+
+		# Retain a reference to the loader
+		self._loader = loader
+
+		# Retain the mode and a copy of the arguments
+		self._args = tuple(args)
+		self._kwargs = kwargs
+
+
+	def __call__(self, string):
+		'''
+		Invoke the loader associated with this instance, passing string
+		as the first argument and all associated positional and keyword
+		arguments thereafter.
+
+		Any error encountered, will be converted to an
+		argparse.ArgumentTypeError.
+		'''
+		from argparse import ArgumentTypeError
+
+		try:
+			return self._loader(string, *self._args, **self._kwargs)
+		except Exception as err:
+			message = f'failed to load {string}: {err}'
+			raise ArgumentTypeError(f'failed to load {string}: {err}')
+
+
 # Warnings and errors related to WaveformSet I/O
 class WaveformSetIOWarning(UserWarning): pass
 class WaveformSetIOError(Exception): pass

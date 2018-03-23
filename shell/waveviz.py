@@ -548,11 +548,11 @@ if __name__ == '__main__':
 			help='Only display samples from START to END '
 				'(relative to arrival times if provided)')
 
-	parser.add_argument('-a', '--atimes', nargs='+', default=None,
-			help='Arrival-time files to align waveforms')
+	parser.add_argument('-a', '--atimes', default=None, action='append',
+				help='Arrival-time map to align waves (multiples OK)')
 
-	parser.add_argument('-c', '--cols', nargs='+', type=int, default=None,
-			help='Columns of arrival-time records to use for alignment')
+	parser.add_argument('-c', '--cols', type=int, default=None, action='append',
+			help='Columns of arrival-time map to use (multiples OK)')
 
 	parser.add_argument('-t', '--thresh', type=float, default=None,
 			help='Color (image) or y-axis (video) threshold')
@@ -574,7 +574,7 @@ if __name__ == '__main__':
 
 	parser.add_argument('-e', '--equalize', action='count',
 			help='Equalize waveforms (in videos, use twice to '
-				'equalize all waves in each frame independently')
+				'equalize all waves in each frame independently)')
 
 	parser.add_argument('output', type=str,
 			help='Name of output file (PDF for image, mp4 for video)')

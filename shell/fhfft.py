@@ -6,12 +6,15 @@
 import numpy as np, os, sys, fht, pyfftw, getopt
 
 from collections import defaultdict, OrderedDict
+from functools import partial
+
+import argparse
 
 import multiprocessing
 
 from habis.habiconf import matchfiles, buildpaths
-from habis.formats import WaveformSet, loadkeymat
-from habis.sigtools import Window
+from habis.formats import WaveformSet, loadkeymat, ArgparseLoader
+from habis.sigtools import Window, WaveformMap
 from pycwp import process, mio, cutil
 
 def specwin(nsamp, freqs=None):
@@ -24,39 +27,6 @@ def specwin(nsamp, freqs=None):
 		raise ValueError('Frequency range must specify consecutive values')
 
 	return Window(fs, end=fe, nonneg=True)
-
-
-def usage(progname=None, fatal=False):
-	if progname is None: progname = sys.argv[0]
-	binfile = os.path.basename(progname)
-	print('USAGE: %s [-p p] [-h] [-m tgcmap] [-l n] [-w s:l] [-f s:e:w] [-t] [-n n] [-z] [-b] [-s s] [-o outpath] -g g <measurements>' % binfile, file=sys.stderr)
-	print('''
-  Preprocess HABIS measurement data by Hadamard decoding transmissions and
-  Fourier transforming the time-domain data. Measurement data is contained in
-  the 'measurements' WaveformSet files.
-
-  Output is stored, by default, in a WaveformSet file whose name has the same
-  name as the input with any extension swapped with '.fhfft.wset'. If the input
-  file has no extension, an extension is appended.
-
-  REQUIRED ARGUMENTS:
-  -g: Use the specified group map to rearrange transmission rows
-
-  OPTIONAL ARGUMENTS:
-  -p: Use p processors (default: all available processors)
-  -h: Suppress Hadamard decoding
-  -m: Use the given 2-column TGC map to convert nominal gain to realized gain
-  -l: Apply each TGC value to n samples in the acquisition window (default: 16)
-  -f: Retain only DFT bins s:e, with a tail filter of width w (default: all)
-  -t: Output time-domain, rather than frequency-domain, waveforms
-  -n: Override acquisition window length to n samples in WaveformSet files
-  -w: Set start (s, assuming 0 f2c) and length (l) of universal acquisition window
-  -z: Subtract a DC bias from the waveforms before processing
-  -b: Write output as a simple 3-D matrix rather than a WaveformSet file
-  -s: Correct the decoded signs with the given sign map (default: skip)
-  -o: Provide a path for placing output files
-	''', file=sys.stderr)
-	if fatal: sys.exit(fatal)
 
 
 def _r2c_datatype(idtype):
@@ -109,27 +79,40 @@ def mpfhfft(nproc, *args, **kwargs):
 		pool.wait()
 
 
-def fhfft(infile, outfile, grpmap, **kwargs):
+def fhfft(infile, outfile, **kwargs):
 	'''
 	For a real WaveformSet file infile, perform Hadamard decoding and then
-	a DFT of the temporal samples. The resulting transformed records will
-	be stored in the output file outfile, which will be created or
-	truncated. The Hadamard decoding follows the grouping configuration
-	stored in the file.
+	a DFT of the temporal samples. The Hadamard decoding follows the
+	grouping configuration stored in the file. The resulting transformed
+	records will be stored in the output outfile. The nature of outfile
+	depends on the optional argument trmap (see below). 
 
-	Outputs will have the transmission indices rearranged according to
-	grpmap, a mapping between output transmission i corresponds to input
-	transmission
+	If trmap is not provided, all records will be written as a binary blob;
+	the outfile should be a single string providing the location of the
+	output. The output will have shape Ns x Nt x Nr, where Ns is the number
+	of output samples per waveform (as governed by the spectral or temporal
+	windows applied), Nt is the number of input transmit channels, and Nr
+	is the number of input receive channels.
 
-		j = grpmap[i][0] + grpmap[i][1] * wset.txgrps.size
+	If trmap is provided, outfile should be a one-to-one map from the keys
+	of trmap to output files. A WaveformMap object will be created for each
+	key in trmap and stored at the location indicated by the corresponding
+	value in outfile.
 
-	for wset = WaveformSet.fromfile(infile).
+	Output file(s) will be created or truncated.
 
 	Any TGC parameters in the input, accessible as wset.context['tgc'],
 	will be used to adjust the amplitudes of the waveforms prior to
 	applying Hadamard and Fourier transforms.
 
 	The kwargs contain optional values or default overrides:
+
+	* grpmap (default: None): When not None, a mapping from output
+	  transmit index i and input transmit index
+	  
+	    j = grpmap[i][0] + grpmap[i][1] * wset.txgrps.size
+	    
+	  that will be applied to each input WaveformSet wset.
 
 	* freqs (default: None): When not None, a sequence (start, end) to be
 	  passed as slice(start, end) to record only a frequency of interest.
@@ -173,22 +156,24 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 
 	  whenever tgcmap is provided.
 
-	* dofht (default: True): Set to False to disable Hadamard decoding.
+	* skip_fht (default: False): Set to True to disable Hadamard decoding.
 
 	* tdout (default: False): Set to True to output time-domain waveforms
 	  rather than spectral samples. Preserves input acquisition windows.
 
-	* binfile (default: False): Set to True to produce binary matrix
-	  output instead of WaveformSet files.
-
 	* signs (default: None): When not None, should be a sequence of length
 	  wset.txgrps.size that specifies a 1 for any local Hadamard index
 	  (corresponding to lines in the file) that should be negated, and 0
-	  anywhere else. Ignored when dofht is False.
+	  anywhere else. Ignored when skip_fht is True.
 
-	* debias (default: False): If True, all input waveforms will have a DC
+	* zero_avg (default: False): If True, all input waveforms will have a DC
 	  bias removed prior to processing by subtracting the mean signal value
 	  over the sampling window.
+
+	* trmap (default: None): If provided, must be a map from a label
+	  (referencing an output location in the map outfile) to a map from
+	  receive indices to lists of transmit indices that, together, identify
+	  transmit-receive pairs to extract from the input.
 
 	* start (default: 0) and stride (default: 1): For an input WaveformSet
 	  wset, process receive channels in wset.rxidx[start::stride].
@@ -196,10 +181,11 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	* lock (default: None): If not None, it should be a context manager
 	  that is invoked to serialize writes to output.
 
-	* event (default: None): If not None, event.set() and event.wait() are
-	  called to ensure the output WaveformSet header is written before
-	  records are appended. The value event.is_set() should be False prior
-	  to execution.
+	* event (default: None): Only used then trmap is not provided. If not
+	  None, event.set() and event.wait() are called to ensure the output
+	  header is written to the binary-blob output before records are
+	  appended. The value event.is_set() should be False prior to
+	  execution.
 	'''
 	# Override acquisition window, if desired
 	nsamp = kwargs.pop('nsamp', None)
@@ -216,13 +202,10 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	except KeyError: event = multiprocessing.Event()
 
 	# Grab FFT and FHT switches and options
-	dofht = kwargs.pop('dofht', True)
+	dofht = not kwargs.pop('skip_fht', False)
 	tdout = kwargs.pop('tdout', False)
 	freqs = kwargs.pop('freqs', None)
 	dofft = (freqs is not None) or not tdout
-
-	# Grab output controls
-	binfile = kwargs.pop('binfile', False)
 
 	# Grab striding information
 	start = kwargs.pop('start', 0)
@@ -232,18 +215,21 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 	signs = kwargs.pop('signs', None)
 
 	# Determine whether the waveforms should be debiased
-	debias = kwargs.pop('debias', False)
+	zero_avg = kwargs.pop('zero_avg', False)
 
-	# Grab the number of samples per TGC value
+	# Grab the number of samples per TGC value and an optional gain map
 	tgcsamps = kwargs.pop('tgcsamps', None)
-
 	tgcmap = kwargs.pop('tgcmap', None)
 
+	trmap = kwargs.pop('trmap', None)
+
+	grpmap = kwargs.pop('groupmap', None)
+
 	if len(kwargs):
-		raise TypeError("Unrecognized keyword '%s'" % (next(iter(kwargs.keys())),))
+		raise TypeError(f"Unrecognized keyword '{next(iter(kwargs))}'")
 
 	# Open the input and create a corresponding output
-	wset = WaveformSet.fromfile(infile)
+	wset = WaveformSet.load(infile)
 
 	if not window:
 		if nsamp is not None:
@@ -365,18 +351,6 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 		try: tails = np.hanning(2 * freqs[2])
 		except (TypeError, IndexError): tails = np.array([])
 
-	# Create the input file header, if necessary
-	with lock:
-		if not event.is_set():
-			if binfile:
-				# Create a sliced binary matrix output
-				windim = (fswin.length if dofft else nsamp, oset.ntx, wset.nrx)
-				mio.Slicer(outfile, dtype=otype, trunc=True, dim=windim)
-			else:
-				# Create a WaveformSet output
-				oset.store(outfile)
-			event.set()
-
 	for rxc in wset.rxidx[start::stride]:
 		# Find the input window relative to 0 f2c
 		iwin = wset.getheader(rxc).win.shift(wset.f2c)
@@ -409,7 +383,7 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			data = data * tgc[np.newaxis,ostart:ostart+dlength]
 
 		# Remove a signal bias, if appropriate
-		if debias and iwin.length:
+		if zero_avg and iwin.length:
 			data -= np.mean(data, axis=1)[:,np.newaxis]
 
 		# Clear the data array
@@ -455,13 +429,18 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			hdr = hdr.copy(win=fswin, txgrp=None)
 			oset.setrecord(hdr, c[outrows,fswin.start:fswin.end], copy=True)
 
-	# Ensure the output header has been written
-	event.wait()
+	if not trmap:
+		# In blob mode, the first write must create a header
+		with lock:
+			if not event.is_set():
+				# Create a sliced binary matrix output
+				windim = (fswin.length if dofft else nsamp, oset.ntx, wset.nrx)
+				mio.Slicer(outfile, dtype=otype, trunc=True, dim=windim)
+				event.set()
 
-	if not binfile:
-		# Write local records to the output WaveformSet
-		with lock: oset.store(outfile, append=True)
-	else:
+		# Ensure the output header has been written
+		event.wait()
+
 		# Map receive channels to rows (slabs) in the output
 		rows = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
 		outbin = mio.Slicer(outfile)
@@ -469,61 +448,137 @@ def fhfft(infile, outfile, grpmap, **kwargs):
 			if tdout: b = oset.getrecord(rxc, window=(0, nsamp))[1]
 			else: b = oset.getrecord(rxc, window=fswin)[1]
 			with lock: outbin[rows[rxc]] = b.T
+	else:
+		for label, trm in trmap.items():
+			wmap = WaveformMap()
+			for r in set(trm).intersection(oset.rxidx):
+				# Extract the desired waves and add to the map
+				tl = sorted(set(trm[r]).intersection(oset.txidx))
+				if not tl: continue
+				waves = oset.getwaveform(r, tl, maptids=True)
+				wmap.update(((t, r), wave) for t, wave in zip(tl, waves))
+			# Serialize output recording
+			if wmap:
+				with lock: wmap.store(outfile[label], append=True)
+
+
+def in2out(infile, outpath, labels=None):
+	'''
+	Map a single input file into one or more output files.
+
+	If labels is None,
+
+	  habis.habiconf.buildpaths([infile], outpath, 'fhfft.mat')[0]
+
+	is invoked and returned to produce a single output file.
+
+	Otherwise, buildpaths is called repeatedly as above, with the extension
+	'fhfft.mat' generally replaced by f'{l}.wmz' for each element l in the
+	collection or iterator labls. The output will be a dictionary mapping
+	each element of labels to the corresponding buildpaths output. As a
+	special case, if l is the empty string for any element in labels, the
+	extension will just be 'wmz' (i.e., the extension will be constructed
+	to avoid two dots with no interceding character).
+
+	This will pass along any errors raised by IOError or attempts to
+	iterate through labels.
+	'''
+	if not labels:
+		return buildpaths([infile], outpath, 'fhfft.mat')[0]
+
+	return { l: buildpaths([infile], outpath,
+				l and f'{l}.wmz' or 'wmz')[0] for l in labels }
 
 
 if __name__ == '__main__':
-	grpmap, outpath = None, None
-	nprocs = process.preferred_process_count()
+	nptxtloader = partial(ArgparseLoader, np.loadtxt)
+	ikmloader = partial(ArgparseLoader, loadkeymat, scalar=False, dtype=np.uint32)
 
-	optlist, args = getopt.getopt(sys.argv[1:], 'htp:f:n:o:bg:s:w:m:l:z')
+	parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS,
+			description='Filter, decode and descramble WaveformSet files')
 
-	# Don't populate default options
-	kwargs = {}
+	parser.add_argument('-H', '--skip-fht', action='store_true',
+			help='Do not attempt Hadamard decoding of inputs')
 
-	for opt in optlist:
-		if opt[0] == '-h':
-			kwargs['dofht'] = False
-		elif opt[0] == '-t':
-			kwargs['tdout'] = True
-		elif opt[0] == '-p':
-			nprocs = int(opt[1])
-		elif opt[0] == '-f':
-			kwargs['freqs'] = tuple((int(s) if len(s) else None) for s in opt[1].split(':'))
-		elif opt[0] == '-n':
-			kwargs['nsamp'] = int(opt[1])
-		elif opt[0] == '-o':
-			outpath = opt[1]
-		elif opt[0] == '-b':
-			kwargs['binfile'] = True
-		elif opt[0] == '-g':
-			grpmap = loadkeymat(opt[1], dtype=np.uint32)
-		elif opt[0] == '-s':
-			kwargs['signs'] = np.loadtxt(opt[1], dtype=bool)
-		elif opt[0] == '-w':
-			kwargs['window'] = tuple(int(s) for s in opt[1].split(':'))
-		elif opt[0] == '-l':
-			kwargs['tgcsamps'] = int(opt[1])
-		elif opt[0] == '-m':
-			kwargs['tgcmap'] = np.loadtxt(opt[1], dtype=np.float32)
-		elif opt[0] == '-z':
-			kwargs['debias'] = True
-		else:
-			usage(fatal=True)
+	parser.add_argument('-p', '--procs', type=int,
+			default=process.preferred_process_count(),
+			help='Use PROCS processes in parallel')
 
-	try: infiles = matchfiles(args)
-	except IOError as e:
-		print('ERROR:', e, file=sys.stderr)
-		usage(fatal=True)
+	parser.add_argument('-t', '--tdout', action='store_true',
+			help='Produce time-domain, not spectral, output')
 
-	# Determine the propr file extension
-	outext = 'fhfft' + ((kwargs.get('binfile', False) and '.mat') or '.wset')
+	parser.add_argument('-f', '--freqs', metavar=('START', 'END'), type=int,
+			nargs=2, help='Spectral bandwidth of output in DFT bins')
 
+	parser.add_argument('-r', '--rolloff', type=int,
+			help='Frequency rolloff of output in DFT bins')
+
+	parser.add_argument('-n', '--nsamp', type=int,
+			help='Override length of acquisition window')
+
+	parser.add_argument('-o', '--outpath', default=None,
+			help='Store output in OUTPATH (default: alongside input)')
+
+	parser.add_argument('-s', '--signs', type=nptxtloader(dtype=bool),
+			help='List of signs applied before Hadamard decoding')
+
+	parser.add_argument('-w', '--window', type=int,
+			nargs=2, metavar=('START', 'LENGTH'),
+			help='Apply the indicated window to waveforms on output')
+
+	parser.add_argument('-l', '--tgc-length', dest='tgcsamps', type=int,
+			help='Number of TGC samples per TGC value in a WaveformSet')
+
+	parser.add_argument('-m', '--tgc-map',
+			dest='tgcmap', type=nptxtloader(dtype='float32'),
+			help='Two-column file mapping nominal to actual gain')
+
+	parser.add_argument('-z', '--zero-avg', action='store_true',
+			help='Remove DC bias from each Waveform before processing')
+
+	parser.add_argument('-g', '--groupmap', type=ikmloader(),
+			help='Global transmit groupmap to assign to input files')
+
+	parser.add_argument('-T', '--trmap', action='append', type=ikmloader(),
+			help='T-R map of measurement pairs to store (multiples OK)')
+
+	parser.add_argument('-L', '--trlabel', action='append',
+			help='Label for provided TR map (one per -T flag)')
+
+	parser.add_argument('input', nargs='+', help='List of input files to process')
+
+	args = parser.parse_args(sys.argv[1:])
+
+	# Special case: add optional rolloff to frequency band
+	if hasattr(args, 'rolloff'):
+		if hasattr(args, 'freqs'): args.freqs.append(args.rolloff)
+		delattr(args, 'rolloff')
+
+	# Special case: handle the T-R maps
+	trmap = getattr(args, 'trmap', [])
 	try:
-		outfiles = buildpaths(infiles, outpath, outext)
-	except IOError as e:
-		print('ERROR:', e, file=sys.stderr)
-		usage(fatal=True)
+		trlab = args.trlabel
+		delattr(args, 'trlabel')
+	except AttributeError: trlab = [ ]
+	if len(trmap) != len(trlab):
+		sys.exit(f'ERROR: must specify same number of -L and -T arguments')
+	if len(trlab) != len(set(trlab)):
+		sys.exit(f'ERROR: all labels provided with -L must be unique')
+	args.trmap = dict(zip(trlab, trmap))
 
-	for infile, outfile in zip(infiles, outfiles):
-		print('Processing data file', infile, '->', outfile)
-		mpfhfft(nprocs, infile, outfile, grpmap, **kwargs)
+	# Convert args namespace to kwargs
+	kwargs = { }
+
+	# Build the keyword arguments
+	attrs = { d for d in dir(args) if not d.startswith('_') }
+	for attr in attrs.difference({'procs', 'outpath', 'input'}):
+		kwargs[attr] = getattr(args, attr)
+
+	try: infiles = matchfiles(args.input)
+	except IOError as e: sys.exit(f'ERROR: {e}')
+
+	for infile in infiles:
+		print('Processing data file', infile)
+		try: outfile = in2out(infile, args.outpath, args.trmap.keys())
+		except IOError as e: sys.ext(f'ERROR: {e}')
+		mpfhfft(args.procs, infile, outfile, **kwargs)

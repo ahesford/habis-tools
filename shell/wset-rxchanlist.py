@@ -34,7 +34,7 @@ def getchanlist(infiles, queue=None):
 
 	for infile in infiles:
 		# Open the input WaveformSet
-		wset = WaveformSet.fromfile(infile)
+		wset = WaveformSet.load(infile)
 
 		# Read the headers and update the channel list
 		for hdr, _ in wset._records.values():
