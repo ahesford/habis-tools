@@ -262,6 +262,7 @@ def fhfft(infile, outfile, **kwargs):
 
 	# Prepare a list of input rows to be copied to output
 	outrows = [wset.tx2row(i) for i in outidx.values()]
+	noutrows = len(outrows)
 
 	# Handle TGC compensation if necessary
 	try: tgc = np.asarray(wset.context['tgc'], dtype=np.float32)
@@ -340,12 +341,9 @@ def fhfft(infile, outfile, **kwargs):
 		# Identify the subset of receive channels needed
 		allrx = reduce(set.union, (trm.keys() for trm in trmap.values()), set())
 		rxneeded = sorted(allrx.intersection(wset.rxidx))[start::stride]
-
-		# Build a set of WaveformMaps to hold results
-		wmaps = { k: WaveformMap() for k in trmap }
 	else: 
 		rxneeded = wset.rxidx[start::stride]
-		
+
 		# In blob mode, the first write must create a header
 		with lock:
 			if not event.is_set():
@@ -353,7 +351,7 @@ def fhfft(infile, outfile, **kwargs):
 				windim = (nsamp if tdout else fswin.length, wset.ntx, wset.nrx)
 				mio.Slicer(outfile, dtype=otype, trunc=True, dim=windim)
 				event.set()
-				
+
 		# Ensure the output header has been written
 		event.wait()
 
@@ -448,22 +446,19 @@ def fhfft(infile, outfile, **kwargs):
 			dstart = fswin.start
 
 		for label, trm in trmap.items():
-			# Get any tx list for this map and rx channel
-			# Make sure tx indices are in bounds
-			try: tl = [t for t in trm[rxc] if 0 <= t < len(outrows)]
-			except KeyError: continue
+			# Pull tx list for this tier and rx channel, if possible
+			# Map transmit indices to output rows to pull
+			try: tl = [outrows[t] for t in trm[rxc] if 0 <= t < noutrows]
+			except KeyError: tl = None
 
-			for t in tl:
-				# Build output waveform and add to WaveformMap
-				wave = Waveform(nsamp, dblock[outrows[t]], dstart)
-				# Make a copy to break reference to reusable storage
-				wmaps[label][t, rxc] = wave.copy(True)
+			if not tl: continue
 
-	# In blob mode, the file has already been written
-	if not trmap: return
-	
-	for label, wmap in wmaps.items():
-		with lock: wmap.store(outfile[label], append=True)
+			# Collect all transmissions for this rx channel
+			wmap = WaveformMap()
+			for t in tl: wmap[t, rxc] = Waveform(nsamp, dblock[t], dstart)
+
+			# Flush the waveform map to disk
+			with lock: wmap.store(outfile[label], append=True)
 
 
 def in2out(infile, outpath, labels=None):

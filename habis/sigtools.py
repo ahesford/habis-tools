@@ -184,6 +184,7 @@ class Waveform(object):
 	overall length in which samples are explicitly stored. Outside of the
 	"data window", the signal is assumed to be zero.
 	'''
+	__slots__ = '_nsamp', '_datastart', '_data'
 	@classmethod
 	def empty_like(cls, wave):
 		'''
@@ -1995,6 +1996,7 @@ class WaveformMap(collections.abc.MutableMapping):
 	(starting from an implicit zero-time reference) represented by all
 	enclosed Waveforms.
 	'''
+	__slots__ = '_nsamp', '_wavemap'
 	def __init__(self, nsamp=0, *args):
 		'''
 		Initialize a WaveformMap with the given sample duration and an
