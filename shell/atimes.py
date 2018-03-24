@@ -410,7 +410,7 @@ def wavegen(data, neighbors={ }, bandpass=None, window=None, rank=0, grpsize=1):
 	emptyset = set()
 
 	# Pull sets of individual t, r indices for neighborhood building
-	tset, rset = (set(l) for l in zip(*trset))
+	tset, rset = (set(l) for l in zip(*data.keys()))
 
 	for (t, r) in data:
 		# Find the receive neighbors

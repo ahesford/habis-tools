@@ -448,14 +448,16 @@ def fhfft(infile, outfile, **kwargs):
 		for label, trm in trmap.items():
 			# Pull tx list for this tier and rx channel, if possible
 			# Map transmit indices to output rows to pull
-			try: tl = [outrows[t] for t in trm[rxc] if 0 <= t < noutrows]
+			try: tl = [t for t in trm[rxc] if 0 <= t < noutrows]
 			except KeyError: tl = None
 
 			if not tl: continue
 
 			# Collect all transmissions for this rx channel
 			wmap = WaveformMap()
-			for t in tl: wmap[t, rxc] = Waveform(nsamp, dblock[t], dstart)
+			for t in tl:
+				wave = Waveform(nsamp, dblock[outrows[t]], dstart)
+				wmap[t, rxc] = wave
 
 			# Flush the waveform map to disk
 			with lock: wmap.store(outfile[label], append=True)
