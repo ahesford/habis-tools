@@ -631,10 +631,8 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 
 		if denoise: sig = sig.denoise(**denoise)
 
-		if eleak:
-			# Calculate cumulative energy in unwindowed waveform
-			cenergy = sig.getsignal(sig.datawin, forcecopy=False)
-			cenergy = np.cumsum(cenergy**2)
+		# Calculate cumulative energy in unwindowed waveform
+		if eleak: cenergy = np.cumsum(sig.data**2)
 
 		if imer:
 			# Compute IMER time

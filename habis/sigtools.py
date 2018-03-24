@@ -402,14 +402,10 @@ class Waveform(object):
 		return self.copy()
 
 	def __neg__(self):
-		datawin = self.datawin
-		data = -self.getsignal(datawin, forcecopy=False)
-		return Waveform(self.nsamp, data, datawin.start)
+		return Waveform(self.nsamp, -self.data, self._datastart)
 
 	def __abs__(self):
-		datawin = self.datawin
-		data = abs(self.getsignal(datawin, forcecopy=False))
-		return Waveform(self.nsamp, data, datawin.start)
+		return Waveform(self.nsamp, np.abs(self.data), self._datastart)
 
 
 	def __addsub(self, other, ssign=1, osign=1, inplace=False):
@@ -497,9 +493,8 @@ class Waveform(object):
 			raise ValueError('Invalid mode argument')
 
 		# Pull the data window and scale
-		datawin = self.datawin
-		data = modefunc(self.getsignal(datawin, forcecopy=False), other)
-		return Waveform(self.nsamp, data, datawin.start)
+		data = modefunc(self.data, other)
+		return Waveform(self.nsamp, data, self._datastart)
 
 
 	def __mul__(self, other): return self.__scale(other, 'mul')
@@ -562,6 +557,18 @@ class Waveform(object):
 		length = len(self._data)
 		if start + length > self.nsamp:
 			self.nsamp = start + length
+
+
+	@property
+	def data(self):
+		'''
+		Return a read-only view of the data array of the waveform. If
+		there is no data in the Waveform, return an empty array.
+		'''
+		if self._data is None: return np.array([], dtype=self.dtype)
+		view = self._data[:]
+		view.flags.writeable = False
+		return view
 
 
 	def getsignal(self, window=None, dtype=None, forcecopy=True):
@@ -947,9 +954,7 @@ class Waveform(object):
 
 		if self.nsamp < ref.nsamp:
 			# Pad self for proper shifting when ref is longer
-			dwin = self.datawin
-			signal = self.getsignal(dwin, forcecopy=False)
-			exwave = Waveform(ref.nsamp, signal=signal, start=dwin.start)
+			exwave = Waveform(ref.nsamp, self.data, start=self._datastart)
 			return exwave.shift(delay, **shargs)
 		else:
 			return self.shift(delay, **shargs)
@@ -2146,23 +2151,6 @@ class WaveformMap(collections.abc.MutableMapping):
 				'com.habicoinc.WaveformMap.data')
 
 
-	@classmethod
-	def _store_chunk(cls, zf, hdr, data):
-		'''
-		A helper used by WaveformMap.store to write chunks of data.
-		'''
-		from uuid import uuid4
-		from json import dumps
-
-		# Identify this store operation
-		storeid = uuid4().hex
-
-		# Identifying prefix
-		hpre, dpre = cls._serializer_prefixes()
-		zf.writestr(f'{hpre}.{storeid}', dumps(hdr))
-		zf.writestr(f'{dpre}.{storeid}', data)
-
-
 	def store(self, f, compression=None, append=False):
 		'''
 		Serialize the contents of the WaveformMap to a specially
@@ -2189,6 +2177,8 @@ class WaveformMap(collections.abc.MutableMapping):
 		append=True.
 		'''
 		import zipfile
+		from uuid import uuid4
+		from json import dumps
 
 		try:
 			compression = (compression or '').strip().lower()
@@ -2204,45 +2194,51 @@ class WaveformMap(collections.abc.MutableMapping):
 
 		byteorder = { 'little': '<', 'big': '>' }.get(sys.byteorder, 'unknown')
 
-		# Try to write in chunks of 32 MB
-		chunksize = 0x1 << 25
-
 		zipmode = 'a' if append else 'w'
 		with zipfile.ZipFile(f, mode=zipmode, compression=compression) as zf:
 
 			# Start the header and the accumulation of bytes
 			header = { 'nsamp': self.nsamp, 'records': [ ] }
-			data = b''
+
+			# Identify this store operation
+			storeid = uuid4().hex
+
+			# Identifying prefix
+			hpre, dpre = self._serializer_prefixes()
+			hname = f'{hpre}.{storeid}'
+			dname = f'{dpre}.{storeid}'
 
 			# Process each waveform record in turn
-			for idx, ((t, r), wave) in enumerate(self.items()):
-				if len(data) > chunksize:
-					# Write existing chunk
-					self._store_chunk(zf, header, data)
-					# Start with a fresh accumulation
-					data = b''
-					header['records'] = []
+			offset = 0
+			with zf. open(dname, 'w', force_zip64=True) as data:
+				for idx, ((t, r), wave) in enumerate(self.items()):
+					# Transmit-receive index of this waveform
+					record = { 't': t, 'r': r }
 
-				record = { 't': t, 'r': r }
+					# Data window over which samples are recorded
+					dstart, dlength = wave.datawin
+					record['datastart'] = dstart
+					record['datalength'] = dlength
 
-				dwin = wave.datawin
-				record['datastart'] = dwin.start
-				record['datalength'] = dwin.length
+					# Data type and byte order
+					dtype = wave.dtype
+					record['typechar'] = dtype.char
+					rbo = dtype.byteorder
+					if rbo == '=' and byteorder != 'unknown':
+						rbo = byteorder
+					record['byteorder'] = rbo
 
-				dtype = wave.dtype
-				record['typechar'] = dtype.char
-				rbo = dtype.byteorder
-				if rbo == '=' and byteorder != 'unknown':
-					rbo = byteorder
-				record['byteorder'] = rbo
+					# Offset of data in the data file
+					record['offset'] = offset
+					header['records'].append(record)
 
-				record['offset'] = len(data)
-				data += wave.getsignal(dwin, forcecopy=False).tobytes()
+					# Write data bytes to data file
+					bts = wave.data.tobytes()
+					data.write(bts)
+					offset += len(bts)
 
-				header['records'].append(record)
-
-			# Write any remaining chunk
-			if data: self._store_chunk(zf, header, data)
+			# Write the header
+			zf.writestr(hname, dumps(header))
 
 
 	@classmethod
@@ -2284,8 +2280,8 @@ class WaveformMap(collections.abc.MutableMapping):
 			# Convert the block of bytes to an array
 			nbytes = dtype.itemsize * dlen
 			try:
-				dblock = data[offset:offset+nbytes]
-				dblock = np.frombuffer(dblock, dtype=dtype, count=dlen)
+				dblock = np.frombuffer(data.read(nbytes),
+							dtype=dtype, count=dlen)
 			except ValueError:
 				raise IOError(f'Unable to read data in {recpair}')
 
@@ -2363,7 +2359,6 @@ class WaveformMap(collections.abc.MutableMapping):
 					continue
 
 				header = json.loads(zf.read(hname))
-				data = zf.read(dname)
 
 				try: nsamp = header['nsamp']
 				except (KeyError, TypeError):
@@ -2374,8 +2369,10 @@ class WaveformMap(collections.abc.MutableMapping):
 				else: nsamp = wmap.nsamp
 
 				# Process each waveform and update the map
-				wmap.update(cls._load_chunk(header, data,
-								nsamp, dtype, recid))
+				with zf.open(dname, 'r') as data:
+					ds = cls._load_chunk(header, data,
+								nsamp, dtype, recid)
+					wmap.update(ds)
 
 		return wmap
 
