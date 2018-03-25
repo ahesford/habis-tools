@@ -21,13 +21,6 @@ from habis.sigtools import Waveform, Window, WaveformMap
 def usage(progname):
 	print(f'USAGE: {progname} <configuration>', file=sys.stderr)
 
-def tr2rt(x):
-	'''
-	For a tuple x, return (x[1], x[0]). No sanity checks are made to ensure
-	that x can be indexed or that x has at least two indices.
-	'''
-	return (x[1], x[0])
-
 def finddelays(nproc=1, *args, **kwargs):
 	'''
 	Distribute, among nproc processes, delay analysis for waveforms using
@@ -406,19 +399,17 @@ def wavegen(data, neighbors={ }, bandpass=None, window=None, rank=0, grpsize=1):
 	appear in the window dictionary.
 	'''
 	# Build a list of neighborhoods over which waveforms will be averaged
-	neighborhoods = defaultdict(set)
+	neighborhoods = { }
 	emptyset = set()
-
-	# Pull sets of individual t, r indices for neighborhood building
-	tset, rset = (set(l) for l in zip(*data.keys()))
 
 	for (t, r) in data:
 		# Find the receive neighbors
-		lrn = {r}.union(neighbors.get(r, emptyset)).intersection(rset)
+		lrn = {r}.union(neighbors.get(r, emptyset))
 		# Find the transmit neighbors
-		ltn = {t}.union(neighbors.get(t, emptyset)).intersection(tset)
+		ltn = {t}.union(neighbors.get(t, emptyset))
 		# Build the neighborhood
-		neighborhoods[t,r].update((t, r) for t in ltn for r in lrn)
+		nbrs = set(itertools.product(ltn, lrn)).intersection(data)
+		neighborhoods[t,r] = nbrs
 
 	ntr = len(neighborhoods)
 	share, srem = ntr // grpsize, ntr % grpsize
@@ -426,7 +417,7 @@ def wavegen(data, neighbors={ }, bandpass=None, window=None, rank=0, grpsize=1):
 	if rank < srem: share += 1
 
 	# Sort desired arrival times by r-t, pull local share
-	trpairs = set(sorted(neighborhoods, key=tr2rt)[start:start+share])
+	trpairs = set(sorted(neighborhoods)[start:start+share])
 	# Only local neighborhoods are needed
 	neighborhoods = { k: neighborhoods[k] for k in trpairs }
 
@@ -436,7 +427,7 @@ def wavegen(data, neighbors={ }, bandpass=None, window=None, rank=0, grpsize=1):
 		for tr in trpairs: nbrdeps[tr].add(nh)
 
 	# Process waveforms in order, with transmit index varying most rapidly
-	for tid, rid in sorted(nbrdeps, key=tr2rt):
+	for tid, rid in sorted(nbrdeps):
 		sig = data[tid, rid]
 
 		if bandpass:
