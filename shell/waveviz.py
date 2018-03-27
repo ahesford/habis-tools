@@ -216,8 +216,8 @@ def plotframes(output, waves, atimes, dwin=None,
 		bar.update(len(waves))
 
 
-def plotwaves(output, waves, atimes=None, mtime=None,
-		dwin=None, log=False, cthresh=None, one_sided=False):
+def plotwaves(output, waves, atimes=None, mtime=None, dwin=None,
+		log=False, cthresh=None, one_sided=False, envelope=False):
 	'''
 	Plot, into the image file output, the habis.sigtools.Waveform objects
 	mapped (by index) in waves, with temporal variations along the vertical
@@ -252,6 +252,12 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 	based on the maximum value determined by cthresh. When one_sided is
 	True (which is not possible when log is True), the low end of the color
 	scale will be zero.
+
+	If envelope is True, the waveforms will be converted to envelopes for
+	display. Note that
+	
+		log => envelope and 
+		(envelope and not log) => one_sided.
 	'''
 	import matplotlib as mpl
 	mpl.use('pdf')
@@ -295,12 +301,15 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 		ax = [fig.add_subplot(211)]
 		ax.append(fig.add_subplot(212, sharex=ax[0]))
 
-	# Pull the waveforms and determine the color range
+	# Pull the waveforms and envelope, determine the color range
 	img = np.array([w.getsignal(dwin) for w in waves])
+	env = np.abs(hilbert(img, axis=1))
 
 	if not log:
-		pkamps = np.max(np.abs(hilbert(img, axis=1)), axis=1)
+		# In envelope mode, use a one-sided scale
+		if envelope: img, one_sided = env, True
 
+		pkamps = np.max(env, axis=1)
 		if cthresh is None: cmax = np.max(pkamps)
 		else: cmax = np.mean(pkamps) + cthresh * np.std(pkamps)
 
@@ -311,12 +320,11 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 			clim = [0, cmax]
 			cmap = cm.Reds
 	else:
-		# Compute signal image to log magnitude
-		img = np.abs(hilbert(img, axis=1))
+		# Log-magnitude plots always use the envelope
+		imax = np.max(env)
 		# Clip approximately-zero values
-		imax = np.max(img)
-		imin = np.min(img[np.nonzero(img)])
-		img = np.log10(np.clip(img, imin, imax))
+		imin = np.min(img[np.nonzero(env)])
+		img = np.log10(np.clip(env, imin, imax))
 
 		pkval = np.max(img)
 
@@ -325,12 +333,7 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 		elif cthresh < 0:
 			clim = [pkval + cthresh / 20., pkval]
 		else:
-			# Estimate noise levels for image
-			nlev = min(w.noisefloor(200) for w in waves)
-			# If no noise level was found, default to down-from-peak
-			# Otherwise, convert dB to simple log values
-			if np.isinf(nlev): clim = [pkval - cthresh / 20., pkval]
-			else: clim = [ nlev / 20., (nlev + cthresh) / 20. ]
+			raise ValueError('Positive cthresh is invalid in log mode')
 
 		cmap = cm.Reds
 
@@ -348,7 +351,9 @@ def plotwaves(output, waves, atimes=None, mtime=None,
 		if mtime: title += f' ({mtime} samples)'
 	else:
 		title = 'Waveforms with natural alignment'
-	ax[0].set_title(title + (' (log magnitude)' if log else ''), fontsize=16)
+	if log: title += ' (log magnitude)'
+	elif envelope: title += ' (envelope)'
+	ax[0].set_title(title, fontsize=16)
 
 	if atimes is not None:
 		# Plot the arrival-time image
@@ -535,7 +540,7 @@ if __name__ == '__main__':
 	parser = ArgumentParser(description='Plot waveforms in videos or PDF images')
 
 	parser.add_argument('-l', '--log', action='store_true',
-			help='Display log-magnitude instead of linear amplitude')
+			help='Display log-magnitude plots (implies -E)')
 
 	parser.add_argument('-z', '--zero', action='store_true',
 			help='Zero waveforms with no arrival times')
@@ -575,6 +580,9 @@ if __name__ == '__main__':
 	parser.add_argument('-e', '--equalize', action='count',
 			help='Equalize waveforms (in videos, use twice to '
 				'equalize all waves in each frame independently)')
+
+	parser.add_argument('-E', '--envelope',
+			action='store_true', help='Display waveform envelopes')
 
 	parser.add_argument('output', type=str,
 			help='Name of output file (PDF for image, mp4 for video)')
@@ -677,5 +685,5 @@ if __name__ == '__main__':
 		waves = pwaves
 		print('Processed waveforms, storing to file', args.output)
 
-		plotwaves(args.output, waves, args.atimes, mtime,
-				args.window, args.log, args.thresh, args.one_sided)
+		plotwaves(args.output, waves, args.atimes, mtime, args.window,
+				args.log, args.thresh, args.one_sided, args.envelope)
