@@ -9,6 +9,7 @@ import sys
 import math
 import numpy as np
 import collections
+from contextlib import contextmanager
 
 import scipy
 
@@ -32,6 +33,14 @@ from pycwp import cutil, signal, stats
 from .formats import (WaveformSet, WaveformSetIOError,
 			_strict_nonnegative_int, _strict_int)
 from .stft import stft, istft
+
+@contextmanager
+def _nullfile(*args, **kwargs):
+	'''
+	A simple context manager that consumes all of its arguments and yields
+	None.
+	'''
+	yield None
 
 @functools.lru_cache(maxsize=32)
 def _gabor_window(sigma, width, dtype=None):
@@ -2242,7 +2251,7 @@ class WaveformMap(collections.abc.MutableMapping):
 
 
 	@classmethod
-	def _load_chunk(cls, header, data, nsamp, force_dtype, recid):
+	def _load_chunk(cls, header, data, nsamp, recid, force_dtype, keys_only):
 		'''
 		A helper function used by WaveformMap.load to generate (t, r)
 		pairs and Waveform objects from a serialized WaveformMap header
@@ -2267,6 +2276,10 @@ class WaveformMap(collections.abc.MutableMapping):
 			except KeyError:
 				raise IOError(f'Malformed record {recid}')
 
+			if keys_only:
+				yield (t, r)
+				continue
+
 			recpair = f'pair {t,r} of record {recid}'
 
 			if offset != last_offset:
@@ -2280,8 +2293,9 @@ class WaveformMap(collections.abc.MutableMapping):
 			# Convert the block of bytes to an array
 			nbytes = dtype.itemsize * dlen
 			try:
-				dblock = np.frombuffer(data.read(nbytes),
-							dtype=dtype, count=dlen)
+				dblock = data.read(nbytes)
+				if len(dblock) != nbytes: raise ValueError
+				dblock = np.frombuffer(dblock, dtype=dtype, count=dlen)
 			except ValueError:
 				raise IOError(f'Unable to read data in {recpair}')
 
@@ -2296,26 +2310,61 @@ class WaveformMap(collections.abc.MutableMapping):
 
 
 	@classmethod
-	def load(cls, f, dtype=None):
+	def load(cls, f, dtype=None, wavefilt=None):
 		'''
-		Deserialize a WaveformMap instance from a specially crafted ZIP
-		file given by f, which should be a string or a file-like
-		object. The contents of f should have been produced by a prior
-		call to WaveformMap.store. The file should not be a ZipFile
-		object, because it will be opened anew.
+		A convenience method to invoke
 
-		The contents of f may contain several serialized WaveformMap
-		objects. These will be concatenated into a single instance. The
-		largest value of "nsamp" encountered in the file will be
-		assigned to the instance. If multiple records are associated
-		with a single key, the most recently encoded record will be
-		used.
+			WaveformMap.generate(f, dtype=dtype, keys_only=False)
+
+		and coalesce the results into a WaveformMap instance.
+
+		If wavefilt is not None, it should be a callable that accepts
+		two arguments: a (t, r) key and a Waveform instance. The
+		callable should return True if the Waveform and key should be
+		added to the collection or False to exclude the pair from the
+		collection.
+		'''
+		if wavefilt is not None and not callable(wavefilt):
+			raise TypeError('Argument "wavefilt" must be None or callable')
+
+		# Build a collection of waveforms
+		wmap = cls()
+		for key, wave in cls.generate(f, dtype=dtype, keys_only=False):
+			# Skip waveforms that fail the filter
+			if wavefilt and not wavefilt(key, wave): continue
+			wmap[key] = wave
+
+		return wmap
+
+
+	@classmethod
+	def generate(cls, f, dtype=None, keys_only=False):
+		'''
+		Return a generator to deserialize a WaveformMap instance from a
+		specially crafted ZIP file given by f, which should be a string
+		or a file-like object. The contents of f should have been
+		produced by a prior call to WaveformMap.store. The file should
+		not be a ZipFile object, because zipfile.Zipfile will be called
+		on f to instantiate the ZIP parser.
+
+		If keys_only is False, the generator will yield tuples of the
+		form ((t, r), Waveform) for each key encountered in f. The
+		contents of f may contain several serialized WaveformMap
+		objects, all of which will be flattened into a single iterator.
+		Because each serialized WaveformMap may have a different value
+		for nsamp, Waveforms may have different nsamp properties.
 
 		If dtype is not None, all waveforms will be coerced to the
 		specified type after loading.
 
+		If keys_only is True, the generator will only yield the key
+		tuples (t, r); Waveforms associated with the keys will be
+		ignored. In keys_only mode, sanity checks on Waveform data are
+		skipped. Therefore, it is possible for this method to succeeed
+		when keys_only is True but fail when keys_only is False.
+
 		An IOError will be raised if the contents of the input cannot
-		be used to reconstruct any records.
+		be used to reconstruct any record.
 		'''
 		import zipfile, json
 
@@ -2324,8 +2373,9 @@ class WaveformMap(collections.abc.MutableMapping):
 
 		if dtype is not None: dtype = np.dtype(dtype)
 
-		# Create an empty map
-		wmap = cls()
+		# Build a convenient chunk loader
+		chunkload = functools.partial(cls._load_chunk,
+				force_dtype=dtype, keys_only=keys_only)
 
 		# Parse the file
 		with zipfile.ZipFile(f, mode='r') as zf:
@@ -2349,6 +2399,10 @@ class WaveformMap(collections.abc.MutableMapping):
 					raise IOError(f'Duplicate {rectype} '
 							'entry for record {recid}')
 				chunks[recid][rectype] = name
+				
+			# No need to open data file in keys_only mode
+			if keys_only: zfopen = _nullfile
+			else: zfopen = zf.open
 
 			# Process each chunk that contains a header and data
 			for recid, names in chunks.items():
@@ -2364,17 +2418,9 @@ class WaveformMap(collections.abc.MutableMapping):
 				except (KeyError, TypeError):
 					raise IOError(f'Unable to parse nsamp from header {recid}')
 
-				# Update the nsamp value if appropriate
-				if wmap.nsamp < nsamp: wmap.nsamp = nsamp
-				else: nsamp = wmap.nsamp
-
 				# Process each waveform and update the map
-				with zf.open(dname, 'r') as data:
-					ds = cls._load_chunk(header, data,
-								nsamp, dtype, recid)
-					wmap.update(ds)
-
-		return wmap
+				with zfopen(dname, 'r') as data:
+					yield from chunkload(header, data, nsamp, recid)
 
 
 def dimcompat(sig, ndim=1):

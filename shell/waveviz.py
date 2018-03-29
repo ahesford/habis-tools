@@ -76,18 +76,18 @@ def plotframes(output, waves, atimes, dwin=None,
 	mpl.use('agg')
 	import matplotlib.pyplot as plt
 	import matplotlib.animation as ani
+	# For convenience
+	empty = []
 
 	# Ensure all data sets are equally sized
 	wvit = iter(waves.values())
-	try: nwaves = len(next(wvit))
-	except StopIteration: nwaves = 0
+	nwaves = len(next(wvit, empty))
 	if any(len(v) != nwaves for v in wvit):
 		raise ValueError('All waveform lists must be equally sized')
 
 	if atimes is not None:
 		atit = iter(atimes.values())
-		try: ntimes = len(next(atit))
-		except StopIteration: ntimes = 0
+		ntimes = len(next(atit, []))
 		if any(len(v) != ntimes for v in atit):
 			raise ValueError('All arrival time lists must be equally sized')
 	else: ntimes = 0
@@ -256,7 +256,7 @@ def plotwaves(output, waves, atimes=None, mtime=None, dwin=None,
 	If envelope is True, the waveforms will be converted to envelopes for
 	display. Note that
 	
-		log => envelope and 
+		log => envelope and
 		(envelope and not log) => one_sided.
 	'''
 	import matplotlib as mpl
@@ -515,7 +515,7 @@ def getwavegrps(infiles, nsamp=None):
 	backscatter waves observed at the pair. If the same WaveformMap key is
 	duplicated in multiple input files, the list corresponding to that key
 	will contain each Waveform in an order tha tmatches the lexicographical
-	ordering of the inputs. 
+	ordering of the inputs.
 	
 	If nsamp is not None, the nsamp property of each Waveform object will
 	be overridden.

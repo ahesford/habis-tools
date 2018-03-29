@@ -6,6 +6,7 @@ Routines for accessing local data in a distributed, MPI environment
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import hashlib
+import itertools
 
 
 def getatimes(atfile, elements, column=0, backscatter=True,
@@ -98,33 +99,43 @@ def getatimes(atfile, elements, column=0, backscatter=True,
 
 
 
-def sha512(fname, msize=10):
+def sha512(fname, msize=10, maxchunks=None):
 	'''
 	For the named file (which should not be open), compute the SHA-512 sum,
 	reading in chunks of msize megabytes. The return value is the output of
 	hexdigest() for the SHA-512 Hash object.
+
+	If maxblocks is a positive value, the hash will be computed on at most
+	that many msize-megabyte chunks of the file. This speeds scanning of
+	large files if early contents are sufficient to determine uniqueness.
 	'''
 	bsize = int(msize * 2**20)
 	if bsize < 1: raise ValueError('Specified chunk size too small')
 
+	# Make maxchunks sensible
+	maxchunks = max((maxchunks or 0), 1)
+
 	cs = hashlib.sha512()
 	with open(fname, 'rb') as f:
-		while True:
+		for bcount in itertools.count():
+			# Stop reading at desired chunk count
+			if maxchunks and (bcount >= maxchunks): break
+			# Try to read a chunk
 			block = f.read(bsize)
 			if not block: break
 			cs.update(block)
 
 	return cs.hexdigest()
 
-def fhashmap(fnames, msize=10):
+def fhashmap(fnames, *args, **kwargs):
 	'''
 	For each file in the given list of files, each of which should provide
-	the name of an unopened but readable file, compute the SHA-512 sum by
-	opening and reading the file in chunks of msize megabytes.
+	the name of an unopened but readable file, compute the SHA-512 with
+	sha512. All extra arguments are passed to sha512.
 
 	The return value is a map of the form (shasum -> file name).
 	'''
-	return { sha512(f): f for f in fnames }
+	return { sha512(f, *args, **kwargs): f for f in fnames }
 
 
 def frankmap(fhmap, comm):
@@ -146,18 +157,18 @@ def frankmap(fhmap, comm):
 	return rankmap
 
 
-def flocshare(fnames, comm, msize=10):
+def flocshare(fnames, comm, *args, **kwargs):
 	'''
 	Given a list fnames of names for unopened, locally readable files,
-	produce a file hash map fhmap = fhashmap(fnames, msize) and a rank map
-	frmap = frankmap(fhmap, comm), and return a new map of the form
+	produce a file hash map fhmap = fhashmap(fnames, *args, **kwargs) and a
+	rank map frmap = frankmap(fhmap, comm), and return a new map
 
 		[fname -> (index, length)],
 
 	where index satisfies frmap[s][index] == comm.rank for s such that
 	fhmap[s] == fname, and length is the length of frmap[s].
 	'''
-	fhmap = fhashmap(fnames, msize)
+	fhmap = fhashmap(fnames, *args, **kwargs)
 	frmap = frankmap(fhmap, comm)
 	rank = comm.rank
 
