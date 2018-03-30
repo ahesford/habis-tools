@@ -552,8 +552,7 @@ if __name__ == '__main__':
 
 	# Write the output, serializing within local communicators
 	for i in range(lsize):
-		if i == lrank:
-			omap.store(args.output, append=(not i))
+		if i == lrank: omap.store(args.output, append=i)
 		lcomm.Barrier()
 
 	printroot(grank, 'End of control')
