@@ -65,6 +65,9 @@ def _gabor_window(sigma, width, dtype=None):
 			window = window.astype(dtype.type(0).real.dtype)
 	return window
 
+# Create a memoized version of np.hanning for windowing
+hanning_memoized = functools.lru_cache(maxsize=32)(np.hanning)
+
 
 def _valley(lpk, hpk):
 	'''
@@ -731,7 +734,8 @@ class Waveform(object):
 		length 2N, where the first N values will multiply the signal in
 		the range [start:start+N] and the last N values mull multiply
 		the signal in the range [start+length-N:start+length]. If tails
-		is a scalar, np.hanning(2 * tails) is used.
+		is a scalar, np.hanning(2 * tails) is used. (Actually, a
+		memoized version is used.)
 
 		Only when the window argument is a key-value map, the argument
 		relative may take an optional value 'signal' or 'datawin'. When
@@ -752,7 +756,7 @@ class Waveform(object):
 			if len(window) != 2:
 				raise ValueError('Trigger enclosing exception')
 		except (TypeError, ValueError):
-				raise ValueError('The window must be a Window object, a two-element sequence, or a two-element key-value map')
+			raise ValueError('The window must be a Window object, a two-element sequence, or a two-element key-value map')
 
 		dwin = self.datawin
 
@@ -781,7 +785,7 @@ class Waveform(object):
 
 		tails = np.asarray(tails)
 		if tails.ndim < 1:
-			tails = np.hanning(2 * tails)
+			tails = hanning_memoized(2 * tails)
 		elif tails.ndim > 1:
 			raise TypeError('Tails must be scalar or 1-D array compatible')
 

@@ -86,18 +86,42 @@ def findmaps(infiles, start=0, stride=1):
 	return pairmaps
 
 
-def loadlocalmaps(*args, **kwargs):
+def makewindower(window, *args, **kwargs):
+	'''
+	If window is not None, return a function that, when called with a
+	Waveform as its only argument, invokes
+	
+		Waveform.window(win, *args, **kwargs),
+		
+	where win = { 'start': window[0], 'end': window[1] }.
+	
+	If window is None, just return None.
+	'''
+	if window is None: return None
+
+	start, end = window
+	win = { 'start': start, 'end': end }
+	def windower(wave): return wave.window(win, *args, **kwargs)
+	return windower
+
+
+def loadlocalmaps(infiles, windower, *args, **kwargs):
 	'''
 	Invoke findmaps(*args, **kwargs) to identify a map from file names for
 	WaveformMap serializations to desired keys for that file, then load
 	each file and extract the subset of the contained WaveformMap
 	corresponding to those keys.
+
+	If window is not None, it should be a callable that will be applied to
+	each Waveform before it is added to the map.
 	'''
 	wmap = WaveformMap()
-	for f, pairs in findmaps(*args, **kwargs).items():
+	for f, pairs in findmaps(infiles, *args, **kwargs).items():
 		# Define a filter to only load locally assigned keys
-		wavefilt = lambda key, wave: key in pairs
-		wmap.update(WaveformMap.load(f, wavefilt=wavefilt))
+		for key, wave in WaveformMap.generate(f):
+			if key not in pairs: continue
+			if windower: wave = windower(wave)
+			wmap[key] = wave
 
 	return wmap
 
@@ -399,6 +423,30 @@ def printroot(rank, *args, **kwargs):
 	sys.stdout.flush()
 
 
+def pairavg(left, right, windower, osamp=0):
+	'''
+	Compute and return the average of two waveforms left and right, then
+	apply a windowing function windower (as produced by makewindower). If
+	osamp is 0, the waveforms are simply averaged. Otherwise, if osamp is a
+	positive integer, align the waveforms with the given oversampling rate
+	prior to averaging.
+
+	Note: alignment is done symmetrically: if D = left.delay(right, osamp)
+	is the delay in right necessary to align with left, the average will be
+	between waveforms left.shift(-D / 2) and right.shift(D / 2).
+	'''
+	if not osamp:
+		# Simple average
+		avg = 0.5 * (left + right)
+	else:
+		# Shift waveforms towards center to align
+		delay = left.delay(right, osamp) / 2
+		avg = 0.5 * (left.shift(-delay) + right.shift(delay))
+
+	if windower: avg = windower(avg)
+	return avg
+
+
 if __name__ == '__main__':
 	grank, gsize = MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size
 	printroot(grank, 'Starting waveform reciprocator')
@@ -416,7 +464,11 @@ if __name__ == '__main__':
 			nargs=2, type=int, metavar=('START', 'END'),
 			help='Zero samples outside range START to END')
 
-	parser.add_argument('-r', '--relative', choices=['datawin', 'signal'],
+	parser.add_argument('-T', '--tails', default=0, type=int,
+			help='If windowing, apply rolloff of this width')
+
+
+	parser.add_argument('-R', '--relative', choices=['datawin', 'signal'],
 			default=None, help='Use relative window mode') 
 
 	parser.add_argument('-g', '--groupsize', default=64, type=int,
@@ -440,9 +492,12 @@ if __name__ == '__main__':
 	lcomm = MPI.COMM_WORLD.Split_type(MPI.COMM_TYPE_SHARED)
 	lrank, lsize = lcomm.rank, lcomm.size
 
+	# Build the wave windower function
+	windower = makewindower(args.window, args.tails, args.relative)
+
 	# Find all locally available keys and load the local map
 	printroot(grank, 'Loading local portions of waveform maps...')
-	wmap = loadlocalmaps(args.input, lrank, lsize)
+	wmap = loadlocalmaps(args.input, windower, lrank, lsize)
 	printroot(grank, f'Initial size of local map at rank {grank} is {len(wmap)}')
 
 	# Find the destinations for local keys
@@ -481,14 +536,25 @@ if __name__ == '__main__':
 	wmap.update(procmessages(sendreqs, recvreqs, recvbufs))
 	printroot(grank, f'Final size of local map at rank {grank} is {len(wmap)}')
 
-	npairs = sum(t < r and (r, t) in wmap for (t, r) in wmap)
-	gnpairs = MPI.COMM_WORLD.reduce(npairs)
 	gnsize = MPI.COMM_WORLD.reduce(len(wmap))
-	printroot(grank, f'Global communicator has {gnsize} waveforms, {gnpairs} pairs')
+	printroot(grank, f'{gnsize} waveforms scattered globally')
 
-	lnsize = lcomm.reduce(len(wmap))
-	lnpairs = lcomm.reduce(npairs)
-	printroot(lrank, f'Local node at {grank} has {lnsize} waveforms, {lnpairs} pairs')
+	# Build an output map
+	omap = WaveformMap()
+	while wmap:
+		(t, r), left = wmap.popitem()
+		try: right = wmap.pop((r, t))
+		except KeyError: continue
+		omap[min(t,r), max(t,r)] = pairavg(left, right, windower, args.osamp)
+
+	gosize = MPI.COMM_WORLD.reduce(len(omap))
+	printroot(grank, f'{gosize} reciprocal pairs averaged globally')
+
+	# Write the output, serializing within local communicators
+	for i in range(lsize):
+		if i == lrank:
+			omap.store(args.output, append=(not i))
+		lcomm.Barrier()
 
 	printroot(grank, 'End of control')
 	MPI.COMM_WORLD.Barrier()
