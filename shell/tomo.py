@@ -728,11 +728,12 @@ class BentRayTracer(TomographyTask):
 
 			# Compute the stochastic cost and gradient
 			f, nrows, gf = self.evaluate(sp, nmeas, hybrid)
+			lgf = s.flatten(gf)
 
 			if nrows:
 				# Scale cost (and gradient) to mean-squared error
 				f /= nrows
-				lgf = s.flatten(gf) / nrows
+				lgf /= nrows
 
 			# Calculate RMS data error
 			rmserr = np.sqrt(2. * f)
