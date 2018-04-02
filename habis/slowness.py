@@ -252,7 +252,7 @@ class PiecewiseSlowness(Slowness):
 		data, rows, cols = [], [], []
 		M, N = 0, 0
 		# Note that voxmap may not be a proper dictionary (e.g., NpzFile)
-		for k in sorted(k for k in voxmap.keys()):
+		for k in sorted(voxmap.keys()):
 			v = np.asarray(voxmap[k]).astype(np.float64)
 			if not self._shape:
 				self._shape = v.shape
