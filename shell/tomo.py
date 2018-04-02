@@ -980,7 +980,7 @@ if __name__ == "__main__":
 			raise ValueError('Slowness mask is required in piecewise mode')
 		mask = np.load(mask)
 		slw = PiecewiseSlowness(mask, s)
-		if not rank: print('Using piecewise slowness model')
+		if not rank: print(f'Using piecewise slowness')
 	else:
 		# Convert the scalar slowness or file name into a matrix
 		try: s = float(s)
@@ -990,12 +990,12 @@ if __name__ == "__main__":
 		if mask is not None:
 			mask = np.load(mask).astype(bool)
 			slw = MaskedSlowness(s, mask)
+			if not rank: print(f'Using masked slowness')
 		else: slw = Slowness(s)
 
 	# Collect the total number of arrival-time measurements
 	timecount = MPI.COMM_WORLD.reduce(len(atimes), op=MPI.SUM)
-	if not rank:
-		print(f'Using a total of {timecount} arrival-time measurements')
+	if not rank: print(f'{timecount:,d} total measurements, {slw.nnz:,d} unknowns')
 
 	if tracer.prefilter and not rank:
 		print(f'Will use {tracer.prefilter} as a pre-integral filter')
