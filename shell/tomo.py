@@ -478,6 +478,7 @@ class BentRayTracer(TomographyTask):
 		self.fresnel = fresnel
 
 		# Save most recent hit map, if desired
+		self.hitmaps = None
 		self.save_hitmaps = bool(hitmaps)
 
 	def evaluate(self, s, nm, hybrid=False):
@@ -607,7 +608,8 @@ class BentRayTracer(TomographyTask):
 
 		if self.save_hitmaps:
 			self.comm.Allreduce(MPI.IN_PLACE, hitmaps, op=MPI.SUM)
-			self.hitmaps = hitmaps
+			if self.hitmaps is None: self.hitmaps = hitmaps
+			else: self.hitmaps += hitmaps
 
 		return f, nrows, gf
 
@@ -1017,8 +1019,7 @@ if __name__ == "__main__":
 				partial_output=partial_output, **bropts)
 
 		# Grab the hitmaps, if they were saved
-		try: hmaps = cshare.hitmaps
-		except AttributeError: hmaps = None
+		hmaps = cshare.hitmaps
 	else:
 		# Build the straight-ray tracer
 		cshare = StraightRayTracer(elements, atimes, tracer, fresnel, comm)
