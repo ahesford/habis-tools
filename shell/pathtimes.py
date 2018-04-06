@@ -132,7 +132,7 @@ if __name__ == '__main__':
 			action='store_true', help='Disable printing of status bar')
 	parser.add_argument('-j', '--joints', type=str, default=None,
 			help='Save first and last joint in bent paths '
-				'with at least 3 segments (requires bent tracing')
+				'with at least 3 segments (requires bent tracing)')
 
 	parser.add_argument('elements', type=str,
 			help='A key-matrix of source (element) coordinates')
