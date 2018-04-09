@@ -2300,6 +2300,8 @@ class WaveformMap(collections.abc.MutableMapping):
 				dblock = data.read(nbytes)
 				if len(dblock) != nbytes: raise ValueError
 				dblock = np.frombuffer(dblock, dtype=dtype, count=dlen)
+				# Make sure the array is writeable
+				dblock.setflags(write=True)
 			except ValueError:
 				raise IOError(f'Unable to read data in {recpair}')
 
