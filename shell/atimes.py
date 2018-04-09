@@ -911,8 +911,9 @@ if __name__ == '__main__':
 
 	# Read the configuration file
 	try: config = HabisConfigParser(sys.argv[1])
-	except:
-		print(f'ERROR: could not load configuration file {sys.argv[1]}', file=sys.stderr)
+	except Exception as err:
+		print('ERROR: could not load configuration '
+				f'file {sys.argv[1]}: {err}', file=sys.stderr)
 		usage(sys.argv[0])
 		sys.exit(1)
 
