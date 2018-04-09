@@ -15,7 +15,7 @@ import weakref
 
 from mpi4py import MPI
 
-from habis.sigtools import WaveformMap
+from habis.sigtools import WaveformMap, Window
 from habis.habiconf import matchfiles
 from habis.mpdfile import flocshare
 
@@ -90,11 +90,11 @@ def makewindower(window, *args, **kwargs):
 	'''
 	If window is not None, return a function that, when called with a
 	Waveform as its only argument, invokes
-	
+
 		Waveform.window(win, *args, **kwargs),
-		
+
 	where win = { 'start': window[0], 'end': window[1] }.
-	
+
 	If window is None, just return None.
 	'''
 	if window is None: return None
@@ -182,7 +182,7 @@ def equivkey(key, groupsize=1):
 	'''
 	For an integer key as produced by pack_key, unpack the key to a (t, r)
 	pair, then compute the equivalence key
-	
+
 		(min(t,r) // groupsize, max(t,r) // groupsize),
 
 	and return the equivalence after packing with pack_key.
@@ -423,10 +423,9 @@ def printroot(rank, *args, **kwargs):
 	sys.stdout.flush()
 
 
-def pairavg(left, right, windower, osamp=0):
+def pairavg(left, right, osamp=0, clip=False):
 	'''
-	Compute and return the average of two waveforms left and right, then
-	apply a windowing function windower (as produced by makewindower). If
+	Compute and return the average of two waveforms left and right. If
 	osamp is 0, the waveforms are simply averaged. Otherwise, if osamp is a
 	positive integer, align the waveforms with the given oversampling rate
 	prior to averaging.
@@ -434,6 +433,12 @@ def pairavg(left, right, windower, osamp=0):
 	Note: alignment is done symmetrically: if D = left.delay(right, osamp)
 	is the delay in right necessary to align with left, the average will be
 	between waveforms left.shift(-D / 2) and right.shift(D / 2).
+
+	If clip is True, the average waveform will be clipped to the narrowest
+	data window that contains the data windows of the inputs. Otherwise,
+	the data window may grow depending on any shifting performed to ensure
+	alignment. (In particular, fractional-sample shifts will resample the
+	signals across the entire signal window.)
 	'''
 	if not osamp:
 		# Simple average
@@ -443,7 +448,13 @@ def pairavg(left, right, windower, osamp=0):
 		delay = left.delay(right, osamp) / 2
 		avg = 0.5 * (left.shift(-delay) + right.shift(delay))
 
-	if windower: avg = windower(avg)
+	if clip:
+		# Find the window that contains both data windows
+		start = min(left.datawin.start, right.datawin.start)
+		end = max(left.datawin.end, right.datawin.end)
+		win = Window(start, end=end, nonneg=True)
+		avg = avg.window(win)
+
 	return avg
 
 
@@ -467,9 +478,11 @@ if __name__ == '__main__':
 	parser.add_argument('-T', '--tails', default=0, type=int,
 			help='If windowing, apply rolloff of this width')
 
-
 	parser.add_argument('-R', '--relative', choices=['datawin', 'signal'],
 			default=None, help='Use relative window mode') 
+
+	parser.add_argument('-c', '--clip', action='store_true',
+			help='Tightly clip data window of average waveforms')
 
 	parser.add_argument('-g', '--groupsize', default=64, type=int,
 			help='Equalize output distribution '
@@ -545,7 +558,7 @@ if __name__ == '__main__':
 		(t, r), left = wmap.popitem()
 		try: right = wmap.pop((r, t))
 		except KeyError: continue
-		omap[min(t,r), max(t,r)] = pairavg(left, right, windower, args.osamp)
+		omap[min(t,r), max(t,r)] = pairavg(left, right, args.osamp, args.clip)
 
 	gosize = MPI.COMM_WORLD.reduce(len(omap))
 	printroot(grank, f'{gosize} reciprocal pairs averaged globally')
