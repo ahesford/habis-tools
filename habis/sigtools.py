@@ -1409,7 +1409,7 @@ class Waveform(object):
 		return { 'nmer': nmer, 'fmer': fmer, 'ner': ner, 'fer': fer }
 
 
-	def enratio(self, prewin, postwin=None, vpwin=None, *, wrap=False, raw=False):
+	def enratio(self, prewin, postwin=None, vpwin=None, *, edges='rms', raw=False):
 		'''
 		Compute energy ratios for each sample of the signal, which is
 		given as the ratio between the average energy in a window of
@@ -1419,9 +1419,14 @@ class Waveform(object):
 
 		For samples approaching the ends of the signal, the preceding
 		and following windows will run past the data; the missing
-		samples will be replaced with the average energy in the entire
-		signal if wrap_edges is False, or will cyclically wrap if wrap
-		is True.
+		samples will be replaced with:
+		
+		* When edges is 'rms', the RMS value of the entire signal;
+		* When edges is 'wrap', the cyclic wraparound of the signal;
+		* When edges is a negative numeric value, a constant value the
+		  specified number of dB below the peak value of the signal.
+
+		Any other value for edges will raise a ValueError.
 
 		If postwin is None, it will be the same as prewin.
 
@@ -1456,10 +1461,11 @@ class Waveform(object):
 		start = prewin + vpwin
 		end = ld + start
 		exdata = np.empty((end + postwin - 1), dtype=self.dtype)
-		# Copy the real data
+		# Copy the real data, convert to power
 		exdata[start:end] = self._data**2
 		# Pad out-of bound values
-		if wrap:
+		if isinstance(edges, str): edges = edges.strip().lower()
+		if edges == 'wrap':
 			# Handle left-edge wraps
 			nrem = start
 			while nrem > 0:
@@ -1476,8 +1482,21 @@ class Waveform(object):
 				exdata[nrem:nrem+ledge] = edge
 				nrem += ledge
 		else:
-			# Just use average energy levels outside of signals
-			mval = np.mean(exdata[start:end])
+			# Pad with RMS level (squared) or specified noise level
+			if edges == 'rms':
+				mval = np.mean(exdata[start:end])
+			else:
+				try:
+					# Convert edges to linear power level
+					edges = 10**(edges / 10)
+					if edges >= 1: raise ValueError
+				except (TypeError, ValueError):
+					msg = ('Argument "edges" must be "rms", '
+							'"wrap", or a negative number')
+					raise ValueError(msg)
+				# Scale peak power to padding level
+				mval = edges * np.max(exdata[start:end])
+
 			exdata[:start] = mval
 			exdata[end:] = mval
 
