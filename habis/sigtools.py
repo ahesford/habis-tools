@@ -2034,10 +2034,16 @@ class WaveformMap(collections.abc.MutableMapping):
 	enclosed Waveforms.
 	'''
 	__slots__ = '_nsamp', '_wavemap'
-	def __init__(self, nsamp=0, *args):
+	def __init__(self, *args, nsamp=0):
 		'''
-		Initialize a WaveformMap with the given sample duration and an
-		optional mapping/iterable E = args[0] (if provided).
+		WaveformMap([E, ]nsamp=0) -> None
+
+		Initialize a WaveformMap from an optional mapping or iterable E
+		and an initial sample count nsamp. The value of nsamp
+		associated with the map will grow as needed when Waveforms are
+		added to the map.
+
+		The initial entries are populated as self.update(*args).
 		'''
 		# Copy the sample size
 		self._nsamp = nsamp

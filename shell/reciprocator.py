@@ -285,7 +285,7 @@ def makesendbufs(wmap, destmap, nmax=10000):
 		remaining = list(rkeys.intersection(wmap))
 		while remaining:
 			# Build a submap to serialize
-			rmap = WaveformMap(0, ((k, wmap[k]) for k in remaining[:nmax]))
+			rmap = WaveformMap((k, wmap[k]) for k in remaining[:nmax])
 			# Serialize to a BytesIO stream
 			bstr = io.BytesIO()
 			rmap.store(bstr)

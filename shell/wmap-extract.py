@@ -102,7 +102,7 @@ if __name__ == '__main__':
 		# Build the appropriate subset of the WaveformMap
 		if not args.backscatter: wvs = trextract(wmap, args.trmap, args.random)
 		else: wvs = ((k, v) for k, v in wmap.items() if k[0] == k[1])
-		omap = WaveformMap(0, wvs)
+		omap = WaveformMap(wvs)
 
 		if args.output:
 			# Save to common output and switch to append mode
