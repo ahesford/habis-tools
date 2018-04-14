@@ -319,14 +319,14 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	# Interpolate if desired and possible
 	if interpolate:
 		from scipy.interpolate import splrep, sproot
-		istart = max(0, dl - 2)
-		iend = min(len(imer), istart + 4)
+		ibeg = max(0, dl - 3)
+		iend = min(len(imer), ibeg + 6)
 		# Build a cubic spline representation if enough points exist
-		try: tck = splrep(np.arange(istart, iend), imer[istart:iend] - mval)
+		try: tck = splrep(np.arange(ibeg, iend), imer[ibeg:iend] - mval, s=0)
 		except TypeError: pass
 		else:
 			# Replace delay with cubic root in proper interval
-			try: dl = next(rt for rt in sproot(tck) if -1 <= rt - dl <= 0)
+			try: dl = next(rt for rt in sproot(tck) if dl - 1 < rt <= dl)
 			except StopIteration: pass
 
 	# Offset IMER with the start of the data window
