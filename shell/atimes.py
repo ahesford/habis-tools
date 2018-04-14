@@ -125,7 +125,7 @@ def isolatepeak(sig, key, nearmap={ }, neardefault=None, **kwargs):
 
 def getimertime(sig, threshold=1, window=None, equalize=True,
 		rmsavg=None, absimer=False, merpeak=False,
-		breakaway=None, breaklen=None, **kwargs):
+		breakaway=None, breaklen=None, interpolate=True, **kwargs):
 	'''
 	For the signal sig, compute the IMER function imer = sig.imer(**kwargs)
 	or, if absimer is True, imer = abs(sig.imer(**kwargs)) and find the
@@ -182,12 +182,18 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 
 	The merpeak and breakaway options are mutually exclusive.
 
+	If interpolate is True, the threshold crossing will be interpolated
+	between samples by fitting a cubic spline to four points surrounding
+	the interval where the threshold crossing was detected.
+
 	An IndexError will be raised if a suitable primary crossing cannot be
 	identified.
 	'''
 	if threshold < 0: raise ValueError('IMER threshold must be positive')
 
 	if merpeak:
+		if interpolate:
+			raise ValueError('Interpolation not supported with merpeak')
 		if breakaway is not None:
 			raise ValueError('Options "merpeak" and '
 					'"breakaway" are mutually exclusive')
@@ -203,8 +209,9 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 			raise ImportError('Searches with merkpeak > 1 '
 					'or breakaway require pandas.Series')
 
+	# Figure start and length of interest window WRT data window
 	if window is None:
-		dstart, dlen = sig.datawin
+		dstart, dlen = 0, sig.datawin.length
 	else:
 		try: window = Window(**window)
 		except TypeError: window = Window(*window)
@@ -251,29 +258,25 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	try: dl = np.nonzero(imer[dstart:dend] >= mval)[0][0] + dstart
 	except IndexError: raise IndexError('Primary IMER crossing not found')
 
-	# Store interval limits for later interpolation
-	lval = imer[dl - 1] if dl > 0 else None
-	rval = imer[dl]
-
 	# Searches beyond the first sample are useless
 	if dl < 1: return dl + sig.datawin.start
 
 	if breakaway is not None:
 		# Truncate secondary search to primary crossing
-		imer = imer[:dl]
+		ime = imer[:dl]
 
 		# Build a baseline for crossing up to primary crossing
-		if breaklen: ime = Series(imer).rolling(breaklen, min_periods=1)
-		else: ime = Series(imer).expanding(min_periods=1)
+		if breaklen: ime = Series(ime).rolling(breaklen, min_periods=1)
+		else: ime = Series(ime).expanding(min_periods=1)
 		baseline = (ime.mean() + breakaway * ime.std()).values
 
 		# Limit leading edge of IMER and baseline to start of window
-		imer = imer[dstart:]
+		ime = imer[dstart:]
 		baseline = baseline[dstart:]
 
 		try:
 			# Latest crossing is first point after last below baseline
-			dls = np.nonzero(imer < baseline)[0][-1] + 1
+			dls = np.nonzero(ime < baseline)[0][-1] + 1
 			# If secondary crossing runs past primary, no more searching
 			if dls + dstart >= dl: raise IndexError
 		except IndexError:
@@ -281,10 +284,6 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 		else:
 			# Establish the new threshold from crossing
 			mval = baseline[dls]
-
-			# Update endpoints of crossing interval
-			rval = imer[dls]
-			lval = imer[dls - 1] if dls > 0 else None
 
 			# Shift delay to start of data window
 			dl = dls + dstart
@@ -314,17 +313,21 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 				if not bestpk: bestpk = idx, height
 				break
 
-		if bestpk:
-			# Update arrival time to location of preferred peak
-			dl = bestpk[0]
-			# Interpolation with merpeaks is not reasonable
-			mval, lval, rval = None, None, None
+		# Update arrival time to location of preferred peak
+		if bestpk: dl = bestpk[0]
 
-	# Interpolate if possible
-	if rval is not None and lval is not None and rval != lval:
-		corr = (mval - rval) / (rval - lval)
-		# Make sure mval is in the range [lval, rval]
-		if -1 <= corr <= 0: dl += corr
+	# Interpolate if desired and possible
+	if interpolate:
+		from scipy.interpolate import splrep, sproot
+		istart = max(0, dl - 2)
+		iend = min(len(imer), istart + 4)
+		# Build a cubic spline representation if enough points exist
+		try: tck = splrep(np.arange(istart, iend), imer[istart:iend] - mval)
+		except TypeError: pass
+		else:
+			# Replace delay with cubic root in proper interval
+			try: dl = next(rt for rt in sproot(tck) if -1 <= rt - dl <= 0)
+			except StopIteration: pass
 
 	# Offset IMER with the start of the data window
 	return dl + sig.datawin.start
