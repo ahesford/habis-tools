@@ -319,8 +319,8 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	# Interpolate if desired and possible
 	if interpolate:
 		from scipy.interpolate import splrep, sproot
-		ibeg = max(0, dl - 3)
-		iend = min(len(imer), ibeg + 6)
+		ibeg = max(0, dl - 4)
+		iend = min(len(imer), ibeg + 8)
 		# Build a cubic spline representation if enough points exist
 		try: tck = splrep(np.arange(ibeg, iend), imer[ibeg:iend] - mval, s=0)
 		except TypeError: pass
