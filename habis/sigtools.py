@@ -30,8 +30,7 @@ else: fft = pyfftw.interfaces.numpy_fft
 
 from pycwp import cutil, signal, stats
 
-from .formats import (WaveformSet, WaveformSetIOError,
-			_strict_nonnegative_int, _strict_int)
+from .formats import WaveformSet, WaveformSetIOError, strict_nonnegative_int, strict_int
 from .stft import stft, istft
 
 @contextmanager
@@ -162,9 +161,9 @@ class Window(tuple):
 			raise ValueError("Window start, length and end must be integers")
 
 		try:
-			if nonneg: start = _strict_nonnegative_int(start)
-			else: start = _strict_int(start)
-			length = _strict_nonnegative_int(length)
+			if nonneg: start = strict_nonnegative_int(start)
+			else: start = strict_int(start)
+			length = strict_nonnegative_int(length)
 		except (ValueError, TypeError):
 			raise ValueError('Window start and length must be integers '
 						'and satisfy nonnegativity requirements')
@@ -247,7 +246,7 @@ class Waveform(object):
 
 	@nsamp.setter
 	def nsamp(self, value):
-		value = _strict_nonnegative_int(value)
+		value = strict_nonnegative_int(value)
 
 		# Make sure the change won't conflict with data window
 		if value < self._nsamp and value < self.datawin.end:
@@ -559,7 +558,7 @@ class Waveform(object):
 			return
 
 		# Ensure the start of the data window is always nonnegative
-		start = _strict_nonnegative_int(start)
+		start = strict_nonnegative_int(start)
 
 		# Ensure signal is 1-D
 		self._data = dimcompat(signal, 1)
@@ -2071,7 +2070,7 @@ class WaveformMap(collections.abc.MutableMapping):
 		agrees with any existing records already in the mapping. If so,
 		update the value.
 		'''
-		nsamp = _strict_nonnegative_int(nsamp)
+		nsamp = strict_nonnegative_int(nsamp)
 
 		# No need to update the value if it matches
 		if self._nsamp == nsamp: return
@@ -2113,8 +2112,8 @@ class WaveformMap(collections.abc.MutableMapping):
 		'''
 		try:
 			t, r = key
-			t = _strict_nonnegative_int(t)
-			r = _strict_nonnegative_int(r)
+			t = strict_nonnegative_int(t)
+			r = strict_nonnegative_int(r)
 		except Exception:
 			raise TypeError(f'{cls.__name__} keys must be '
 					'2-tuple of nonnegative integers')

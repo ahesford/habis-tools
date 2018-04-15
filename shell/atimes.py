@@ -15,7 +15,7 @@ from shlex import split as shsplit
 from pycwp import process, stats, cutil, signal
 from habis import trilateration
 from habis.habiconf import HabisConfigError, HabisNoOptionError, HabisConfigParser, matchfiles, buildpaths
-from habis.formats import loadkeymat, loadmatlist, savez_keymat
+from habis.formats import loadkeymat, loadmatlist, savez_keymat, strict_nonnegative_int
 from habis.sigtools import Waveform, Window, WaveformMap
 
 def usage(progname):
@@ -183,8 +183,12 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	The merpeak and breakaway options are mutually exclusive.
 
 	If interpolate is True, the threshold crossing will be interpolated
-	between samples by fitting a cubic spline to four points surrounding
-	the interval where the threshold crossing was detected.
+	between samples by fitting a cubic spline to points surrounding the
+	interval where the threshold crossing was detected. By default, eight
+	points (four on either side of the interval, if possible) will be used
+	to construct the spline; if interpolate is a positive integer, that
+	number of points will be used instead. Interpolation is not supported
+	with merpeak values.
 
 	An IndexError will be raised if a suitable primary crossing cannot be
 	identified.
@@ -192,8 +196,6 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	if threshold < 0: raise ValueError('IMER threshold must be positive')
 
 	if merpeak:
-		if interpolate:
-			raise ValueError('Interpolation not supported with merpeak')
 		if breakaway is not None:
 			raise ValueError('Options "merpeak" and '
 					'"breakaway" are mutually exclusive')
@@ -201,6 +203,11 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 		if merpeak < 1:
 			raise ValueError('Option "merpeak" must be '
 					'Boolean or a positive integer')
+
+	if interpolate:
+		if merpeak: raise ValueError('Interpolation not supported with merpeak')
+		if interpolate is True: interpolate = 8
+		else: interpolate = strict_nonnegative_int(interpolate)
 
 	if breakaway is not None or merpeak > 1:
 		try:
@@ -319,8 +326,9 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	# Interpolate if desired and possible
 	if interpolate:
 		from scipy.interpolate import splrep, sproot
-		ibeg = max(0, dl - 4)
-		iend = min(len(imer), ibeg + 8)
+		hfi = interpolate // 2
+		ibeg = max(0, dl - hfi)
+		iend = min(len(imer), ibeg + interpolate)
 		# Build a cubic spline representation if enough points exist
 		try: tck = splrep(np.arange(ibeg, iend), imer[ibeg:iend] - mval, s=0)
 		except TypeError: pass

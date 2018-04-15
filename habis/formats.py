@@ -64,19 +64,15 @@ class ArgparseLoader(object):
 class WaveformSetIOWarning(UserWarning): pass
 class WaveformSetIOError(Exception): pass
 
-def _strict_int(x):
+def strict_int(x):
 	ix = int(x)
 	if ix != x:
 		raise ValueError('Argument must be integer-compatible')
 	return ix
 
 
-def _strict_float(x):
-	ix = float(x)
-
-
-def _strict_nonnegative_int(x, positive=False):
-	x = _strict_int(x)
+def strict_nonnegative_int(x, positive=False):
+	x = strict_int(x)
 	if positive and x <= 0:
 		raise ValueError('Argument must be positive')
 	elif x < 0:
@@ -364,7 +360,7 @@ def loadtxt_keymat(*args, **kwargs):
 	will be tuples of integers.
 	'''
 	# Pull speciality kwargs
-	nkeys = _strict_nonnegative_int(kwargs.pop('nkeys', 1), positive=True)
+	nkeys = strict_nonnegative_int(kwargs.pop('nkeys', 1), positive=True)
 	scalar = kwargs.pop('scalar', True)
 
 	# Ensure the dimensionality is correctly specified
@@ -377,7 +373,7 @@ def loadtxt_keymat(*args, **kwargs):
 		raise ValueError('Number of key columns must be less than number of columns in matrix')
 
 	def kvmaker(g):
-		k = tuple(_strict_int(gv) for gv in g[:nkeys])
+		k = tuple(strict_int(gv) for gv in g[:nkeys])
 		v = g[nkeys:]
 		if len(k) < 2: k = k[0]
 		if scalar and len(v) < 2: v = v[0]
@@ -620,8 +616,8 @@ class TxGroupIndex(tuple):
 		Create a new TxGroupIndex with local index lidx and
 		group index gidx.
 		'''
-		lidx = _strict_nonnegative_int(lidx)
-		gidx = _strict_nonnegative_int(gidx)
+		lidx = strict_nonnegative_int(lidx)
+		gidx = strict_nonnegative_int(gidx)
 		return tuple.__new__(cls, (lidx, gidx))
 	@property
 	def idx(self): return self[0]
@@ -637,7 +633,7 @@ class TxGroupIndex(tuple):
 		if group != self.grp: return 0
 
 		# Count number of common bits in transmission and idx
-		txcom = _strict_nonnegative_int(transmission) & self.idx
+		txcom = strict_nonnegative_int(transmission) & self.idx
 		count = 0
 		while txcom:
 			txcom &= txcom - 1
@@ -655,8 +651,8 @@ class TxGroupConfiguration(tuple):
 		'''
 		Create a new TxGroupConfiguration.
 		'''
-		count = _strict_nonnegative_int(count)
-		size = _strict_nonnegative_int(size)
+		count = strict_nonnegative_int(count)
+		size = strict_nonnegative_int(size)
 		return tuple.__new__(cls, (count, size))
 
 	@property
@@ -680,7 +676,7 @@ class RxChannelHeader(tuple):
 		either be None or (index, group).
 		'''
 		from .sigtools import Window
-		idx = _strict_nonnegative_int(idx)
+		idx = strict_nonnegative_int(idx)
 		px, py, pz = pos
 		pos = tuple(float(p) for p in (px, py, pz))
 		# Force the window start to be nonnegative
@@ -866,8 +862,8 @@ class WaveformSet(object):
 		'''
 		try:
 			major, minor = version
-			major = _strict_nonnegative_int(major)
-			minor = _strict_nonnegative_int(minor)
+			major = strict_nonnegative_int(major)
+			minor = strict_nonnegative_int(minor)
 		except (TypeError, ValueError):
 			raise ValueError('Version format is not recognized')
 
@@ -1138,8 +1134,8 @@ class WaveformSet(object):
 			# Read the group configuration
 			count, size = funpack('<2H')
 			# Make sure both values are sensible integers
-			count = _strict_nonnegative_int(count)
-			size = _strict_nonnegative_int(size)
+			count = strict_nonnegative_int(count)
+			size = strict_nonnegative_int(size)
 
 			# Only configure transmit groups if the count is positive
 			if count > 0:
@@ -1343,7 +1339,7 @@ class WaveformSet(object):
 		'''
 		if txstart == self._txstart: return
 
-		txstart = _strict_nonnegative_int(txstart)
+		txstart = strict_nonnegative_int(txstart)
 
 		try:
 			maxtx = self.txgrps.maxtx
@@ -1458,7 +1454,7 @@ class WaveformSet(object):
 		except AttributeError:
 			pass
 
-		self._ntx = _strict_nonnegative_int(ntx)
+		self._ntx = strict_nonnegative_int(ntx)
 
 
 	@property
@@ -1506,7 +1502,7 @@ class WaveformSet(object):
 		if self._nsamp == nsamp: return
 
 		# Force the new value to be an nonnegative integer
-		nsamp = _strict_nonnegative_int(nsamp)
+		nsamp = strict_nonnegative_int(nsamp)
 
 		# Check all existing records to ensure their windows don't
 		# extend past the new acquisition window
@@ -1533,7 +1529,7 @@ class WaveformSet(object):
 		Set the fire-to-capture delay in 20-MHz samples.
 		'''
 		if self._f2c == val: return
-		self._f2c = _strict_nonnegative_int(val)
+		self._f2c = strict_nonnegative_int(val)
 
 
 	@property
@@ -1564,8 +1560,8 @@ class WaveformSet(object):
 		# Make sure the map is valid and consistent with txgrp configuration
 		ngrpmap = { }
 		for k, v in grpmap.items():
-			ki = _strict_nonnegative_int(k)
-			vi, vg = [_strict_nonnegative_int(vl) for vl in v]
+			ki = strict_nonnegative_int(k)
+			vi, vg = [strict_nonnegative_int(vl) for vl in v]
 			if vi >= self.txgrps.size:
 				raise ValueError('Local index in group map exceeds txgrp size')
 			if vg >= self.txgrps.count:
@@ -1599,7 +1595,7 @@ class WaveformSet(object):
 
 			t = locidx + grpnum * self.txgrps.gsize.
 		'''
-		elt = _strict_nonnegative_int(elt)
+		elt = strict_nonnegative_int(elt)
 
 		try: gcount, gsize = self.txgrps
 		except TypeError: return elt
@@ -1624,7 +1620,7 @@ class WaveformSet(object):
 		Convert a transmit-channel index into a waveform-array row index.
 		'''
 		# Ensure that the argument is properly bounded
-		tid = _strict_nonnegative_int(tid)
+		tid = strict_nonnegative_int(tid)
 
 		txstart = self.txstart
 
@@ -1651,7 +1647,7 @@ class WaveformSet(object):
 		Return the raw (header, data) record for a given receive
 		channel rid, with only sanity checks on rid.
 		'''
-		return self._records[_strict_nonnegative_int(rid)]
+		return self._records[strict_nonnegative_int(rid)]
 
 
 	def getheader(self, rid):
@@ -1797,7 +1793,7 @@ class WaveformSet(object):
 		'''
 		Delete the waveform record for the receive-channel index rid.
 		'''
-		del self._records[_strict_nonnegative_int(rid)]
+		del self._records[strict_nonnegative_int(rid)]
 
 
 	def clearall(self):
