@@ -187,6 +187,16 @@ class Window(tuple):
 		'''
 		return type(self)(self[0] + ds, self[1])
 
+	def oversample(self, osamp):
+		'''
+		Convience function returning
+
+			Window(osamp * self.start, osamp * self.length).
+
+		The start is allowed to be negative.
+		'''
+		return type(self)(self[0] * osamp, self[1] * osamp)
+
 
 class Waveform(object):
 	'''
@@ -1326,14 +1336,11 @@ class Waveform(object):
 
 		# Compute centered moving average of each signal
 		if avgwin > 1:
-			vld = len(ner) - avgwin
-			ast = avgwin // 2
-			aed = ast + vld
-			ner[ast:aed] = stats.rolling_mean(ner, avgwin)[:vld]
-			ner[:ast] = ner[ast]
+			ast = (avgwin - 1) // 2
+			aed = len(ner) - ast
+			ner[:aed] = stats.rolling_mean(ner, avgwin, expand=True)[ast:]
 			ner[aed:] = ner[aed - 1]
-			fer[ast:aed] = stats.rolling_mean(fer, avgwin)[:vld]
-			fer[:ast] = fer[ast]
+			fer[:aed] = stats.rolling_mean(fer, avgwin, expand=True)[ast:]
 			fer[aed:] = fer[aed - 1]
 
 		# Wrap the IMER in a Waveform if necessary

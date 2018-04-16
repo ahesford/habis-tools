@@ -123,7 +123,7 @@ def isolatepeak(sig, key, nearmap={ }, neardefault=None, **kwargs):
 	return sig.isolatepeak(nearmap.get(key, neardefault), **kwargs)[0]
 
 
-def getimertime(sig, threshold=1, window=None, equalize=True,
+def getimertime(sig, osamp=1, threshold=1, window=None, equalize=True,
 		rmsavg=None, absimer=False, merpeak=False,
 		breakaway=None, breaklen=None, interpolate=True, **kwargs):
 	'''
@@ -139,6 +139,11 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	is not well defined (i.e., the value of rmsavg moves the end of the
 	window before the start of the IMER data window), the threshold search
 	will proceed as if rmsavg were None.
+
+	The parameter osamp, if osamp != 1, is used to oversample the signal as
+	sig.oversample(osamp) before any analysis is performed. Thus, all
+	parameters that depend on sample values (breaklen, window  and IMER
+	kwargs) will be scaled by osamp as well.
 
 	If window is None, the whole-signal IMER is searched. Otherwise, window
 	should be a tuple or dictionary that will be convered to a Window
@@ -158,9 +163,8 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 
 	where secondary is the index being tested for a secondary crossing and
 	secstart is 0 if breaklen is None and (secondary - breaklen) otherwise.
-	This search is done using pandas.Series to define expanding or rolling
-	windows. If a suitable secondary crossing is found, the IMER time is
-	replaced by the secondary crossing.
+	If a suitable secondary crossing is found, the IMER time is replaced by
+	the secondary crossing.
 
 	The breaklen argument is ignored if breakaway is None.
 
@@ -177,8 +181,8 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	
 	If merpeak is a numeric value, it will be interpreted as an integer and
 	the near-MER function will be smoothed with a rolling average of that
-	many points prior to the peak search. The smoothing will be performed
-	with pandas.Series.
+	many points prior to the peak search. The rolling average window will
+	be centered with respect to the data to preserve peak locations.
 
 	The merpeak and breakaway options are mutually exclusive.
 
@@ -195,6 +199,9 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	'''
 	if threshold < 0: raise ValueError('IMER threshold must be positive')
 
+	if osamp != int(osamp) or osamp < 1:
+		raise ValueError('Parameter "osamp" must be a nonnegative integer')
+
 	if merpeak:
 		if breakaway is not None:
 			raise ValueError('Options "merpeak" and '
@@ -209,12 +216,13 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 		if interpolate is True: interpolate = 8
 		else: interpolate = strict_nonnegative_int(interpolate)
 
-	if breakaway is not None or merpeak > 1:
-		try:
-			from pandas import Series
-		except ImportError:
-			raise ImportError('Searches with merkpeak > 1 '
-					'or breakaway require pandas.Series')
+	if osamp != 1:
+		sig = sig.oversample(osamp)
+		if breaklen: breaklen = breaklen * osamp
+		# Scale the IMER values
+		for key in ['avgwin', 'vpwin', 'prewin', 'postwin']:
+			try: kwargs[key] = osamp * kwargs[key]
+			except KeyError: pass
 
 	# Figure start and length of interest window WRT data window
 	if window is None:
@@ -222,6 +230,9 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	else:
 		try: window = Window(**window)
 		except TypeError: window = Window(*window)
+
+		# Scale the window by the oversampling parameter
+		if osamp != 1: window = window.oversample(osamp)
 
 		try: dstart, _, dlen = cutil.overlap(sig.datawin, window)
 		except TypeError:
@@ -272,10 +283,11 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 		# Truncate secondary search to primary crossing
 		ime = imer[:dl]
 
-		# Build a baseline for crossing up to primary crossing
-		if breaklen: ime = Series(ime).rolling(breaklen, min_periods=1)
-		else: ime = Series(ime).expanding(min_periods=1)
-		baseline = (ime.mean() + breakaway * ime.std()).values
+		# Build a baseline for crossing up to primary crossing,
+		# growing from the start of the IMER signal
+		mu = stats.rolling_mean(ime, breaklen, expand=True)
+		std = stats.rolling_std(ime, breaklen, expand=True)
+		baseline = mu + breakaway * std
 
 		# Limit leading edge of IMER and baseline to start of window
 		ime = imer[dstart:]
@@ -297,8 +309,13 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 	elif merpeak:
 		if merpeak > 1:
 			# Use rolling-average filter to smooth NMER
-			nme = Series(nmer).rolling(merpeak, center=True, min_periods=1)
-			nmer = nme.mean().values
+			nme = stats.rolling_mean(nmer, merpeak, expand=True)
+			# Shift by half width to center the rolling average
+			hwl = (merpeak - 1) // 2
+			lnh = len(nmer) - hwl
+			nmer[:lnh] = nme[hwl:]
+			# Replicate the last smooth value over final half window
+			nmer[lnh:] = nmer[lnh-1]
 		# Find the NMER level at the IMER crossing
 		nmval = nmer[dl]
 		# Find high-enough peaks in window, sort by index
@@ -337,8 +354,11 @@ def getimertime(sig, threshold=1, window=None, equalize=True,
 			try: dl = next(rt for rt in sproot(tck) if dl - 1 < rt <= dl)
 			except StopIteration: pass
 
-	# Offset IMER with the start of the data window
-	return dl + sig.datawin.start
+	# Offset IMER with the start of the data window and adjust for oversampling
+	arrival = dl + sig.datawin.start
+	if osamp != 1: arrival /= osamp
+
+	return arrival
 
 
 def applywindow(sig, key, map={ }, default=None, **kwargs):
@@ -638,7 +658,7 @@ def calcdelays(datafile, reffile, osamp=1, rank=0, grpsize=1, **kwargs):
 
 		if imer:
 			# Compute IMER time
-			try: dl = getimertime(sig, **imer)
+			try: dl = getimertime(sig, osamp=osamp, **imer)
 			# Compute IMER and its mean
 			except IndexError:
 				wavestats['failed-IMER'] += 1
