@@ -283,11 +283,10 @@ def getimertime(sig, osamp=1, threshold=1, window=None, equalize=True,
 		# Truncate secondary search to primary crossing
 		ime = imer[:dl]
 
-		# Build a baseline for crossing up to primary crossing,
-		# growing from the start of the IMER signal
-		mu = stats.rolling_mean(ime, breaklen, expand=True)
-		std = stats.rolling_std(ime, breaklen, expand=True)
-		baseline = mu + breakaway * std
+		# Build baseline up to primary crossing, growing from start of IMER
+		mustd = stats.rolling_std(ime, breaklen, expand=True, with_mean=True)
+		# When with_mean is True, array has mean in column 1, std in column 0
+		baseline = mustd[:,1] + breakaway * mustd[:,0]
 
 		# Limit leading edge of IMER and baseline to start of window
 		ime = imer[dstart:]
