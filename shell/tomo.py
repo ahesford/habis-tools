@@ -1029,10 +1029,10 @@ if __name__ == "__main__":
 
 		if hitmaps:
 			# Save the hitmaps
-			hmaps = np.zeros(cshare.box.ncell + (2,), dtype=np.float64)
+			hmaps = np.zeros(tracer.box.ncell + (2,), dtype=np.float64)
 
 			for k, v in cshare.pathmat.todok().items():
-				l,m,n = np.unravel_index(k[1], cshare.box.ncell)
+				l,m,n = np.unravel_index(k[1], tracer.box.ncell)
 				hmaps[l,m,n,0] += 1.
 				hmaps[l,m,n,1] += v
 
