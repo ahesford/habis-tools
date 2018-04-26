@@ -6,7 +6,8 @@ of parameters.
 import numpy as np
 from scipy.sparse import csr_matrix, coo_matrix, eye as speye
 
-
+import re
+from itertools import product as iproduct
 
 class Slowness(object):
 	'''
@@ -234,42 +235,95 @@ class PiecewiseSlowness(Slowness):
 		Initialize a PiecewiseSlowness instance. The map voxmap should
 		map keys to 3-D array of shape (L, M, N) such that, if
 
-			keys = sorted(voxmap.keys()),
+		  keys = sorted(voxmap.keys()),
 
 		a slowness image for a perturbation x is given by
 
-			slowness = s + sum(voxmap[keys[i]] * x[i]
-						for i in range(len(x))).
+		slowness = s + sum(voxmap[keys[i]] * x[i]
+					for i in range(len(x))).
 
-		One special key, 'unconstrained', will behave differently. Each
-		nonzero voxel in voxmap['unconstrained'] will effectively get
-		its own key, allowing each nonzero pixel in the 'unconstrained'
-		voxmap to take a distinct value. The 'unconstrained' key is
-		case sensitive.
+		A special class of keys, starting with 'unconstrained', will
+		behave differently. Each nonzero voxel in the image at
+		voxmap['unconstrained'] will effectively get its own key,
+		allowing each nonzero pixel in the 'unconstrained'
+		voxmap to take a distinct value.
+
+		Additional 'unconstrained' keys are allowed to take the form
+		'unconstrained_<d>x', where '<d>' is an arbitrary base-10
+		integer. Each nonzero voxel in I = voxmap['unconstrained_Dx']
+		for an integer D represents a unique value corresponding to a
+		cluster of DxDxD ordinary voxels; i.e., each voxel (i,j,k) in I
+		corresponds to an effective map M_ijk with
+
+		  M_ijk[D*i:D*(i+1),D*j:D*(j+1),D*k:D*(k+1)] = I[i,j,k]
+
+		and M_ijk = 0 everywhere else.
+
+		The 'unconstrained' class of keys is case sensitive.
 		'''
 		# Build a sparse matrix representation from the voxmap
 		self._shape = None
 		data, rows, cols = [], [], []
 		M, N = 0, 0
+		# Match unconstrained keys with optional scales
+		unre = re.compile('^unconstrained(_([0-9]+)x)?')
 		# Note that voxmap may not be a proper dictionary (e.g., NpzFile)
-		for k in sorted(voxmap.keys()):
-			v = np.asarray(voxmap[k]).astype(np.float64)
+		for key in sorted(voxmap.keys()):
+			# Check if the key is a scaled or unconstrained key
+			m = unre.match(key)
+			if m: scale = int(m.groups(1)[1])
+			else: scale = 1
+
+			v = np.asarray(voxmap[key]).astype(np.float64)
+			if v.ndim != 3:
+				raise ValueError('All voxmaps must have three dimensions')
+
+			# Scale the shape of the grid if appropriate
+			shape = v.shape
+			if scale != 1: shape = tuple(scale * sv for sv in shape)
+
 			if not self._shape:
-				self._shape = v.shape
+				self._shape = shape
 				M = np.product(self._shape)
-			elif self._shape != v.shape:
-				raise ValueError('Shapes of all entries of voxmap must agree')
-			v = v.ravel('C')
-			ri = np.nonzero(v)[0]
-			data.extend(v[ri])
-			rows.extend(ri)
-			if k == 'unconstrained':
-				# Unconstrained parameters get their own columns
-				cols.extend(range(N, N + len(ri)))
-				N += len(ri)
-			else:
-				# Constrained parameters fall in the same column
-				cols.extend([N]*len(ri))
+			elif self._shape != shape:
+				raise ValueError('All voxmap shapes must be compatible')
+
+			if not m or scale == 1:
+				# Process constrained or scale-1 unconstrained maps
+				v = v.ravel('C')
+				ri = np.nonzero(v)[0]
+				data.extend(v[ri])
+				rows.extend(ri)
+
+				if not m:
+					# Constrained voxels share a column
+					cols.extend(N for sv in range(len(ri)))
+					N += 1
+				else:
+					# Unconstrained voxels get their own columns
+					cols.extend(range(N, N + len(ri)))
+					N += len(ri)
+				continue
+
+			# List of neighbor offsets for scaled voxels
+			nbrs = list(iproduct(*(range(scale)
+					for sv in range(v.ndim))))
+
+			# Process each scaled voxel as a separate column
+			for i, j, k in np.transpose(np.nonzero(v)):
+				# Explode each voxel in a scaled unconstrained image
+				# np.ravel_multi_index requires the transposed form
+				vxi = np.transpose([[scale * i + ii,
+							scale * j + jj,
+							scale * k + kk]
+						for ii, jj, kk in nbrs])
+				# Map the exploded voxels to C-raveled indices
+				ri = np.ravel_multi_index(vxi, shape, order='C')
+				# Build the next block of the matrix
+				# All voxels in the block get the same weight
+				rows.extend(ri)
+				cols.extend(N for sv in range(len(ri)))
+				data.extend(v[i, j, k] for sv in range(len(ri)))
 				N += 1
 
 		# Confirm that the background has the right form
