@@ -3,7 +3,9 @@
 # Copyright (c) 2015 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
-import numpy as np, os, sys, fht, pyfftw, getopt
+import numpy as np, os, sys, pyfftw, getopt
+
+from fwht import fwht
 
 from collections import defaultdict, OrderedDict
 from functools import partial, reduce
@@ -404,7 +406,7 @@ def fhfft(infile, outfile, **kwargs):
 			# Perform the grouped Hadamard transforms
 			for grp, idxmap in sorted(fhts.items()):
 				rows = [wset.tx2row(i[1]) for i in idxmap]
-				b[rows,ws:we] = fht.fht(data[rows,:], axes=0) / np.sqrt(gsize)
+				b[rows,ws:we] = fwht(data[rows,:], axes=0) / np.sqrt(gsize)
 				if signs is not None:
 					# Include the sign flips
 					b[rows,ws:we] *= signs[:,np.newaxis]
