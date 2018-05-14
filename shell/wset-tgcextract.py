@@ -23,7 +23,8 @@ if __name__ == '__main__':
 		oname, fext = os.path.splitext(f)
 		oname += '.tgc.txt'
 
-		wset = WaveformSet.load(f, header_only=True)
+		# In header-only mode, the return is (WaveformSet, nrx)
+		wset = WaveformSet.load(f, header_only=True)[0]
 
 		try:
 			tgc = wset.context['tgc']
