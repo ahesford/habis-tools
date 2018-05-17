@@ -83,15 +83,33 @@ def buildpaths(files, outpath=None, extension=None):
 	In case 1, the outpath is not checked for validity. In all other cases,
 	if outpath is specified, it must refer to a valid directory. An IOError
 	will be raised if this is not the case.
+
+	When existing extensions will be replaced with a non-None "extension"
+	argument, special handling is triggered whenever the existing extension
+	is ".bz2" or ".gz". In these cases, files of the form
+
+		<basename>.<ext>.{gz,bz2}
+
+	will have the entire "<ext>.{gz,bz2}" portion replaced. If the ".gz" or
+	".bz2" extension exists without a "primary" extension, only the
+	existing portion will be replaced. (In other words, the basename will
+	never be removed.)
 	'''
 	from os.path import join, basename, splitext, isdir
 
 	if len(files) == 1 and not (outpath is None or isdir(outpath)):
 		return [outpath]
 
-	# Swap the extensions if necessary
+	# Swap the extensions if necessary, handling compressed extensions specially
+	compext = { '.gz', '.bz2' }
 	if extension is not None:
-		files = [splitext(f)[0] + '.' + extension for f in files]
+		nfiles = [ ]
+		for f in files:
+			bf, ef = splitext(f)
+			# Look for "primary" extension in compressed files
+			if ef.lower() in compext: bf = splitext(bf)[0]
+			nfiles.append(bf + '.' + extension)
+		files = nfiles
 
 	if outpath is not None:
 		if not isdir(outpath):
