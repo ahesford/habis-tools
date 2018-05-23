@@ -481,7 +481,7 @@ class BentRayTracer(TomographyTask):
 		self.hitmaps = None
 		self.save_hitmaps = bool(hitmaps)
 
-	def evaluate(self, s, nm, hybrid=False):
+	def evaluate(self, s, nm, maxerr=None):
 		'''
 		Evaluate a stochastic sample of the cost functional and its
 		gradient
@@ -495,25 +495,22 @@ class BentRayTracer(TomographyTask):
 		computed by self.tracer.trace. The data D consists of
 		corresponding entries self.atimes[t,r].
 
-		If hybrid is True, the segments of each piecewise linear traced
-		path will be passed to self.tracer.trace again in 'straight'
-		mode to determine (C, S), the compensated and uncompensated
-		straight-ray times, respectively. If both times are not None,
-		the data entry
-
-		  D[t,r] = self.atimes[t,r] + S - C
-
-		will be substituted for the the unadjusted D[t,r] =
-		self.atimes[t,r]. If the straight-ray tracer fails, the
-		unadjusted value will be substituted by default; however, iff
-		hybrid takes the (case-insensitive) value 'hard', the
-		measurement pair for which tracing failed will be excluded from
-		the evaluation.
-
 		The return value will be (C(s), nr, grad(C)(s)), where nr is
 		the number of measurements participating in the sample (this
 		may be different than nm if nm < 1, nm > len(self.atimes), or
 		if certain paths could not be traced).
+
+		If maxerr is not None or 0, it should be a positive float that
+		specifies the maximum permissible absolute error allowed for
+		any individual path trace. In this case, any measurement pair
+		(t,r) that satisfies
+		
+		  abs(Ls[t,r] - self.atimes[t,r]) > maxerr,
+
+		where Ls[t,r] is the arrival time predicted by a path trace
+		from point t to point r, will be treated as if the trace failed
+		and excluded from C(s), nr, and grad(C)(s). If maxerr is None
+		or 0, this test is not performed.
 
 		The sample consists of nm transmit-receive pairs selected from
 		self.atimes with equal probability. If nm >= len(self.atimes)
@@ -551,10 +548,8 @@ class BentRayTracer(TomographyTask):
 			hmshape = tracer.get_slowness().shape + (2,)
 			hitmaps = np.zeros(hmshape, dtype=np.float64)
 
-		if hybrid and isinstance(hybrid, str):
-			# Make sure "hard" hybrid mode is properly handled
-			if hybrid.lower() == 'hard': hybrid = 'hard'
-			else: hybrid = True
+		# Make sure that the maximum error makes sense
+		maxerr = float(maxerr or 0)
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
@@ -563,29 +558,15 @@ class BentRayTracer(TomographyTask):
 
 			try:
 				plens, pts, pint = tracer.trace(src, rcv, fresnel)
-				if not plens or pint <= 0: raise ValueError
+				if not plens or pint <= 0:
+					raise ValueError
+				elif maxerr and abs(pint - atdata) > maxerr:
+					raise ValueError
+
 			except (ValueError, TraceError):
 				# Skip invalid or empty paths
 				nskip += 1
 				continue
-
-			if hybrid:
-				# Compute straight-ray adjustments, if possible
-				tc, ts, invalid = 0, 0, False
-				for src, rcv in zip(pts, pts[1:]):
-					ltc, lts = tracer.trace(src, rcv, fresnel,
-							intonly=True, mode='straight')
-					try:
-						tc += ltc
-						ts += lts
-					except TypeError:
-						invalid = (hybrid == 'hard')
-						break
-				else: atdata += (ts - tc)
-
-				if invalid:
-					nskip += 1
-					continue
 
 			nrows += 1
 			# Calculate error in model arrival time
@@ -614,7 +595,7 @@ class BentRayTracer(TomographyTask):
 		return f, nrows, gf
 
 	def sgd(self, s, nmeas, epochs, updates, beta=0.5, tol=1e-6,
-			maxstep=None, hybrid=False, regularizer=None,
+			maxstep=None, regularizer=None, maxerr=None,
 			postfilter=None, partial_output=None):
 		'''
 		Iteratively compute a slowness image by minimizing the cost
@@ -642,7 +623,7 @@ class BentRayTracer(TomographyTask):
 		where g_{k,0} == 0, f_t is the t-th sampled cost functional for
 		the epoch and x_t is the solution at update t.
 
-		The "hybrid" argument is passed to self.evaluate.
+		The "maxerr" argument is passed to self.evaluate.
 
 		If regularizer is not None, the cost function will be
 		regularized with a method from pycwp.cytools.regularize. The
@@ -729,7 +710,7 @@ class BentRayTracer(TomographyTask):
 			sp = s.perturb(x)
 
 			# Compute the stochastic cost and gradient
-			f, nrows, gf = self.evaluate(sp, nmeas, hybrid)
+			f, nrows, gf = self.evaluate(sp, nmeas, maxerr)
 			lgf = s.flatten(gf)
 
 			if nrows:
@@ -757,7 +738,8 @@ class BentRayTracer(TomographyTask):
 						f'cost {f:#0.4g} RMSE {rmserr:#0.4g} '
 							f'(time: {stime:0.2f} sec)')
 				if nrows != maxrows:
-					print(f'{maxrows - nrows}/{maxrows} untraceable paths')
+					print('  Untraceable paths: '
+						f'{maxrows - nrows}/{maxrows}')
 
 			return f, lgf
 
