@@ -12,18 +12,17 @@ from mpi4py import MPI
 
 import progressbar
 
+from collections import defaultdict
+
 from pycwp import mio
 from habis.habiconf import HabisConfigParser, HabisConfigError
 from habis.formats import loadkeymat, savez_keymat
 from habis.pathtracer import PathTracer, TraceError
 
-
 timetype = np.dtype([('t', '<i8'), ('r', '<i8'),
 			('b', '<f8'), ('c', '<f8'), ('s', '<f8')])
-
 jointype = np.dtype([('t', '<i8'), ('r', '<i8'),
-			('xs', '<f8'), ('ys', '<f8'), ('zs', '<f8'),
-			('xe', '<f8'), ('ye', '<f8'), ('ze', '<f8'),])
+			('x', '<f8'), ('y', '<f8'), ('z', '<f8')])
 
 def tracetimes(tracer, s, elements, targets, trlist,
 		skip_straight=False, skip_bent=False, quiet=True, joints=None):
@@ -51,10 +50,11 @@ def tracetimes(tracer, s, elements, targets, trlist,
 	If quiet is not True, a progress bar will be printed to show tracing
 	progress.
 
-	If joints is None, a second return value will be an array of "jointype"
-	records that list, for a (t, r) pair with a bent path containing at
-	least 3 segments, the first (xs, ys, zs) and last (xe, ye, ze) joints
-	in the path.
+	If joints is None, a second return value will be mapping from a (t, r)
+	pair to a list of (x, y, z) tuples, each as coordinates of the N joints
+	that describe the (N+1)-segment path, where joints do not count the
+	location of transmitter t or receiver r. Single-segment paths, which
+	have no joints, will not appear in the mapping.
 	'''
 	if skip_straight and skip_bent:
 		raise ValueError('Cannot set both skip_straight and skip_bent to True')
@@ -83,8 +83,7 @@ def tracetimes(tracer, s, elements, targets, trlist,
 	if not quiet: bar = progressbar.ProgressBar(max_value=nrec)
 	else: bar = None
 
-	if joints is not None: joints = np.zeros((nrec,), dtype=jointype)
-	njoints = 0
+	if joints is not None: joints = { }
 
 	for i, (t, r) in enumerate(itertr):
 		src = elements[t]
@@ -97,9 +96,7 @@ def tracetimes(tracer, s, elements, targets, trlist,
 			except (ValueError, TraceError): tb = -1
 
 			if joints is not None and len(pts) > 3:
-				joints[njoints] = (t, r, pts[1,0], pts[1,1], pts[1,2],
-							pts[-2,0], pts[-2,1], pts[-2,2])
-				njoints += 1
+				joints[t,r] = [ (x,y,z) for x,y,z in pts[1:-1] ]
 		else: tb = 0
 		record.append(tb)
 
@@ -115,7 +112,7 @@ def tracetimes(tracer, s, elements, targets, trlist,
 
 	if not quiet: bar.update(nrec)
 
-	if joints is not None: return times, joints[:njoints]
+	if joints is not None: return times, joints
 	else: return times
 
 if __name__ == '__main__':
@@ -131,7 +128,7 @@ if __name__ == '__main__':
 	parser.add_argument('-q', '--quiet',
 			action='store_true', help='Disable printing of status bar')
 	parser.add_argument('-j', '--joints', type=str, default=None,
-			help='Save first and last joint in bent paths '
+			help='Save interior joints in bent paths '
 				'with at least 3 segments (requires bent tracing)')
 
 	parser.add_argument('elements', type=str,
@@ -181,7 +178,10 @@ if __name__ == '__main__':
 	ntimes = len(times)
 	counts = comm.gather(ntimes)
 
+	# Flatten the joint mappings for collection with MPI
 	if joints is not None:
+		joints = np.array([(t, r, x, y, z) for (t, r), pts in joints.items()
+					for x, y, z in pts], dtype=jointype)
 		jcounts = comm.gather(len(joints))
 
 	if not rank:
@@ -210,7 +210,7 @@ if __name__ == '__main__':
 
 	if joints is not None:
 		offsets = [jointype.fields[n][1] for n in jointype.names]
-		mtypes = [MPI.LONG]*2 + [MPI.DOUBLE]*6
+		mtypes = [MPI.LONG]*2 + [MPI.DOUBLE]*3
 		jptype = MPI.Datatype.Create_struct([1]*len(mtypes), offsets, mtypes)
 		jptype.Commit()
 
@@ -239,6 +239,7 @@ if __name__ == '__main__':
 			mio.writebmat(b.astype('float32'), args.output)
 
 		if args.joints and len(alljoints):
-			joints = { (t,r): (xs, ys, zs, xe, ye, ze)
-					for (t, r, xs, ys, zs, xe, ye, ze) in alljoints }
+			# Convert flattened joint array to a list of points
+			joints = defaultdict(list)
+			for (t, r, x, y, z) in alljoints: joints[t,r].extend((x,y,z))
 			savez_keymat(args.joints, joints)
