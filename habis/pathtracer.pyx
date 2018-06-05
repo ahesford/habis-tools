@@ -18,10 +18,11 @@ from numpy.linalg import norm
 from .habiconf import HabisConfigParser, HabisConfigError
 
 from libc.stdlib cimport rand, RAND_MAX, malloc, free
+from libc.math cimport sqrt
 
-from pycwp.cytools.boxer import Box3D
+from pycwp.cytools.boxer import Box3D, Segment3D
 from pycwp.cytools.ptutils cimport *
-from pycwp.cytools.boxer cimport Box3D
+from pycwp.cytools.boxer cimport Box3D, Segment3D
 from pycwp.cytools.interpolator cimport Interpolator3D
 from pycwp.cytools.quadrature cimport Integrable, IntegrableStatus
 
@@ -449,9 +450,9 @@ cdef class PathIntegrator(Integrable):
 		where N = 2**M * nstart for the smallest integer M that is not
 		less than nmax. With each iteration, an optimal path is sought
 		by minimizing the object
-		
+
 			self.pathint(path, atol, rtol, h, damp=damp)
-			
+
 		with respect to all points along the path apart from the fixed
 		points start and end. The resulting optimal path is subdivided
 		for the next iteration by inserting points that coincide with
@@ -1099,7 +1100,7 @@ class PathTracer(object):
 
 		if fresnel:
 			# Trace the Fresnel zone through the box
-			plens = self.box.fresnel(points, fresnel)
+			plens = fresnel_zone(points, self.box, fresnel)
 
 			# Compute the total path length
 			tlen = fsum(norm(r - l) for r, l in zip(points, points[1:]))
@@ -1109,7 +1110,7 @@ class PathTracer(object):
 			return { k: tlen * v / wtot for k, v in plens.items() }
 
 		# March the points, ensure single-segment march still a list
-		marches = self.box.raymarcher(points)
+		marches = pathmarch(points, self.box)
 		if points.shape[0] < 3: marches = [marches]
 
 		# Accumulate the length of each path in each cell
@@ -1237,6 +1238,355 @@ class PathTracer(object):
 		return plens, points, pint
 
 
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def fresnel_zone(p, Box3D box, double l):
+	'''
+	Find the first Fresnel zone of a path p, which is either a single
+	Segment3D or a 2-D array of shape (N, 3), where N >= 2, that provides
+	control points for a piecewise linear curve through a grid defined by
+	the Box3D box.
+
+	The Fresnel zone is represented as a map that takes the form
+
+		(i, j, k) -> 1 - R,
+
+	where (i, j, k) is the index of a grid cell within the first Fresnel
+	zone and R = D / r, where D is the perpendicular distance from the
+	midpoint of the cell to the nearest segment and r is the radius of the
+	first Fresnel zone at the projection of the cell midpoint onto the
+	nearest segment:
+
+		r = sqrt(l * d1 * d2 / (d1 + d2)),
+
+	where d1 is the distance (along the curve) from the start of the curve
+	to the point where the radius is evaluated, d2 is the distance (along
+	the curve) between the point where the radius is evaluated and the end
+	of the curve, and l is the dominant wavelength.
+
+	A point is considered to be in the first Fresnel zone if R is in the
+	range (0, 1].
+	'''
+	cdef double[:,:] pts
+
+	if isinstance(p, Segment3D):
+		pts = np.array([p.start, p.end], dtype=np.float64)
+	else:
+		pts = np.asarray(p, dtype=np.float64)
+
+	if pts.shape[0] < 2 or pts.shape[1] != 3:
+		raise ValueError('Argument "p" must be a Segment3D or have shape (N,3), N >= 2')
+
+	cdef:
+		Segment3D seg
+		int axis, axp, axpp, k, inzone
+		point spt, ept, mpt, mpc
+		double smin, scell, rad, tlen, slen, weight
+		long stslab, edslab, slab, hcc, hcr
+		long i, j, sg, sgp, irad, jrad
+
+		double tlims[2]
+		double scl[3]
+		double ecl[3]
+		double lo[3]
+		double hi[3]
+		long ccell[3]
+		long ncell[3]
+		long ngrid[3]
+
+	hits = { }
+
+	# Find total length of curve
+	tlen = 0.0
+	for sg in range(pts.shape[0] - 1):
+		sgp = sg + 1
+		tlen += sqrt((pts[sgp,0] - pts[sg,0])**2 +
+				(pts[sgp,1] - pts[sg,1])**2 +
+				(pts[sgp,2] - pts[sg,2])**2)
+
+	# Copy the grid to an array
+	ngrid[0], ngrid[1], ngrid[2] = box.nx, box.ny, box.nz
+
+	# Loop through each segment
+	slen = 0.0
+	for sg in range(pts.shape[0] - 1):
+		sgp = sg + 1
+		seg = Segment3D((pts[sg,0], pts[sg,1], pts[sg,2]),
+				(pts[sgp,0], pts[sgp,1], pts[sgp,2]))
+
+		if not Box3D._intersection(tlims,
+				box._lo, box._hi, seg._start, seg._end):
+			# Segment does not intersect the grid
+			continue
+
+		# Find the major axis and the perpendicular axes
+		direction = seg.direction
+		axis = max(xrange(3), key=lambda i: abs(direction[i]))
+		axp = <int>((axis + 1) % 3)
+		axpp = <int>((axis + 2) % 3)
+
+		# Find the end points of the intersection
+		spt = lintp(max(tlims[0], 0.0), seg._start, seg._end)
+		ept = lintp(min(tlims[1], 1.0), seg._start, seg._end)
+
+		# Convert Cartesian points to cell coordinates as arrays
+		pt2arr(scl, box._cart2cell(spt.x, spt.y, spt.z))
+		pt2arr(ecl, box._cart2cell(ept.x, ept.y, ept.z))
+
+		# Store the corners of slabs as arrays
+		pt2arr(lo, box._lo)
+		pt2arr(hi, box._hi)
+
+		# Grab the slab minimum, thickness and maximum count
+		smin = lo[axis]
+		if axis == 0: scell = box._cell.x
+		elif axis == 1: scell = box._cell.y
+		elif axis == 2: scell = box._cell.z
+		else: raise IndexError('Invalid major axis %d' % (axis,))
+
+		# Compute the start and end slabs of the segment
+		stslab = max(0, min(ngrid[axis] - 1, <long>(scl[axis])))
+		edslab = max(0, min(ngrid[axis] - 1, <long>(ecl[axis])))
+		if edslab < stslab: stslab, edslab = edslab, stslab
+
+		# Loop through all slabs to pick up neighbors
+		for slab in range(stslab, edslab + 1):
+			# Adjust slab corners along slabbed axis
+			lo[axis] = smin + scell * slab
+			hi[axis] = smin + scell * (slab + 1)
+			# Check slab intersections
+			if not Box3D._intersection(tlims,
+					packpt(lo[0], lo[1], lo[2]),
+					packpt(hi[0], hi[1], hi[2]),
+					seg._start, seg._end):
+				# For some reason, segment misses slab
+				continue
+			# Clip intersections
+			tlims[0], tlims[1] = max(0, tlims[0]), min(1, tlims[1])
+			# Find midpoint and its cell coordinates
+			mpt = lintp(0.5 * (tlims[0] + tlims[1]), seg._start, seg._end)
+			mpc = box._cart2cell(mpt.x, mpt.y, mpt.z)
+			# Find cell index for midpoint
+			ccell[0] = <long>mpc.x
+			ccell[1] = <long>mpc.y
+			ccell[2] = <long>mpc.z
+
+			# Search the neighborhood
+			ncell[axis] = ccell[axis]
+			irad = max(ccell[axp], ngrid[axp] - ccell[axp])
+			jrad = max(ccell[axpp], ngrid[axpp] - ccell[axpp])
+			for i in range(irad):
+				hcr = 0
+				for j in range(jrad):
+					hcc = 0
+					# Loop through all neighbor corners
+					for k in range(4):
+						# Neighbor cell index
+						ncell[axp] = ccell[axp] + i * (2 * (k % 2) - 1)
+						ncell[axpp] = ccell[axpp] + j * (2 * (k / 2) - 1)
+						# Evaluate midpoint of neighbor
+						inzone = fresnel_weight(&weight, box, seg,
+									ncell, l, tlen, slen)
+						if inzone:
+							key = (ncell[0], ncell[1], ncell[2])
+							hits[key] = max(hits.get(key, 0.0), weight)
+						hcc += inzone
+					# Stop if no hits found in column
+					if not hcc: break
+					# Otherwise, check the next column
+					hcr += hcc
+				# Stop if no hits found in row
+				if not hcr: break
+		# Keep track of global length at next segment start
+		slen += seg.length
+	return hits
+
+
+def pathmarch(p, Box3D box, double step=REALEPS):
+	'''
+	March along the given p, which is either a single Segment3D instance or
+	a 2-D array of shape (N, 3), where N >= 2, that defines control
+	points of a piecewise linear curve.
+
+	A march of a single linear segment accumulates a map of the form (i, j,
+	k) -> (tmin, tmax), where (i, j, k) is the index of a cell that
+	intersects the segment and (tmin, tmax) are the minimum and maximum
+	lengths (as fractions of the segment length) along which the segment
+	and cell intersect.
+
+	If p is a Segment3D instance or an array of shape (2, 3), a single map
+	will be returned. If p is an array of shape (N, 3) for N > 2, a list of
+	(N - 1) of maps will be returned, with maps[i] providing the
+	intersection map for the segment from p[i] to p[i+1].
+
+	As a segment exits each encountered cell, a step along the segment is
+	taken to advance into another intersecting cell. The length of the step
+	will be, in units of the segment length,
+
+		step * sum(2**i for i in range(q)),
+
+	where the q is chosen at each step as the minimum nonnegative integer
+	that guarantees advancement to another cell. Because this step may be
+	nonzero, cells which intersect the segment over a total length less
+	than step may be excluded from the intersection map.
+	'''
+	cdef double[:,:] pts
+	cdef Segment3D seg
+	cdef point s, e
+
+	if isinstance(p, Segment3D):
+		seg = <Segment3D>p
+		return segmarch(seg._start, seg._end, box, step)
+
+	pts = np.asarray(p, dtype=np.float64)
+	if pts.shape[0] < 2 or pts.shape[1] != 3:
+		raise ValueError('Argument "p" must have shape (N,3), N >= 2')
+
+	# Capture the start of the first segment
+	s = packpt(pts[0,0], pts[0,1], pts[0,2])
+
+	if pts.shape[0] == 2:
+		# Special case: a single segment in array form
+		e = packpt(pts[1,0], pts[1,1], pts[1,2])
+		return segmarch(s, e, box, step)
+
+	# Accumulate results for multiple segments
+	results = [ ]
+
+	cdef unsigned long i
+	for i in range(1, pts.shape[0]):
+		# Build current segment and march
+		e = packpt(pts[i,0], pts[i,1], pts[i,2])
+		results.append(segmarch(s, e, box, step))
+		# Move end to start for next round
+		s = e
+
+	return results
+
+cdef object segmarch(point start, point end, Box3D box, double step=REALEPS):
+	'''
+	For a line segment from a point start to a point end, both in world
+	coordinates, return a mapping from cell indices in the grid defined by
+	Box3D to a tuple (ts, te) that indicates the fractional length at which
+	the segment enters (ts) and exits (te) the cell. Both ts and te will be
+	in the range [0, 1].
+
+	The step parameter is interpreted as described in the pathmarch
+	docstring.
+	'''
+	# Make sure the segment intersects this box
+	cdef double tlims[2]
+
+	intersections = { }
+	if not Box3D._intersection(tlims, box._lo, box._hi, start, end):
+		return intersections
+
+	if step <= 0: step = -step
+
+	# Keep track of accumulated and max length
+	cdef double t = max(0, tlims[0])
+	cdef double tmax = min(tlims[1], 1)
+	# This is a dynamically grown step into the next cell
+	cdef double cstep
+
+	cdef point lo, hi
+	cdef long i, j, k, ni, nj, nk
+
+	# Find the cell that contains the current test point
+	box._cellForPoint(&i, &j, &k, lintp(t, start, end))
+
+	while t < tmax:
+		box._boundsForCell(&lo, &hi, i, j, k)
+		if not Box3D._intersection(tlims, lo, hi, start, end):
+			stt = pt2tup(start)
+			edt = pt2tup(end)
+			raise ValueError(f'Segment {stt} -> {edt} does '
+						f'not intersect cell {(i,j,k)}')
+
+		if 0 <= i < box.nx and 0 <= j < box.ny and 0 <= k < box.nz:
+			# Record a hit inside the grid
+			key = i, j, k
+			val = max(0, tlims[0]), min(tlims[1], 1)
+			intersections[i,j,k] = val
+
+		# Advance t; make sure it lands in another cell
+		t = tlims[1]
+		cstep = step
+		while t < tmax:
+			# Find the cell containing the point
+			box._cellForPoint(&ni, &nj, &nk, lintp(t, start, end))
+			if i != ni or j != nj or k != nk:
+				# Found a new cell; record and move on
+				i, j, k = ni, nj, nk
+				break
+			# Otherwise, stuck in same cell; bump t
+			t += cstep
+			# Increase step for next time
+			cstep *= 2
+
+	return intersections
+
+
+@cython.cdivision(True)
+cdef int fresnel_weight(double *weight, Box3D box, Segment3D seg,
+		long *cell, double l, double tlen=-1.0, double slen=-1.0) nogil:
+	'''
+	For a given segment seg and a cell with indices { i, j, k }, calculate
+	the ratio D / r for a perpendicular distance D between the cell
+	midpoint and the segment and r is the Fresnel radius for a dominant
+	wavelength l evaluated at the projection of the cell midpoint on the
+	segment.
+
+	The Fresnel radius is evaluated assuming that seg is a piece of an
+	overall piecewise linear curve with length tlen, and seg starts at a
+	length slen along the overall curve. If tlen is negative, it will be
+	replaced by the value value seg.length. If slen is negative, a value of
+	0 will be used.
+
+	A cell midpoint is considered to be in the Fresnel zone if r is
+	nonzero, D / r is in the range [0, 1) and the projection of the
+	midpoint on seg is within the bounds of the segment.
+
+	If the midpoint is in the Fresnel zone, the value (1 - D / r) will be
+	stored in *weight and a 1 will be returned.
+
+	If the midpoint is not in the Fresnel zone, 0 will be returned and
+	weight will not be touched.
+	'''
+	cdef:
+		double rad, nval, oval
+		double pdist[2]
+		point mpt
+
+	if not (0 <= cell[0] < box.nx and
+			0 <= cell[1] < box.ny and 0 <= cell[2] < box.nz):
+		# Out-of-bounds cells are not in the zone
+		return 0
+
+	# Find the midpoint of the cell
+	mpt = box._cell2cart(cell[0] + 0.5, cell[1] + 0.5, cell[2] + 0.5)
+
+	# Find the (bounded) distance and the fractional projection
+	seg._ptdist(pdist, mpt, 1)
+
+	# Use sensible default values for curve length parameters
+	if tlen < 0: tlen = seg.length
+	if slen < 0: slen = 0.0
+
+	# Convert fractional distance to real distance along curve, bounded
+	pdist[1] = max(min(tlen, seg.length * pdist[1] + slen), 0)
+
+	# Calculate Fresnel radius
+	rad = sqrt(l * pdist[1] * (1.0 - pdist[1] / tlen))
+
+	if pdist[0] >= rad or almosteq(rad, 0.0):
+		# If point is beyond radius, or radius is zero, not in zone
+		return 0
+
+	weight[0] = 1 - pdist[0] / rad
+	return 1
+
+
 @cython.cdivision(True)
 @cython.wraparound(False)
 @cython.boundscheck(False)
@@ -1337,3 +1687,124 @@ def srcompensate(trpairs, elements, Box3D bx, Interpolator3D si, long N):
 		results.append((L * kval, L * ksval, pt2tup(dl),
 			pt2tup(ln), L * abs(gval - kval), L * abs(gsval - ksval)))
 	return results
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+def descent_walk(Box3D box, start, end, Interpolator3D field,
+		unsigned long cycles=1, double step=1.0, double tol=1e-3,
+		double c=0.5, double tau=0.5, bint report=False):
+	'''
+	Perform a steepest-descent walk from a point p through the given field
+	as an Interpolator3D instance capable of evaluating both the field, f,
+	and its gradient at arbitrary points within the given Box3D box.
+
+	The walk proceeds from some point p to another point q by performing an
+	Armijo backtracking line search along the negative gradient of the
+	field. Let h = norm(box.cell) be the diameter of a cell in this box, g
+	= grad(f)(p) be the gradent of f at p, and m = |g| be the norm of the
+	gradient. The search will select the next point q = (p - alpha * g /
+	m), where the factor alpha = tau**k * step * h for the smallest integer
+	k such that
+
+		f(p - alpha * g / m) - f(p) <= -alpha * c * m.
+
+	The walk terminates when one of:
+
+	1. A point q of the path comes within h of the point end,
+	2. The path runs off the edge of the grid,
+	3. The factor tau**k < tol when finding the next step, or
+	4. The same grid cell is encountered more than cycles times.
+
+	If the argument "report" is True, a second return value, a string with
+	value 'destination', 'boundary', 'stationary', or 'cycle' will be
+	returned to indicate the relevant termination criterion (1, 2, 3 or 4,
+	respectively).
+
+	A ValueError will be raised if the field has the wrong shape.
+	'''
+	cdef:
+		long nx, ny, nz
+		point p, t, gf, pd, np
+		long i, j, k, ti, tj, tk
+		double fv, tv, m, lim, alpha
+		unsigned long hc
+
+	# Make sure the field is double-array compatible
+	nx, ny, nz = field.shape
+	if (nx != box.nx or ny != box.ny or nz != box.nz):
+		raise ValueError('Shape of field must be %s' % (box.ncell,))
+
+	# Make sure the provided start and end points are valid
+	tup2pt(&p, start)
+	tup2pt(&t, end)
+
+	# Convert start and end points to grid coordinates
+	p = box._cart2cell(p.x, p.y, p.z)
+	t = box._cart2cell(t.x, t.y, t.z)
+
+	# Maximum permissible grid coordinates
+	nx, ny, nz = box.nx - 1, box.ny - 1, box.nz - 1
+
+	# Include the start point in the hit list
+	hits = [ box.cell2cart(p.x, p.y, p.z) ]
+	reason = None
+
+	# Keep track of encountered cells for cycle breaks
+	hitct = { }
+
+	# Find cell for target points (may be out of bounds)
+	ti, tj, tk = <long>t.x, <long>t.y, <long>t.z
+
+	while True:
+		# Find the cell for the current test point
+		i, j, k = <long>p.x, <long>p.y, <long>p.z
+
+		# Increment and check the cycle counter
+		hc = hitct.get((i,j,k), 0) + 1
+		if hc > cycles:
+			reason = 'cycle'
+			break
+		hitct[i,j,k] = hc
+
+		if ptdst(p, t) <= 1.0 or (ti == i and tj == j and tk == k):
+			# Close enough to destination to make a beeline
+			hits.append(box.cell2cart(t.x, t.y, t.z))
+			reason = 'destination'
+			break
+
+		# Find the function and gradient at the current point
+		if not field._evaluate(&fv, &gf, p):
+			# Point is out of bounds
+			reason = 'boundary'
+			break
+
+		# Find the magnitude of the gradient and the search direction
+		m = ptnrm(gf)
+		pd = scal(-1.0 / m, gf)
+
+		# Establish the baseline Armijo bound
+		lim = c * m
+		alpha = step
+
+		while alpha >= tol:
+			np = axpy(alpha, pd, p)
+			# Find the next value
+			if field._evaluate(&tv, NULL, np):
+				# Stop if Armijo condition is satisfied
+				if tv - fv <= -alpha * lim: break
+			# Test point out of bounds or failed to satisfy Armijo
+			alpha *= tau
+
+		if alpha < tol:
+			# Could not find suitable point
+			reason = 'stationary'
+			break
+
+		# Advance to and record the satisfactory test point
+		p = np
+		hits.append(box.cell2cart(p.x, p.y, p.z))
+
+	if report: return hits, reason
+	else: return hits
