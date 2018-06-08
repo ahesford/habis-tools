@@ -18,13 +18,20 @@ from numpy.linalg import norm
 from .habiconf import HabisConfigParser, HabisConfigError
 
 from libc.stdlib cimport rand, RAND_MAX, malloc, free
-from libc.math cimport sqrt
+from libc.math cimport sqrt, pi
 
 from pycwp.cytools.boxer import Box3D, Segment3D
 from pycwp.cytools.ptutils cimport *
 from pycwp.cytools.boxer cimport Box3D, Segment3D
 from pycwp.cytools.interpolator cimport Interpolator3D
 from pycwp.cytools.quadrature cimport Integrable, IntegrableStatus
+
+cdef inline double sqr(double x) nogil:
+	return x * x
+
+cdef extern from "complex.h":
+	double complex cexp(double complex)
+	double creal(double complex)
 
 ctypedef enum WNErrCode:
 	OK=0,
@@ -1300,9 +1307,9 @@ def fresnel_zone(p, Box3D box, double l):
 	tlen = 0.0
 	for sg in range(pts.shape[0] - 1):
 		sgp = sg + 1
-		tlen += sqrt((pts[sgp,0] - pts[sg,0])**2 +
-				(pts[sgp,1] - pts[sg,1])**2 +
-				(pts[sgp,2] - pts[sg,2])**2)
+		tlen += sqrt(sqr(pts[sgp,0] - pts[sg,0]) +
+				sqr(pts[sgp,1] - pts[sg,1]) +
+				sqr(pts[sgp,2] - pts[sg,2]))
 
 	# Copy the grid to an array
 	ngrid[0], ngrid[1], ngrid[2] = box.nx, box.ny, box.nz
@@ -1808,3 +1815,82 @@ def descent_walk(Box3D box, start, end, Interpolator3D field,
 
 	if report: return hits, reason
 	else: return hits
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
+	'''
+	For a linear segment p, eighter as a Segment3D instance or a sequence
+	[start, end] that is compatible with a Numpy array with shape (2, 3),
+	use fresnel_zone to identify the Fresnel zone of the path for a
+	wavelength l. The value n can be used to select higher-order (e.g., 2)
+	Fresnel zones by scaling the wavelength as (n * l).
+
+	For each cell in the Fresnel zone, compute the value of the Rytov
+	sensitivity kernel using the method outlined in the 24May18 JPA notes
+	"Rytov Tomographic Reconstruction" assuming a wavelength of l. The
+	Rytov kernel is smoothed by a Gaussian of width alpha.
+	'''
+	cdef:
+		point xt, xr, xp, u, xxt, xxr, ut, ur
+		double r, rr, rt, lt, lr, beta, k
+		double complex nu, mx, my, mz, mdx, mdy, mdz, delta, apb, phase
+
+
+	if isinstance(p, Segment3D):
+		tup2pt(&xt, p.start)
+		tup2pt(&xr, p.end)
+	else:
+		p = np.asarray(p, dtype='float64')
+		if p.shape != (2, 3):
+			raise ValueError('Segment p must be a Segment3D or have shape (2, 3)')
+		tup2pt(&xt, p[0])
+		tup2pt(&xr, p[1])
+
+	k = 2 * pi / l
+
+	u = axpy(-1, xt, xr)
+	r = ptnrm(u)
+	iscal(1 / r, &u)
+
+	# Build the Fresnel zone for the path
+	path = fresnel_zone(p, box, n * l)
+
+	# Find the Rytov coefficients for each cell in the zone
+	rytov = { }
+	for (ii, jj, kk) in path:
+		tup2pt(&xp, box.cell2cart(ii + 0.5, jj + 0.5, kk + 0.5))
+		xxt = axpy(-1, xt, xp)
+		xxr = axpy(-1, xr, xp)
+		rt = ptnrm(xxt)
+		rr = ptnrm(xxr)
+		lt = dot(u, xxt)
+		if lt < 0: lt = -lt
+		lr = dot(u, xxr)
+		if lr < 0: lr = -lr
+
+		beta = k / lt + k / lr
+		apb = alpha / (alpha + 1j * beta)
+		nu = 1j * beta * apb
+
+		ut = scal(1 / rt, xxt)
+		ur = scal(1 / rr, xxr)
+
+		mx = -k * nu * (ut.x + ur.x) / beta
+		my = -k * nu * (ut.y + ur.y) / beta
+		mz = -k * nu * (ut.z + ur.z) / beta
+
+		mdx = mx * box._cell.x / 2
+		mdy = my * box._cell.y / 2
+		mdz = mz * box._cell.z / 2
+
+		delta = (cexp(mdx) - cexp(-mdx)) / mx
+		delta *= (cexp(mdy) - cexp(-mdy)) / my
+		delta *= (cexp(mdz) - cexp(-mdz)) / mz
+
+		phase = apb * cexp(-k * nu * (rt + rr - r) / beta)
+		rytov[ii,jj,kk] = -(2 + rt / rr + rr / rt) * creal(delta * phase) / l / l
+
+	return rytov
