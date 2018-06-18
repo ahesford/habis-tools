@@ -1840,8 +1840,8 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 	is omitted in this function.
 	'''
 	cdef:
-		point xt, xr, xp, u, xxt, xxr, ut, ur
-		double r, rr, rt, lt, lr, beta, k, apbn, alphsq
+		point xt, xr, xp, u, xxt, xxr, ut, ur, dx
+		double r, rr, rt, lt, lr, beta, k
 		double complex nu, mx, my, mz, delta, apb, phase
 
 
@@ -1856,7 +1856,7 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 		tup2pt(&xr, p[1])
 
 	k = 2 * pi / l
-	alphsq = alpha * alpha
+	dx = scal(0.5, box._cell)
 
 	u = axpy(-1, xt, xr)
 	r = ptnrm(u)
@@ -1879,22 +1879,21 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 		if lr < 0: lr = -lr
 
 		beta = k / lt + k / lr
-		apbn = alphsq + beta * beta
-		apb = (alphsq / apbn) - (1j * alpha * beta / apbn)
-		nu = 1j * beta * apb
+		apb = alpha / (alpha + 1j * beta)
+		nu = -1j * k * apb
 
 		ut = scal(1 / rt, xxt)
 		ur = scal(1 / rr, xxr)
 
-		mx = -k * nu * (ut.x + ur.x) / beta
-		my = -k * nu * (ut.y + ur.y) / beta
-		mz = -k * nu * (ut.z + ur.z) / beta
+		mx = nu * (ut.x + ur.x)
+		my = nu * (ut.y + ur.y)
+		mz = nu * (ut.z + ur.z)
 
-		delta = 2 * csinh(0.5 * mx * box._cell.x) / mx
-		delta *= 2 * csinh(0.5 * my * box._cell.y) / my
-		delta *= 2 * csinh(0.5 * mz * box._cell.z) / mz
+		delta = 2 * csinh(mx * dx.x) / mx
+		delta *= 2 * csinh(my * dx.y) / my
+		delta *= 2 * csinh(mz * dx.z) / mz
 
-		phase = apb * cexp(-k * nu * (rt + rr - r) / beta)
+		phase = apb * cexp(nu * (rt + rr - r))
 		rytov[ii,jj,kk] = (2 + rt / rr + rr / rt) * creal(delta * phase)
 
 	return rytov
