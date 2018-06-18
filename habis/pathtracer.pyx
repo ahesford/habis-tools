@@ -31,7 +31,9 @@ cdef inline double sqr(double x) nogil:
 
 cdef extern from "complex.h":
 	double complex cexp(double complex)
+	double complex csinh(double complex)
 	double creal(double complex)
+	double cimag(double complex)
 
 ctypedef enum WNErrCode:
 	OK=0,
@@ -1832,11 +1834,15 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 	sensitivity kernel using the method outlined in the 24May18 JPA notes
 	"Rytov Tomographic Reconstruction" assuming a wavelength of l. The
 	Rytov kernel is smoothed by a Gaussian of width alpha.
+
+	** NOTE: The JPA kernel has a leading coefficient -k**2 / (2 * pi * c)
+	for a wave number k and a corresponding sound speed c; the coefficient
+	is omitted in this function.
 	'''
 	cdef:
 		point xt, xr, xp, u, xxt, xxr, ut, ur
-		double r, rr, rt, lt, lr, beta, k
-		double complex nu, mx, my, mz, mdx, mdy, mdz, delta, apb, phase
+		double r, rr, rt, lt, lr, beta, k, apbn, alphsq
+		double complex nu, mx, my, mz, delta, apb, phase
 
 
 	if isinstance(p, Segment3D):
@@ -1850,6 +1856,7 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 		tup2pt(&xr, p[1])
 
 	k = 2 * pi / l
+	alphsq = alpha * alpha
 
 	u = axpy(-1, xt, xr)
 	r = ptnrm(u)
@@ -1872,7 +1879,8 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 		if lr < 0: lr = -lr
 
 		beta = k / lt + k / lr
-		apb = alpha / (alpha + 1j * beta)
+		apbn = alphsq + beta * beta
+		apb = (alphsq / apbn) - (1j * alpha * beta / apbn)
 		nu = 1j * beta * apb
 
 		ut = scal(1 / rt, xxt)
@@ -1882,15 +1890,11 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 		my = -k * nu * (ut.y + ur.y) / beta
 		mz = -k * nu * (ut.z + ur.z) / beta
 
-		mdx = mx * box._cell.x / 2
-		mdy = my * box._cell.y / 2
-		mdz = mz * box._cell.z / 2
-
-		delta = (cexp(mdx) - cexp(-mdx)) / mx
-		delta *= (cexp(mdy) - cexp(-mdy)) / my
-		delta *= (cexp(mdz) - cexp(-mdz)) / mz
+		delta = 2 * csinh(0.5 * mx * box._cell.x) / mx
+		delta *= 2 * csinh(0.5 * my * box._cell.y) / my
+		delta *= 2 * csinh(0.5 * mz * box._cell.z) / mz
 
 		phase = apb * cexp(-k * nu * (rt + rr - r) / beta)
-		rytov[ii,jj,kk] = -(2 + rt / rr + rr / rt) * creal(delta * phase) / l / l
+		rytov[ii,jj,kk] = (2 + rt / rr + rr / rt) * creal(delta * phase)
 
 	return rytov
