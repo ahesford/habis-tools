@@ -18,7 +18,7 @@ from numpy.linalg import norm
 from .habiconf import HabisConfigParser, HabisConfigError
 
 from libc.stdlib cimport rand, RAND_MAX, malloc, free
-from libc.math cimport sqrt, pi
+from libc.math cimport sqrt, pi, fabs
 
 from pycwp.cytools.boxer import Box3D, Segment3D
 from pycwp.cytools.ptutils cimport *
@@ -32,7 +32,6 @@ cdef inline double sqr(double x) nogil:
 cdef extern from "complex.h":
 	double complex cexp(double complex)
 	double complex csinh(double complex)
-	double creal(double complex)
 	double cimag(double complex)
 
 ctypedef enum WNErrCode:
@@ -857,6 +856,7 @@ class PathTracer(object):
 
 		'bropts' (default: { }):
 		'sropts' (default: { }):
+		'ryopts' (default: { }):
 
 		  Dictionaries that provide keyword arguments for corresponding
 		  PathTracer init arguments.
@@ -873,8 +873,8 @@ class PathTracer(object):
 		try: keys = config.keys(psec)
 		except Exception as e: _throw('Unable to read configuration', e)
 
-		extra_keys = keys.difference({'prefilter', 'defval',
-			'interpolator', 'grid', 'atol', 'rtol', 'bropts', 'sropts'})
+		extra_keys = keys.difference({'prefilter', 'defval', 'atol',
+			'rtol', 'interpolator', 'grid', 'bropts', 'sropts', 'ryopts'})
 		if extra_keys:
 			first_key = next(iter(extra_keys))
 			raise HabisConfigError(f'Unrecognized key {first_key} '
@@ -904,6 +904,11 @@ class PathTracer(object):
 					default={ }, mapper=dict, checkmap=False)
 		except Exception as e: _throw('Invalid optional sropts', e)
 
+		try:
+			ryopts = config.get(psec, 'ryopts',
+					default={ }, mapper=dict, checkmap=False)
+		except Exception as e: _throw('Invalid optional ryopts', e)
+
 		try: defval = config.get(psec, 'defval', mapper=float, default=None)
 		except Exception as e: _throw('Invalid optional defval', e)
 
@@ -916,12 +921,12 @@ class PathTracer(object):
 		except Exception as e: _throw('Invalid optional prefilter', e)
 
 		# Create the instance
-		return cls(lo, hi, ncell, atol, rtol,
-				interpolator, defval, prefilter, bropts, sropts)
+		return cls(lo, hi, ncell, atol, rtol, interpolator,
+				defval, prefilter, bropts, sropts, ryopts)
 
 
-	def __init__(self, lo, hi, ncell, atol, rtol, interpolator,
-			defval=None, prefilter=None, bropts={ }, sropts={ }):
+	def __init__(self, lo, hi, ncell, atol, rtol, interpolator, defval=None,
+				prefilter=None, bropts={ }, sropts={ }, ryopts={ }):
 		'''
 		Define a grid (lo x hi) subdivided into ncell voxels on which a
 		slowness map should be interpreted, along with options for
@@ -943,6 +948,10 @@ class PathTracer(object):
 		WavefrontNormalIntegrator.pathint may be provided in the
 		dictionary sropts.
 
+		For Rytov-zone tracing, a Rytov kernel is created using
+		rytov_zone. Arguments that control the kernel (as described in
+		the docstring to self.trace) should be provided in ryopts.
+
 		For integration, a 3-D Numpy array is interpolated after an
 		optional prefiltering step according to the function built by
 		self.make_interpolator(interpolator, defval, prefilter). The
@@ -959,6 +968,7 @@ class PathTracer(object):
 		# Copy optional argument dicts
 		self.bropts = dict(bropts)
 		self.sropts = dict(sropts)
+		self.ryopts = dict(ryopts)
 
 		# Build the array interpolator
 		intp, fname = self.make_interpolator(interpolator, defval, prefilter)
@@ -1075,8 +1085,13 @@ class PathTracer(object):
 
 		If s is None, remove the stored interpolator.
 		'''
-		if s is None: self._slowness = None
-		else: self._slowness = self.interpolator(s)
+		if s is None:
+			self._slowness = None
+		else:
+			slowness = self.interpolator(s)
+			if slowness.shape != self.box.ncell:
+				raise ValueError('Shape of slowness must equal self.box.ncell')
+			self._slowness = slowness
 
 
 	def get_slowness(self):
@@ -1159,6 +1174,16 @@ class PathTracer(object):
 		gs and gr are grid coordinates of src and rcv, respectively,
 		according to self.box.cart2cell.
 
+		If mode is 'rytov', the integral is computed by building a
+		Rytov kernel for the path as
+
+		  kernel = rytov_zone([src, rcv], self.box, **self.ryopts)
+
+		Note that in 'rytov' mode, the dictionary self.ryopts must
+		provide the keyword arguments 'l' and 's' to rytov_zone.
+		Additional keyword arguments may be provided in self.ryopts to
+		override defaults for that function.
+
 		If self.get_slowness() returns None, this method will fail with
 		a TypeError.
 
@@ -1180,6 +1205,12 @@ class PathTracer(object):
 		behaves as if fresnel were zero; the uncompensated integral
 		will use Fresnel ellipsoids if fresnel is nonzero.
 
+		In 'rytov' mode, the path integral is a scalar value: the
+		integral of s times the (truncated) Rytov kernel. The value of
+		fresnel is ignored in 'rytov' mode, because the truncation
+		width for the Rytov kernel will be determined by the Rytov
+		wavelength l and the optional truncation width.
+
 		If intonly is True, only the path integral(s) will be returned.
 		Otherwise, the path will be marched through self.box to produce
 		a map (i, j, k) -> L, where (i, j, k) is a cell index in
@@ -1198,49 +1229,57 @@ class PathTracer(object):
 		if si is None:
 			raise TypeError('Call set_slowness() before calling trace()')
 
-		# Build the integrator for the image and verify shape
-		mode = str(mode).lower()
-		if mode == 'bent': integrator = PathIntegrator(si)
-		elif mode == 'straight': integrator = WavefrontNormalIntegrator(si)
-		else: raise ValueError('Argument "mode" must be "bent" or "straight"')
-
 		box = self.box
-		if integrator.data.shape != box.ncell:
-			raise ValueError('Shape of si must be %s' % (box.ncell,))
 
-		# Convert world coordinates to grid coordinates
-		gsrc = box.cart2cell(*src)
-		grcv = box.cart2cell(*rcv)
+		# Determine the tracing mode
+		mode = str(mode).lower()
+		if mode not in {'bent', 'straight', 'rytov'}:
+			raise ValueError(f'Unrecognized trace mode "{mode}"')
+
+		# Determine whether Rytov zones are to be used
+
+		if mode != 'rytov':
+			# Convert world coordinates to grid coordinates
+			gsrc = box.cart2cell(*src)
+			grcv = box.cart2cell(*rcv)
 
 		fresnel = max(fresnel or 0, 0)
+		zone_integral = (bool(fresnel) or mode == 'rytov')
 
 		if mode == 'bent':
 			# Use the bent-ray tracer to find an optimal path
+			integrator = PathIntegrator(si)
 			points, pint = integrator.minpath(gsrc, grcv,
 					self.atol, self.rtol, h=box.cell,
 					raise_on_fail=True, **self.bropts)
-			# Convert path to world coordinates for marching
+			# Convert bent path to world coordinates for marching
 			points = np.array([box.cell2cart(*p) for p in points])
 		else:
-			# Do path integration only without Fresnel zones
-			pint = integrator.pathint(gsrc, grcv, self.atol,
-					self.rtol, h=box.cell, **self.sropts)
-			# Straight path just has a start and end
+			# Points in straight or rytov is just a straight line
 			points = np.array([src, rcv], dtype=np.float64)
+			
+			if mode == 'straight':
+				# Find the path integral for the straight segment
+				integrator = WavefrontNormalIntegrator(si)
+				pint = integrator.pathint(gsrc, grcv, self.atol,
+						self.rtol, h=box.cell, **self.sropts)
 
 		# If only the integral is desired, just return it
-		if intonly and not fresnel: return pint
+		if intonly and not zone_integral: return pint
 
 		# Trace the path for returning
-		plens = self.pathmap(points, fresnel)
+		if mode == 'rytov':
+			plens = rytov_zone(points, box, **self.ryopts)
+		else: plens = self.pathmap(points, fresnel)
 
-		if fresnel:
+		if zone_integral:
 			# Reintegrate over Fresnel path
-			fint = fsum(v * si.evaluate(*k, grad=False)
-						for k, v in plens.items())
+			fint = si.wtsum(plens)
 			# Replace relevant integral with Fresnel integral
-			if mode == 'bent': pint = fint
-			else: pint = (pint[0], fint)
+			if mode == 'straight':
+				pint = (pint[0], fint)
+			else:
+				pint = fint
 
 			if intonly: return pint
 
@@ -1822,26 +1861,25 @@ def descent_walk(Box3D box, start, end, Interpolator3D field,
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
+def rytov_zone(p, Box3D box, double l, double s, double width=2, double alpha=pi/4.5):
 	'''
-	For a linear segment p, eighter as a Segment3D instance or a sequence
+	For a linear segment p, either as a Segment3D instance or a sequence
 	[start, end] that is compatible with a Numpy array with shape (2, 3),
-	use fresnel_zone to identify the Fresnel zone of the path for a
-	wavelength l. The value n can be used to select higher-order (e.g., 2)
-	Fresnel zones by scaling the wavelength as (n * l).
+	identify the Fresnel zone of the segment with wavelength (l * width)
+	and, for each cell in the Fresnel zone, compute the value of the Rytov
+	sensitivity kernel for a wavelength l using the method outlined in the
+	24May18 JPA notes "Rytov Tomographic Reconstruction" assuming a
+	wavelength of l. The Rytov kernel is smoothed by a Gaussian of width
+	alpha.
 
-	For each cell in the Fresnel zone, compute the value of the Rytov
-	sensitivity kernel using the method outlined in the 24May18 JPA notes
-	"Rytov Tomographic Reconstruction" assuming a wavelength of l. The
-	Rytov kernel is smoothed by a Gaussian of width alpha.
+	The kernel has a leading coefficient (-2 * pi * s / l**2), where s is
+	the inverse of the background sound speed.
 
-	** NOTE: The JPA kernel has a leading coefficient -k**2 / (2 * pi * c)
-	for a wave number k and a corresponding sound speed c; the coefficient
-	is omitted in this function.
+	The width and l parameters must be positive.
 	'''
 	cdef:
 		point xt, xr, xp, u, xxt, xxr, ut, ur, dx
-		double r, rr, rt, lt, lr, beta, k
+		double r, rr, rt, lt, lr, beta, k, fact
 		double complex nu, mx, my, mz, delta, apb, phase
 
 
@@ -1855,7 +1893,11 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 		tup2pt(&xt, p[0])
 		tup2pt(&xr, p[1])
 
+	if width < 0 or l < 0:
+		raise ValueError('Kernel wavelength l and truncation width must be positive')
+
 	k = 2 * pi / l
+	fact = s / l
 	dx = scal(0.5, box._cell)
 
 	u = axpy(-1, xt, xr)
@@ -1863,7 +1905,7 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 	iscal(1 / r, &u)
 
 	# Build the Fresnel zone for the path
-	path = fresnel_zone(p, box, n * l)
+	path = fresnel_zone(p, box, l * width)
 
 	# Find the Rytov coefficients for each cell in the zone
 	rytov = { }
@@ -1894,6 +1936,6 @@ def rytov_zone(p, Box3D box, double l, double n=2, double alpha=pi/4.5):
 		delta *= 2 * csinh(mz * dx.z) / mz
 
 		phase = apb * cexp(nu * (rt + rr - r))
-		rytov[ii,jj,kk] = (2 + rt / rr + rr / rt) * creal(delta * phase)
+		rytov[ii,jj,kk] = fact * (1 / rr + 1 / rt) * cimag(delta * phase)
 
 	return rytov
