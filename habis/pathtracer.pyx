@@ -1278,8 +1278,11 @@ class PathTracer(object):
 			# Replace relevant integral with Fresnel integral
 			if mode == 'straight':
 				pint = (pint[0], fint)
-			else:
+			elif mode == 'bent':
 				pint = fint
+			elif mode == 'rytov':
+				L = norm(points[1] - points[0])
+				pint = fint + L * self.ryopts['s']
 
 			if intonly: return pint
 
