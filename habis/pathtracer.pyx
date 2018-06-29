@@ -5,17 +5,21 @@ images.
 # Copyright (c) 2017 Andrew J. Hesford. All rights reserved.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
+import sys
+
 import cython
 cimport cython
 
 import numpy as np
 cimport numpy as np
 
+import warnings
+
 import math
 from math import fsum
 from numpy.linalg import norm
 
-from .habiconf import HabisConfigParser, HabisConfigError
+from .habiconf import HabisConfigParser, HabisConfigError, watchConfigErrors
 
 from libc.stdlib cimport rand, RAND_MAX, malloc, free
 from libc.math cimport sqrt, pi, fabs
@@ -25,6 +29,20 @@ from pycwp.cytools.ptutils cimport *
 from pycwp.cytools.boxer cimport Box3D, Segment3D
 from pycwp.cytools.interpolator cimport Interpolator3D
 from pycwp.cytools.quadrature cimport Integrable, IntegrableStatus
+
+def _path_as_array(path):
+	'''
+	Convert path, which should either be a Segment3D or an array-compatible
+	object, to an (L, 3) array of float values.
+	'''
+	if isinstance(path, Segment3D):
+		return np.asarray([path.start, path.end], dtype='float64')
+	else:
+		path = np.asarray(path, dtype='float64')
+		if path.ndim != 2 or path.shape[0] < 2 or path.shape[1] != 3:
+			raise ValueError('Shape of path must be (L >= 2, 3)')
+		return path
+
 
 cdef inline double sqr(double x) nogil:
 	return x * x
@@ -365,7 +383,6 @@ cdef class WavefrontNormalIntegrator(Integrable):
 			raise ValueError('Integration failed with error "%s"' % (errmsg,))
 
 		if ctx.bad_resets:
-			import warnings
 			warnings.warn('Waveform tracking unexpectedly reset '
 					'%d times; increase ncache to mitigate' % (ctx.bad_resets,))
 
@@ -414,7 +431,6 @@ cdef class PathIntegrator(Integrable):
 		Returns the optimum path and its path integral.
 		'''
 		from scipy.optimize import fmin_l_bfgs_b as bfgs
-		import warnings
 
 		points = np.asanyarray(points)
 		n, m = points.shape
@@ -445,18 +461,82 @@ cdef class PathIntegrator(Integrable):
 
 	@cython.wraparound(False)
 	@cython.boundscheck(False)
-	def minpath(self, start, end, double atol, double rtol, 
-			unsigned long nmax, double ptol, h=1.0,
-			double damp=0.0, double perturb=0.0, unsigned long nstart=1,
+	@staticmethod
+	def interpolate_path(path, unsigned long nstart):
+		'''
+		Given path as an array (or compatible) with shape (L >= 2, 3)
+		and a desired number of starting segments nstart, attempt to
+		interpolate the path to nstart segments.
+
+		If nstart == 0, no interpolation is performed, and the path is
+		returned as if nstart == L - 1.
+
+		If L == 2, the path will be interpolated by equally
+		distributing (nstart + 1) points along the linear segment from
+		path[0] to path[1].
+
+		If L > 2, no interpolation is performed regardless of the value
+		of nstart. A warning will be issued if nstart != L - 1.
+
+		A ValueError will be raised if path has the wrong shape or
+		nstart is 0.
+		'''
+		cdef:
+			double[:,:] dpath, points
+			long L
+
+		path = np.asarray(path, dtype=np.float64)
+		if path.ndim != 2 or path.shape[0] < 2 or path.shape[1] != 3:
+			raise ValueError('Argument "path" must have shape (L >= 2, 3)')
+
+		dpath = path
+		L = dpath.shape[0] - 1
+
+		if nstart < 1: nstart = L
+
+		if L > 1:
+			if nstart != L:
+				msg = f'{L} -> {nstart} interpolation is not supported'
+				warnings.warn(msg)
+			return path
+
+		# No need to interpolate if one segment is desired
+		if L == nstart: return path
+
+		# Interpolate the input segment as desired
+		points = np.zeros((nstart + 1, 3), dtype=np.float64, order='C')
+		for i in range(0, nstart + 1):
+			lf = <double>i / <double>nstart
+			bf = 1.0 - lf
+			points[i, 0] = bf * dpath[0,0] + lf * dpath[1,0]
+			points[i, 1] = bf * dpath[0,1] + lf * dpath[1,1]
+			points[i, 2] = bf * dpath[0,2] + lf * dpath[1,2]
+
+		return np.asarray(points)
+
+
+	@cython.wraparound(False)
+	@cython.boundscheck(False)
+	def minpath(self, path, double atol, double rtol, double ptol,
+			unsigned long nmax, h=1.0, double damp=0.0,
+			double perturb=0.0, unsigned long nstart=0,
 			bint warn_on_fail=True, bint raise_on_fail=False, **kwargs):
 		'''
-		Given 3-vectors start and end in grid coordinates, search for a
-		path between start and end that minimizes the path integral of
-		the function interpolated by self.data.
+		Given path, an array-compatible sequence with shape (L >= 2, 3)
+		that describes the nodes of a piecwise linear path in grid
+		coordinates, search for an optimal path between start and end
+		that minimizes the path integral of the function interpolated
+		by self.data. The path is first interpolated (if appropriate)
+		and the value of nstart will be replaced by by calling
 
-		The path will be iteratively divided into at most N segments,
+			path = self.interpolate_path(path, nstart)
+			nstart = path.shape[0] - 1
+
+		This path will be iteratively divided into at most N segments,
 		where N = 2**M * nstart for the smallest integer M that is not
-		less than nmax. With each iteration, an optimal path is sought
+		less than nmax.
+
+		With each iteration, an optimal path is sought
 		by minimizing the object
 
 			self.pathint(path, atol, rtol, h, damp=damp)
@@ -490,38 +570,21 @@ cdef class PathIntegrator(Integrable):
 		optimal path, along with the value of the path integral over
 		that path.
 		'''
-		# Validate end points
-		cdef point pt
-		tup2pt(&pt, start)
-		start = pt2tup(pt)
-		tup2pt(&pt, end)
-		end = pt2tup(pt)
-
-		if nstart < 1: raise ValueError('Value of nstart must be positive')
-
 		# Find the actual maximum number of segments
-		cdef unsigned long p = nstart, n, nnx, i, i2, im, im2
-		while 0 < p < nmax:
-			p <<= 1
-		if p < 1: raise ValueError('Value of nmax is out of bounds')
+		cdef:
+			unsigned long p, n, nnx, i, i2, im, im2
+			double[:,:] points, pbest, npoints
+			cdef double lf, nf, bf
 
 		# Make sure the optimizer is available
 		from scipy.optimize import fmin_l_bfgs_b as bfgs
-		import warnings
 
-		cdef double[:,:] points, pbest, npoints
+		# Interpolate the path as desired and note number of segments
+		points = self.interpolate_path(path, nstart)
+		n = p = points.shape[0] - 1
 
-		cdef double lf, nf, bf
-
-		# Start with the desired number of segments
-		points = np.zeros((nstart + 1, 3), dtype=np.float64, order='C')
-		for i in range(0, nstart + 1):
-			lf = <double>i / <double>nstart
-			bf = 1.0 - lf
-			points[i, 0] = bf * start[0] + lf * end[0]
-			points[i, 1] = bf * start[1] + lf * end[1]
-			points[i, 2] = bf * start[2] + lf * end[2]
-		n = nstart
+		while 0 < p < nmax: p <<= 1
+		if p < 1: raise ValueError('Value of nmax is out of bounds')
 
 		# Compute the starting cost (and current best)
 		if n > 2:
@@ -824,133 +887,86 @@ cdef class PathIntegrator(Integrable):
 		return IntegrableStatus.OK
 
 
-class PathTracer(object):
+class AbstractPathTracer(object):
 	'''
-	A class that encapsulates a 3-D gridded slowness image and allows
-	determination of an optimal propagation path.
+	An abstract class that encapsulates a 3-D gridded slowness image and
+	allows integrating paths through the slowness.
 	'''
+	habisConfigSectionName = 'pathtrace'
+
 	@classmethod
 	def fromconf(cls, config):
 		'''
-		Create a PathTracer instance from config, an instance of
-		habis.habiconf.HabisConfigParser. The parser should contain a
-		'pathtrace' section which defines the parameters of the
-		PathTracer instance. The options in the 'pathtrace' section
-		are:
+		Create an AbstractPathTracer instance from config, an instance of
+		habis.habiconf.HabisConfigParser. The parser will be converted
+		to an instance and kwargs dictionary using cls.kwargsFromConfig
+		and instantiated by calling subcls(**kwargs), where subcls is
+		the class returned by
 
-		'grid' (required, no default):
+		  getattr(module, instance.title() + 'PathTracer'),
 
-		  A dictionary of the form
-
-		    { 'lo': [lx,ly,lz], 'hi': [hx,hy,hz], 'ncell': [nx,ny,nz] }
-
-		  that defines 'lo', 'hi', and 'ncell' PathTracer init arguments.
-
-		'segmax' (default: 256):
-		'ptol' (default: 1e-3):
-		'atol' (default: 1e-6):
-		'rtol' (default: 1e-4):
-
-		  Floats that specify values for corresponding PathTracer init
-		  arguments.
-
-		'bropts' (default: { }):
-		'sropts' (default: { }):
-		'ryopts' (default: { }):
-
-		  Dictionaries that provide keyword arguments for corresponding
-		  PathTracer init arguments.
+		where module is the current module.
 		'''
+		# Try to determine an instance in the configuration
+		psec = cls.habisConfigSectionName
+		with watchConfigErrors('instance', psec):
+			instance = config.get(psec, 'instance', default='', mapper=str)
+			subcls = instance.title() + 'PathTracer'
+			subcls = getattr(sys.modules[__name__], subcls)
 
-		# Use this section for path tracing
-		psec = 'pathtrace'
-
-		def _throw(msg, e):
-			errmsg = msg + ' in [' + psec + ']'
-			raise HabisConfigError.fromException(errmsg, e)
-
-		# Verify that no extra configuration options are specified
 		try: keys = config.keys(psec)
-		except Exception as e: _throw('Unable to read configuration', e)
+		except Exception as e:
+			msg = f'Unable to read keys in config section {psec}'
+			raise HabisConfigError.fromException(msg, e)
 
-		extra_keys = keys.difference({'prefilter', 'defval', 'atol',
-			'rtol', 'interpolator', 'grid', 'bropts', 'sropts', 'ryopts'})
+		# Parse arguments for the instance
+		kwargs = subcls.kwargsFromConfig(config)
+
+		# Keys "instance" and "grid" are handled specially
+		extra_keys = keys.difference({'instance', 'grid'}.union(kwargs))
 		if extra_keys:
-			first_key = next(iter(extra_keys))
-			raise HabisConfigError(f'Unrecognized key {first_key} '
-						f'in configuration section [{psec}]')
-
-		try:
-			grid = config.get(psec, 'grid', mapper=dict, checkmap=False)
-			ncell = grid.pop('ncell')
-			lo = grid.pop('lo')
-			hi = grid.pop('hi')
-			if grid: raise KeyError('Invalid keyword ' + str(next(iter(grid))))
-		except Exception as e: _throw('Configuration must specify valid grid', e)
-
-		try: atol = config.get(psec, 'atol', mapper=float, default=1e-6)
-		except Exception as e: _throw('Invalid optional atol', e)
-
-		try: rtol = config.get(psec, 'rtol', mapper=float, default=1e-4)
-		except Exception as e: _throw('Invalid optional atol', e)
-
-		try:
-			bropts = config.get(psec, 'bropts',
-					default={ }, mapper=dict, checkmap=False)
-		except Exception as e: _throw('Invalid optional bropts', e)
-
-		try:
-			sropts = config.get(psec, 'sropts',
-					default={ }, mapper=dict, checkmap=False)
-		except Exception as e: _throw('Invalid optional sropts', e)
-
-		try:
-			ryopts = config.get(psec, 'ryopts',
-					default={ }, mapper=dict, checkmap=False)
-		except Exception as e: _throw('Invalid optional ryopts', e)
-
-		try: defval = config.get(psec, 'defval', mapper=float, default=None)
-		except Exception as e: _throw('Invalid optional defval', e)
-
-		try: interpolator = config.get(psec, 'interpolator')
-		except Exception as e: _throw('Configuration must specify valid interpolator', e)
-
-		try:
-			prefilter = config.get(psec, 'prefilter',
-					default=None, mapper=dict, checkmap=False)
-		except Exception as e: _throw('Invalid optional prefilter', e)
+			msg = (f'Unprocessed key "{next(iter(extra_keys))}" '
+					f'in configuration section "{psec}"')
+			raise HabisConfigError(msg)
 
 		# Create the instance
-		return cls(lo, hi, ncell, atol, rtol, interpolator,
-				defval, prefilter, bropts, sropts, ryopts)
+		return subcls(**kwargs)
 
 
-	def __init__(self, lo, hi, ncell, atol, rtol, interpolator, defval=None,
-				prefilter=None, bropts={ }, sropts={ }, ryopts={ }):
+	@classmethod
+	def kwargsFromConfig(cls, config):
+		'''
+		From config, an instance of habis.habiconf.HabisConfigParser,
+		build a kwargs dictionary that maps values in the configuration
+		file to constructor arguments for this class.
+		'''
+		psec = cls.habisConfigSectionName
+
+		kwargs = { }
+
+		with watchConfigErrors('grid', psec):
+			grid = config.get(psec, 'grid', mapper=dict, checkmap=False)
+			for kw in ['ncell', 'lo', 'hi']:
+				kwargs[kw] = grid.pop(kw)
+			if grid: raise KeyError(f'Invalid keyword {next(iter(grid))}')
+
+		with watchConfigErrors('defval', psec, False):
+			kwargs['defval'] = config.get(psec, 'defval', mapper=float)
+
+		with watchConfigErrors('interpolator', psec):
+			kwargs['interpolator'] = config.get(psec, 'interpolator')
+
+		with watchConfigErrors('prefilter', psec, False):
+			kwargs['prefilter'] = config.get(psec, 'prefilter',
+							mapper=dict, checkmap=False)
+
+		return kwargs
+
+
+	def __init__(self, lo, hi, ncell, interpolator, defval=None, prefilter=None):
 		'''
 		Define a grid (lo x hi) subdivided into ncell voxels on which a
-		slowness map should be interpreted, along with options for
-		tracing straight-ray or bent-ray paths through slowness models.
-
-		The parameters atol and rtol specify, respectively, absolute
-		and relative integration tolerances for both straight-ray and
-		bent-ray integration methods.
-
-		For bent-ray tracing tracing, PathIntegrator.minpath is used to
-		find an optimal path. Keyword arguments for the method
-		PathIntegrator.minpath may be provided in the dictionary
-		bropts; bropts must contain at least the "nmax" and "ptol"
-		keys if bent-ray tracing is to be used.
-
-		For straight-ray tracing, WavefrontNormalIntegrator.pathint is
-		used to compute compensated and uncompensated straight-ray
-		integrals. Optional keyword arguments to the method
-		WavefrontNormalIntegrator.pathint may be provided in the
-		dictionary sropts.
-
-		For Rytov-zone tracing, a Rytov kernel is created using
-		rytov_zone. Arguments that control the kernel (as described in
-		the docstring to self.trace) should be provided in ryopts.
+		slowness map should be interpreted.
 
 		For integration, a 3-D Numpy array is interpolated after an
 		optional prefiltering step according to the function built by
@@ -961,21 +977,13 @@ class PathTracer(object):
 		# Define the grid for images
 		self.box = Box3D(lo, hi, ncell)
 
-		# Copy integration parameters
-		self.atol = float(atol)
-		self.rtol = float(rtol)
-
-		# Copy optional argument dicts
-		self.bropts = dict(bropts)
-		self.sropts = dict(sropts)
-		self.ryopts = dict(ryopts)
-
 		# Build the array interpolator
 		intp, fname = self.make_interpolator(interpolator, defval, prefilter)
 		self.interpolator, self.prefilter = intp, fname
 
 		# By default, there is no slowness
 		self._slowness = None
+
 
 	@staticmethod
 	def make_interpolator(interpolator, defval=None, prefilter=None):
@@ -1101,45 +1109,20 @@ class PathTracer(object):
 		return self._slowness
 
 
-	def pathmap(self, points, fresnel=0):
+	def pathmap(self, path):
 		'''
-		For an L-by-3 array (or compatible sequence) or points in world
-		coordinates, march the path through self.box to produce and
-		return a map (i, j, k) -> L, where (i, j, k) is a cell index in
-		self.box and L is the accumulated length of the path defined by
-		the points.
-
-		If fresnel is nonzero, it must be positive and will define the
-		radius of the Fresnel ellipsoid (possibly bent, if points
-		contains more than two points) into which the path will be
-		expanded.
+		Using the pathmarch() function, march the provided path through
+		self.box and return a map (i, j, k) -> L, where (i, j, k) is an
+		index into self.box and L is the length of the path (over all
+		segments) through that cell.
 		'''
-		fresnel = float(fresnel or 0)
-		if fresnel < 0:
-			raise ValueError('Argument "fresnel" must be nonnegative')
-
-		points = np.asarray(points, dtype=np.float64)
-		if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] < 2:
-			raise ValueError('Argument "points" must have shape (L, 3), L >= 2')
-
-		if fresnel:
-			# Trace the Fresnel zone through the box
-			plens = fresnel_zone(points, self.box, fresnel)
-
-			# Compute the total path length
-			tlen = fsum(norm(r - l) for r, l in zip(points, points[1:]))
-
-			# Convert Fresnel-zone weights to integral contributions
-			wtot = fsum(plens.values())
-			return { k: tlen * v / wtot for k, v in plens.items() }
-
-		# March the points, ensure single-segment march still a list
-		marches = pathmarch(points, self.box)
-		if points.shape[0] < 3: marches = [marches]
+		# March the path, forcing the output to be a list of maps
+		path = _path_as_array(path)
+		marches = pathmarch(path, self.box, force_list=True)
 
 		# Accumulate the length of each path in each cell
 		plens = { }
-		for (st, ed), march in zip(zip(points, points[1:]), marches):
+		for (st, ed), march in zip(zip(path, path[1:]), marches):
 			# Compute whol length of this path segment
 			dl = norm(ed - st)
 			for cell, (tmin, tmax) in march.items():
@@ -1156,137 +1139,317 @@ class PathTracer(object):
 		return { k: fsum(v) for k, v in plens.items() }
 
 
-	def trace(self, src, rcv, fresnel=0, intonly=False, mode='bent'):
+	def trace(self, path, intonly=False):
 		'''
-		Given a 3-D Numpy array s, a source with world coordinates src
-		and a receiver with world coordinates rcv, compute a path
-		integral from src to rcv using, when mode is 'bent',
+		Perform a simple integral through self.get_slowness(), which
+		must not be None, over the given path as a Segment3D or an
+		array-like object of shape (L >= 2, 3). The integral is a
+		simple product of the operator implied by self.pathmap and the
+		slowess.
 
-		  PathIntegrator(si).minpath(gs, gr, self.atol,
-				self.rtol, h=self.box.cell, **self.bropts),
-
-		or, when mode is 'straight',
-
-		  WavefrontNormalIntegrator(si).pathint(gs, gr, self.atol,
-				self.rtol, h=self.box.cell, **self.sropts),
-
-		where si is the interpolator returned by self.get_slowness, and
-		gs and gr are grid coordinates of src and rcv, respectively,
-		according to self.box.cart2cell.
-
-		If mode is 'rytov', the integral is computed by building a
-		Rytov kernel for the path as
-
-		  kernel = rytov_zone([src, rcv], self.box, **self.ryopts)
-
-		Note that in 'rytov' mode, the dictionary self.ryopts must
-		provide the keyword arguments 'l' and 's' to rytov_zone.
-		Additional keyword arguments may be provided in self.ryopts to
-		override defaults for that function.
-
-		If self.get_slowness() returns None, this method will fail with
-		a TypeError.
-
-		Note that, in 'bent' mode, the mandatory parameters 'ptol' and
-		'nmax' of PathIntegrator.minpath are required to be in
-		self.bropts as keyword arguments.
-
-		In 'bent' mode, the path integral is a scalar value: the
-		integral from src to rcv through an optimized path. If fresnel
-		is a positive numeric value, rays in 'bent' mode will be
-		expanded into ellipsoids that represent the first Fresnel zone
-		for a dominant wavelength specified as the value of fresnel, in
-		the same units as self.box.cell.
-
-		In 'straight' mode, the path integral is a 2-tuple (c, s),
-		where c is the wavefront-compensated path integral and s is the
-		uncompensated straight-ray integral. Compensated straight-ray
-		integrals are incompatible with Fresnel ellipsoids, so c always
-		behaves as if fresnel were zero; the uncompensated integral
-		will use Fresnel ellipsoids if fresnel is nonzero.
-
-		In 'rytov' mode, the path integral is a scalar value: the
-		integral of s times the (truncated) Rytov kernel. The value of
-		fresnel is ignored in 'rytov' mode, because the truncation
-		width for the Rytov kernel will be determined by the Rytov
-		wavelength l and the optional truncation width.
-
-		If intonly is True, only the path integral(s) will be returned.
-		Otherwise, the path will be marched through self.box to produce
-		a map (i, j, k) -> L, where (i, j, k) is a cell index in
-		self.box and L is the accumulated length of the optimum path
-		through that cell. The return value in this case will be
-		(pathmap, points, pathint), where pathmap is the cell-to-length
-		map, points is an N-by-3 array containing the world coordinates
-		of the N (>= 2) points that define the traced path and pathint
-		is the single-value or double-value path integral.
-
-		Any Exceptions raised by WavefrontNormalIntegrator.pathint or
-		PathIntegrator.minpath will not be caught by this method.
+		If intonly is True, the integral is returned alone. Othewise,
+		the return value will be (pathmap, integral), where pathmap is
+		the map returned by self.pathmap(path).
 		'''
-		# Grab the interpolator
 		si = self.get_slowness()
 		if si is None:
 			raise TypeError('Call set_slowness() before calling trace()')
 
-		box = self.box
+		pmap = self.pathmap(path)
+		pint = si.wtsum(pmap)
+		if intonly: return pint
+		return pmap, pint
 
-		# Determine the tracing mode
-		mode = str(mode).lower()
-		if mode not in {'bent', 'straight', 'rytov'}:
-			raise ValueError(f'Unrecognized trace mode "{mode}"')
 
-		# Determine whether Rytov zones are to be used
+class PathTracer(AbstractPathTracer):
+	'''
+	A subclass of AbstractPathTracer to implement tracing along (possibly
+	bent) paths through inhomogeneous media, with the option to use Fresnel
+	ellipsoids as fat rays.
+	'''
+	@classmethod
+	def kwargsFromConfig(cls, config):
+		'''
+		Specialize the kwargs dictionary built by the method
+		super().kwargsFromConfig(config) to construct arguments for
+		instantiation of a PathTracer.
+		'''
+		psec = cls.habisConfigSectionName
 
-		if mode != 'rytov':
-			# Convert world coordinates to grid coordinates
-			gsrc = box.cart2cell(*src)
-			grcv = box.cart2cell(*rcv)
+		kwargs = super().kwargsFromConfig(config)
 
-		fresnel = max(fresnel or 0, 0)
-		zone_integral = (bool(fresnel) or mode == 'rytov')
+		for tol in ('atol', 'rtol'):
+			with watchConfigErrors(tol, psec):
+				kwargs[tol] = config.get(psec, tol, mapper=float)
 
-		if mode == 'bent':
-			# Use the bent-ray tracer to find an optimal path
-			integrator = PathIntegrator(si)
-			points, pint = integrator.minpath(gsrc, grcv,
-					self.atol, self.rtol, h=box.cell,
-					raise_on_fail=True, **self.bropts)
-			# Convert bent path to world coordinates for marching
-			points = np.array([box.cell2cart(*p) for p in points])
+		kws = ('ptol', 'fresnel', 'nmax')
+		tps = (float, float, int)
+		for kw, typ in zip(kws, tps):
+			with watchConfigErrors(kw, psec, False):
+				kwargs[kw] = config.get(psec, kw, mapper=typ)
+
+		for kw in ('pathint_opts', 'minpath_opts'):
+			with watchConfigErrors(kw, psec, False):
+				kwargs[kw] = config.get(psec, kw,
+						mapper=dict, checkmap=False)
+
+		return kwargs
+
+
+	def __init__(self, atol, rtol, ptol=0, nmax=1, fresnel=None,
+			pathint_opts={}, minpath_opts={}, *args, **kwargs):
+		'''
+		Define an AbstractPathTracer as
+		
+			super().__init__(*args, **kwargs).
+
+		The absolute (atol) and relative (rtol) integration tolerances
+		(as positive floats), together with extra keyword arguments in
+		pathint_opts, govern the use of PathIntegrator.pathint to
+		evaluate integrals through slowness models along paths.
+
+		The parameters ptol and nmax control path optimization when
+		tracing. The value of ptol must be a float, while the value of
+		nmax must be a positive integer. If ptol <= 0 or nmax == 1, no
+		path optimization will be attemped, and path integrals computed
+		with self.trace will use paths as defined. Whenever ptol > 0
+		and nmax > 1, any input path will first by optimized with
+		PathIntegrator.minpath, passing additional keyword arguments
+		through minpath_opts.
+
+		An optional Fresnel width fresnel, which must be None or a
+		nonnegative integer, allows traced paths to be represented as
+		zero-width rays or Fresnel ellipsoids with the associated width
+		parameter.
+		'''
+		# Configure specific options
+		tolerances = tuple(float(v) for v in (atol, rtol))
+		if any(v <= 0 for v in tolerances):
+			raise ValueError('Tolerances "atol" and "rtol" must be positive')
+		self.atol, self.rtol = tolerances
+
+		self.ptol = float(ptol)
+		if self.ptol < 0:
+			raise ValueError('Path tolerance "ptol" must be nonnegative')
+
+		self.nmax = int(nmax)
+		if self.nmax < 1:
+			raise ValueError('Maximum segment count "nmax" must be positive')
+
+		self.fresnel = float(fresnel or 0)
+		if self.fresnel < 0:
+			raise ValueError('Fresnel width must be None or nonnegative')
+
+		self.pathint_opts = dict(pathint_opts)
+		self.minpath_opts = dict(minpath_opts)
+
+		# Configure common tracer parameters
+		super().__init__(*args, **kwargs)
+
+
+	def pathmap(self, path):
+		'''
+		If self.fresnel is not positive, return the output of
+
+			super().pathmap(path).
+
+		Otherwise, compute the Fresnel zone for the given path as
+
+			fresnel_zone(path, self.box, self.fresnel)
+
+		and return a map (i, j, k) -> W, where the weight W is the
+		total length of the path multiplied by the ratio of the Fresnel
+		weight at cell (i, j, k) to the sum of the total Fresnel
+		weights in the zone.
+		'''
+		if self.fresnel > 0:
+			# Trace the Fresnel zone through the box
+			path = _path_as_array(path)
+			plens = fresnel_zone(path, self.box, self.fresnel)
+
+			# Compute the total path length
+			tlen = fsum(norm(r - l) for r, l in zip(path, path[1:]))
+
+			# Convert Fresnel-zone weights to integral contributions
+			wtot = fsum(plens.values())
+			return { k: tlen * v / wtot for k, v in plens.items() }
 		else:
-			# Points in straight or rytov is just a straight line
-			points = np.array([src, rcv], dtype=np.float64)
-			
-			if mode == 'straight':
-				# Find the path integral for the straight segment
-				integrator = WavefrontNormalIntegrator(si)
-				pint = integrator.pathint(gsrc, grcv, self.atol,
-						self.rtol, h=box.cell, **self.sropts)
+			return super().pathmap(path)
 
-		# If only the integral is desired, just return it
-		if intonly and not zone_integral: return pint
 
-		# Trace the path for returning
-		if mode == 'rytov':
-			plens = rytov_zone(points, box, **self.ryopts)
-		else: plens = self.pathmap(points, fresnel)
+	def trace(self, path, intonly=False):
+		'''
+		Given path, an array-like sequence with shape (L >= 2, 3) or a
+		Segment3D instance (which is treated as [path.start, path.end])
+		that describes the world coordinates of nodes that define a
+		piecewise linear path, evaluate the integral of a slowness
+		self.get_slowness() (which must not be None) along the path.
 
-		if zone_integral:
-			# Reintegrate over Fresnel path
-			fint = si.wtsum(plens)
-			# Replace relevant integral with Fresnel integral
-			if mode == 'straight':
-				pint = (pint[0], fint)
-			elif mode == 'bent':
-				pint = fint
-			elif mode == 'rytov':
-				L = norm(points[1] - points[0])
-				pint = fint + L * self.ryopts['s']
+		Where necessary, path integrals are evaluated by an instance
 
+		  pi = PathIntegrator(self.get_slowness()).
+
+		If self.ptol > 0 and self.nmax > 1, the path is first optimized
+		by calling
+
+		  pi.minpath(gpoints, self.atol, self.rtol, self.ptol,
+		  		self.nmax, h=self.box.cell, **self.minpath_opts),
+
+		where gpoints is the path converted to grid coordinates. Note
+		that minpath provides the value of the integral as well as the
+		optimal path.
+
+		If path optimization is not used and Fresnel zones are not
+		enabled, the path integral is evaluated by calling
+
+		  pi.pathint(gpoints, self.atol, self.rtol,
+		  		h=self.box.cell, **self.pathint_opts).
+
+		If self.fresnel is True, the integral of the path (either as
+		input or as produced by pi.minpath) is replaced by the product
+		of the map self.pathmap(path) and the slowness model.
+
+		If intonly is True, only the integral will be returned.
+		Otherwise, the return value will be (pathmap, integral), where
+		pathmap = self.pathmap(path).
+		'''
+		si = self.get_slowness()
+		if si is None:
+			raise TypeError('Call set_slowness() before calling trace()')
+
+		path = _path_as_array(path)
+
+		# Convert the path to grid coordinates
+		box = self.box
+		gpts = np.array([box.cart2cell(*p) for p in path], dtype='float64')
+
+		if self.ptol > 0 and self.nmax > 1:
+			# Replace input path with optimized path
+			integrator = PathIntegrator(si)
+			gpts, pint = integrator.minpath(gpts, self.atol,
+					self.rtol, self.ptol, self.nmax,
+					h=self.box.cell, **self.minpath_opts)
+			if intonly: return pint
+			path = np.array([box.cell2cart(*p) for p in gpts])
+		elif not self.fresnel:
+			# Perform path integral when Fresnel zones are not used
+			integrator = PathIntegrator(si)
+			pint = integrator.pathint(gpts, self.atol, self.rtol,
+						h=self.box.cell, **self.pathint_opts)
 			if intonly: return pint
 
-		return plens, points, pint
+		# The pathmap is required
+		pmap = self.pathmap(path)
+
+		if self.fresnel:
+			# Perform the integral over the Fresnel zone
+			pint = si.wtsum(pmap)
+			if intonly: return pint
+
+		return pmap, pint
+
+
+	def compensated_trace(self, path, intonly=False):
+		'''
+		Trace the given path through self.get_slowness(), which must
+		not be None, to return both compensated and uncompensated
+		integrals over the path. The integrals are computed as
+
+		  wi = WavefrontNormalIntegrator(self.get_slowness())
+		  wi.pathint(gsrc, grcv, self.atol, self.rtol,
+		  		h=self.box.cell, **self.pathint_opts),
+
+		where gsrc and grcv are the grid coordinates of the start and
+		end of the path.
+
+		The path must be a single Segment3D or array-compatible object
+		with shape (2, 3).
+
+		The values of self.ptol, self.nmax and self.fresnel are ignored
+		for this method.
+
+		If intonly is True, return (cval, uval), which are the
+		compensated and uncompensated path integrals, respectively.
+		Otherwise, return ((cval, uval), pathmap), where pathmap is the
+		map returned by self.pathmap(path).
+		'''
+		path = _path_as_array(path)
+		if path.shape != (2, 3):
+			err = 'Compensated tracing only works for single-segment paths'
+			raise NotImplementedError(err)
+
+		gsrc = self.box.cart2cell(*path[0])
+		grcv = self.box.cart2cell(*path[1])
+
+		si = self.get_slowness()
+		if si is None:
+			raise TypeError('Call set_slowness() before calling compensated_trace()')
+
+		integrator = WavefrontNormalIntegrator(si)
+		cval, uval = integrator.pathint(gsrc, grcv, self.atol,
+				self.rtol, h=self.box.cell, **self.pathint_opts)
+
+		if intonly: return (cval, uval)
+		return (cval, uval), self.pathmap(path)
+
+
+class RytovPathTracer(AbstractPathTracer):
+	'''
+	A subclass of AbstractPathTracer to implement straight-ray tracing
+	using Rytov kernels for fat rays.
+	'''
+	@classmethod
+	def kwargsFromConfig(cls, config):
+		'''
+		Specialize the kwargs dictionary built by the method
+		super().kwargsFromConfig(config) to construct arguments for
+		instantiation of a RytovPathTracer.
+		'''
+		psec = cls.habisConfigSectionName
+
+		kwargs = super().kwargsFromConfig(config)
+
+		for kw in ('l', 's'):
+			with watchConfigErrors(kw, psec):
+				kwargs[kw] = config.get(psec, kw, mapper=float)
+
+		with watchConfigErrors('rytov_opts', psec, False):
+			kwargs['rytov_opts'] = config.get(psec, 'rytov_opts',
+							mapper=dict, checkmap=False)
+
+		return kwargs
+
+
+	def __init__(self, l, s, rytov_opts={}, *args, **kwargs):
+		'''
+		Define a PathTracer as super().__init__(*args, **kwargs).
+
+		The wavelength l and slowness s, as positive floats, are passed
+		as corresponding parameters to rytov_zone to convert a straight
+		path to a Rytov zone. Additional rytov_zone keyword arguments
+		may be provided in rytov_opts.
+		'''
+		# Configure specific options
+		self.l = float(l)
+		if self.l <= 0: raise ValueError('Wavelength "l" must be positive')
+
+		self.s = float(s)
+		if self.s <= 0: raise ValueError('Slowness "s" must be positive')
+
+		self.rytov_opts = dict(rytov_opts)
+
+		super().__init__(*args, **kwargs)
+
+
+	def pathmap(self, path):
+		'''
+		For a given path, which must be a single Segment3D or an
+		array-like object of shape (2, 3), return a map (i, j, k) -> L
+		as computed by
+
+		  rytov_zone(path, self.box, self.l, self.s, **self.rytov_opts).
+		'''
+		return rytov_zone(path, self.box, self.l, self.s, **self.rytov_opts)
 
 
 @cython.wraparound(False)
@@ -1320,10 +1483,7 @@ def fresnel_zone(p, Box3D box, double l):
 	'''
 	cdef double[:,:] pts
 
-	if isinstance(p, Segment3D):
-		pts = np.array([p.start, p.end], dtype=np.float64)
-	else:
-		pts = np.asarray(p, dtype=np.float64)
+	pts = _path_as_array(p)
 
 	if pts.shape[0] < 2 or pts.shape[1] != 3:
 		raise ValueError('Argument "p" must be a Segment3D or have shape (N,3), N >= 2')
@@ -1453,22 +1613,24 @@ def fresnel_zone(p, Box3D box, double l):
 	return hits
 
 
-def pathmarch(p, Box3D box, double step=REALEPS):
+def pathmarch(p, Box3D box, double step=REALEPS, bint force_list=False):
 	'''
 	March along the given p, which is either a single Segment3D instance or
 	a 2-D array of shape (N, 3), where N >= 2, that defines control
 	points of a piecewise linear curve.
 
-	A march of a single linear segment accumulates a map of the form (i, j,
-	k) -> (tmin, tmax), where (i, j, k) is the index of a cell that
+	A march of a single linear segment accumulates a map of the form
+	(i, j, k) -> (tmin, tmax), where (i, j, k) is the index of a cell that
 	intersects the segment and (tmin, tmax) are the minimum and maximum
 	lengths (as fractions of the segment length) along which the segment
 	and cell intersect.
 
-	If p is a Segment3D instance or an array of shape (2, 3), a single map
-	will be returned. If p is an array of shape (N, 3) for N > 2, a list of
-	(N - 1) of maps will be returned, with maps[i] providing the
-	intersection map for the segment from p[i] to p[i+1].
+	If p is a Segment3D instance, it behaves as if it were an array
+	[p.start, p.end]. When the input behaves as an array of shape (2, 3)
+	and force_list is False, a single map will be returned. Otherwise, when
+	p behaves as an array of shape (N, 3), a list of (N - 1) of maps will
+	be returned, with maps[i] providing the intersection map for the
+	segment from p[i] to p[i+1].
 
 	As a segment exits each encountered cell, a step along the segment is
 	taken to advance into another intersecting cell. The length of the step
@@ -1487,7 +1649,9 @@ def pathmarch(p, Box3D box, double step=REALEPS):
 
 	if isinstance(p, Segment3D):
 		seg = <Segment3D>p
-		return segmarch(seg._start, seg._end, box, step)
+		path = segmarch(seg._start, seg._end, box, step)
+		if force_list: return [path]
+		else: return path
 
 	pts = np.asarray(p, dtype=np.float64)
 	if pts.shape[0] < 2 or pts.shape[1] != 3:
@@ -1495,11 +1659,6 @@ def pathmarch(p, Box3D box, double step=REALEPS):
 
 	# Capture the start of the first segment
 	s = packpt(pts[0,0], pts[0,1], pts[0,2])
-
-	if pts.shape[0] == 2:
-		# Special case: a single segment in array form
-		e = packpt(pts[1,0], pts[1,1], pts[1,2])
-		return segmarch(s, e, box, step)
 
 	# Accumulate results for multiple segments
 	results = [ ]
@@ -1511,6 +1670,10 @@ def pathmarch(p, Box3D box, double step=REALEPS):
 		results.append(segmarch(s, e, box, step))
 		# Move end to start for next round
 		s = e
+
+	# Special case: a single path returns a single map unless lists are forced
+	if pts.shape[0] == 2 and not force_list:
+		return results[0]
 
 	return results
 

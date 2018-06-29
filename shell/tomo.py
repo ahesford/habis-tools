@@ -36,7 +36,8 @@ from pycwp import filter as pcwfilter
 
 from habis.pathtracer import PathTracer, TraceError
 
-from habis.habiconf import HabisConfigParser, HabisConfigError, matchfiles
+from habis.habiconf import (HabisConfigParser, 
+				HabisConfigError, matchfiles, watchConfigErrors)
 from habis.formats import loadmatlist as ldmats, savez_keymat
 from habis.mpdfile import flocshare, getatimes
 from habis.mpfilter import parfilter
@@ -118,24 +119,18 @@ class TomographyTask(object):
 			np.save(fname, s.astype(np.float32))
 
 
-
-class StraightRayTracer(TomographyTask):
+class CSRTomographyTask(TomographyTask):
 	'''
-	A subclass of TomographyTask to perform straight-ray path tracing.
+	A subclass of TomographyTask to perform compensated straight-ray path
+	tracing.
 	'''
-	def __init__(self, elements, atimes, tracer,
-			fresnel=None, comm=MPI.COMM_WORLD):
+	def __init__(self, elements, atimes, tracer, comm=MPI.COMM_WORLD):
 		'''
-		Create a worker for straight-ray tomography on the element
-		pairs present in atimes.
-
-		If Fresnel is not None, it should be a positive floating-point
-		value. In this case, rays are represented as ellipsoids that
-		embody the first Fresnel zone for a principal wavelength of
-		fresnel (in units that match the units of tracer.box.cell).
+		Create a worker for compensated straight-ray tomography on the
+		element pairs present in atimes.
 		'''
 		# Initialize the data and communicator
-		super(StraightRayTracer, self).__init__(elements, atimes, tracer, comm)
+		super().__init__(elements, atimes, tracer, comm)
 
 		# Figure out the grid dimensions
 		ncell = tracer.box.ncell
@@ -147,8 +142,8 @@ class StraightRayTracer(TomographyTask):
 		self.trpairs = [ ]
 
 		for i, ((t, r), v) in enumerate(sorted(self.atimes.items())):
-			src, rcv = self.elements[t], self.elements[r]
-			plens = tracer.pathmap((src, rcv), fresnel)
+			path = self.elements[t], self.elements[r]
+			plens = tracer.pathmap(path)
 			for cidx, l in plens.items():
 				data.append(l)
 				indices.append(np.ravel_multi_index(cidx, ncell))
@@ -159,7 +154,7 @@ class StraightRayTracer(TomographyTask):
 		self.pathmat = csr_matrix((data, indices, indptr),
 						shape=mshape, dtype=np.float64)
 
-	def comptimes(self, s, tmin=0., bent_fallback=False):
+	def comptimes(self, s, tmin=0.):
 		'''
 		Compute compensated and straight-ray arrival times for all
 		transmit-receive pairs in self.atimes through the medium
@@ -175,10 +170,6 @@ class StraightRayTracer(TomographyTask):
 		arrival time Tc that fails to satisfy Ts >= Tc >= tmin * Ts
 		will be excluded from the output.
 
-		If bent_fallback is True, a bent-ray trace will be attempted as
-		a substitute for compensated straight-ray times if the value of
-		the compensated straight-ray integral is None.
-
 		The return value is a map from transmit-receive index pairs to
 		pairs of compensated and uncompensated straight-ray arrival
 		times. If a path integral fails for some transmit-receive pair,
@@ -193,17 +184,11 @@ class StraightRayTracer(TomographyTask):
 		# Compute the corrective factor for each (t, r) pair
 		ivals = { }
 		for t, r in self.trpairs:
-			src, rcv = self.elements[t], self.elements[r]
+			path = self.elements[t], self.elements[r]
 
 			try:
 				# Try to find the compensated times
-				tc, ts = tracer.trace(src, rcv, fresnel=0,
-						intonly=True, mode='straight')
-				# If compensated integral fails, try bent-ray tracing
-				if tc is None and bent_fallback:
-					tc = tracer.trace(src, rcv, fresnel=0,
-							intonly=True, mode='bent')
-
+				tc, ts = tracer.compensated_trace(path, intonly=True)
 				if tc is None or not ts >= tc >= tmin * ts:
 					raise ValueError('Compensated time out of range')
 			except (ValueError, TraceError): continue
@@ -213,14 +198,14 @@ class StraightRayTracer(TomographyTask):
 
 		return ivals
 
-	def lsmr(self, s, epochs=1, coleq=False, tmin=0.,
-			chambolle=None, postfilter=None, partial_output=None,
+	def lsmr(self, s, epochs=1, coleq=False, tmin=0., chambolle=None,
+			postfilter=None, partial_output=None,
 			lsmropts={}, omega=1., bent_fallback=False,
 			mindiff=False, save_pathmat=None, save_times=None):
 		'''
 		For each of epochs rounds, compute, using LSMR, a slowness
 		image that satisfies the straight-ray arrival-time equations
-		implicit in this StraightRayTracer instance. The solution is
+		implicit in this CSRTomographyTask instance. The solution is
 		represented as a perturbation to the slowness s, an instance of
 		habis.slowness.Slowness or its descendants, defined on the grid
 		self.tracer.box.
@@ -455,12 +440,12 @@ class StraightRayTracer(TomographyTask):
 		return ns
 
 
-class BentRayTracer(TomographyTask):
+class SGDTomographyTask(TomographyTask):
 	'''
 	A subclass of TomographyTask to perform bent-ray path tracing.
 	'''
-	def __init__(self, elements, atimes, tracer, fresnel=None,
-				comm=MPI.COMM_WORLD, hitmaps=False):
+	def __init__(self, elements, atimes,
+			tracer, comm=MPI.COMM_WORLD, hitmaps=False):
 		'''
 		Create a worker to do path tracing, using the provided tracer,
 		on the element pairs present in atimes.
@@ -472,10 +457,7 @@ class BentRayTracer(TomographyTask):
 		information.
 		'''
 		# Initialize the data and communicator
-		super(BentRayTracer, self).__init__(elements, atimes, tracer, comm)
-
-		# Copy the Fresnel parameter
-		self.fresnel = fresnel
+		super().__init__(elements, atimes, tracer, comm)
 
 		# Save most recent hit map, if desired
 		self.hitmaps = None
@@ -529,9 +511,6 @@ class BentRayTracer(TomographyTask):
 
 		tracer.set_slowness(s)
 
-		# The Fresnel wavelength parameter (or None)
-		fresnel = self.fresnel
-
 		# Compute the random sample of measurements
 		if nm < 1 or nm > len(self.atimes): nm = len(self.atimes)
 		trset = sample(list(self.atimes.keys()), nm)
@@ -553,11 +532,11 @@ class BentRayTracer(TomographyTask):
 
 		# Compute contributions for each source-receiver pair
 		for t, r in trset:
-			src, rcv = self.elements[t], self.elements[r]
+			path = self.elements[t], self.elements[r]
 			atdata = self.atimes[t,r]
 
 			try:
-				plens, pts, pint = tracer.trace(src, rcv, fresnel)
+				plens, pint = tracer.trace(path)
 				if not plens or pint <= 0:
 					raise ValueError
 				elif maxerr and abs(pint - atdata) > maxerr:
@@ -599,10 +578,10 @@ class BentRayTracer(TomographyTask):
 			postfilter=None, partial_output=None):
 		'''
 		Iteratively compute a slowness image by minimizing the cost
-		functional represented in this BentRayTracer instance and using
-		the solution to update the given slowness model s (an instance
-		of habis.slowness.Slowness or its descendants) defined over the
-		grid defined in self.tracer.box.
+		functional represented in this SGDTomographyTask instance and
+		using the solution to update the given slowness model s (an
+		instance of habis.slowness.Slowness or its descendants) defined
+		over the grid defined in self.tracer.box.
 
 		The Stochastic Gradient Descent, Barzilai-Borwein (SGB-BB)
 		method of Tan, et al. (2016) is used to compute the image with
@@ -700,8 +679,8 @@ class BentRayTracer(TomographyTask):
 			functional and its gradient for optimization by SGD-BB to
 			obtain a contrast update.
 
-			See the BentRayTracer documentation for the general
-			(unregularized) form of the cost functional.
+			See the SGDTomographyTracer documentation for the
+			general (unregularized) form of the cost functional.
 			'''
 			# Track the run time
 			stime = time()
@@ -875,79 +854,72 @@ if __name__ == "__main__":
 
 
 	# Load the slowness (may be a value or a file name)
-	try: s = config.get(tsec, 'slowness')
-	except Exception as e: _throw('Configuration must specify slowness', e)
+	with watchConfigErrors('slowness', tsec):
+		s = config.get(tsec, 'slowness')
 
 	# Determine whether piecewise-constant slowness models are desired
-	try: piecewise = config.get(tsec, 'piecewise', mapper=bool, default=False)
-	except Exception as e: _throw('Invalid optional piecewise')
+	with watchConfigErrors('piecewise', tsec):
+		piecewise = config.get(tsec, 'piecewise', mapper=bool, default=False)
 
-	try:
+	with watchConfigErrors('slowmask', tsec):
 		# Load a slowness mask, if one is specified
 		mask = config.get(tsec, 'slowmask', default=None)
-	except Exception as e: _throw('Invalid optional slowmask', e)
 
 	# Read required final output
-	try: output = config.get(tsec, 'output')
-	except Exception as e: _throw('Configuration must specify output', e)
+	with watchConfigErrors('output', tsec):
+		output = config.get(tsec, 'output')
 
-	try:
+	with watchConfigErrors('elements', tsec):
 		# Read element locations
 		efiles = matchfiles(config.getlist(tsec, 'elements'))
 		elements = ldmats(efiles, nkeys=1)
-	except Exception as e: _throw('Configuration must specify elements', e)
 
-	try: hitmaps = config.getlist(tsec, 'hitmaps', default=None)
-	except Exception as e: _throw('Invalid optional hitmaps', e)
+	with watchConfigErrors('hitmaps', tsec):
+		hitmaps = config.getlist(tsec, 'hitmaps', default=None)
 
 	# Load default background slowness
-	try: slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
-	except Exception as e: _throw('Invalid optional slowdef', e)
+	with watchConfigErrors('slowdef', tsec):
+		slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
 
 	# Determine interpolation mode
-	linear = config.get(tsec, 'linear', mapper=bool, default=True)
+	with watchConfigErrors('linear', tsec):
+		linear = config.get(tsec, 'linear', mapper=bool, default=True)
 
-	try: tfilter = config.get(tsec, 'tfilter', default=None)
-	except Exception as e: _throw('Invalid optional tfilter', e)
+	with watchConfigErrors('tfilter', tsec):
+		tfilter = config.get(tsec, 'tfilter', default=None)
 
-	try:
+	with watchConfigErrors('csr', tsec):
 		# Read straight-ray tomography options, if provided
-		sropts = config.get(tsec, 'straight', default={ },
+		csropts = config.get(tsec, 'csr', default={ },
 					mapper=dict, checkmap=False)
-	except Exception as e: _throw('Invalid optional map "straight"', e)
 
-	if not sropts:
+	if not csropts:
 		# Read bent-ray options if straight-ray tomography isn't desired
-		try: bropts = config.get(tsec, 'bent', mapper=dict, checkmap=False)
-		except Exception as e: _throw('Configuration must specify "bent" map', e)
-	else: bropts = { }
+		with watchConfigErrors('sgd', tsec):	
+			sgdopts = config.get(tsec, 'sgd', mapper=dict, checkmap=False)
+	else: sgdopts = { }
 
 	# Read parameters for optional median filter
-	try: mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
-	except Exception as e: _throw('Invalid optional mfilter', e)
+	with watchConfigErrors('mfilter', tsec):
+		mfilter = config.get(tsec, 'mfilter', mapper=int, default=None)
 
-	try: mask_outliers = config.getlist(tsec, 'maskoutliers', default=False)
-	except Exception as e: _throw('Invalid optional maskoutliers', e)
+	with watchConfigErrors('maskoutliers', tsec):
+		mask_outliers = config.getlist(tsec, 'maskoutliers', default=False)
 
 	if not rank and mask_outliers: print('Will exclude outlier arrival times')
 
-	try: fresnel = config.get(tsec, 'fresnel', mapper=float, default=None)
-	except Exception as e: _throw('Invalid optional fresnel', e)
+	with watchConfigErrors('partial_output', tsec):
+		partial_output = config.get(tsec, 'partial_output', default=None)
 
-	try: partial_output = config.get(tsec, 'partial_output', default=None)
-	except Exception as e: _throw('Invalid optional partial_output', e)
-
-	try:
+	with watchConfigErrors('vclip', tsec):
 		# Pull a range of valid sound speeds for clipping
 		vclip = config.getlist(tsec, 'vclip', mapper=float, default=None)
 		if vclip:
 			if len(vclip) != 2:
 				raise ValueError('Range must specify two elements')
 			elif not rank: print('Will limit average path speeds to', vclip)
-	except Exception as e:
-		_throw('Invalid optional vclip', e)
 
-	try:
+	with watchConfigErrors('timefile', tsec):
 		# Look for local files and determine local share
 		tfiles = matchfiles(config.getlist(tsec, 'timefile'), forcematch=False)
 		# Determine the local shares of every file
@@ -957,7 +929,6 @@ if __name__ == "__main__":
 		for tf, (st, ln) in tfiles.items():
 			atimes.update(getatimes(tf, elements, 0, False,
 						vclip, mask_outliers, st, ln))
-	except Exception as e: _throw('Configuration must specify valid timefile', e)
 
 	if piecewise:
 		if mask is None:
@@ -992,19 +963,19 @@ if __name__ == "__main__":
 			return filt(s, size=mfilter)
 	else: postfilter = None
 
-	if not sropts:
+	if not csropts:
 		# Build the cost calculator
-		cshare = BentRayTracer(elements, atimes, tracer, fresnel, comm, hitmaps)
+		cshare = SGDTomographyTask(elements, atimes, tracer, comm, hitmaps)
 
 		# Compute random updates to the image
 		ns = cshare.sgd(slw, postfilter=postfilter,
-				partial_output=partial_output, **bropts)
+				partial_output=partial_output, **sgdopts)
 
 		# Grab the hitmaps, if they were saved
 		hmaps = cshare.hitmaps
 	else:
 		# Build the straight-ray tracer
-		cshare = StraightRayTracer(elements, atimes, tracer, fresnel, comm)
+		cshare = CSRTomographyTask(elements, atimes, tracer, comm)
 
 		if not rank:
 			print('Finished building straight-ray tracer object')
@@ -1023,7 +994,7 @@ if __name__ == "__main__":
 
 		# Find the solution
 		ns = cshare.lsmr(slw, postfilter=postfilter,
-				partial_output=partial_output, **sropts)
+				partial_output=partial_output, **csropts)
 
 	if not rank:
 		np.save(output, ns.astype(np.float32))

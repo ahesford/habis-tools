@@ -7,6 +7,7 @@ program configuration.
 # Restrictions are listed in the LICENSE file distributed with this package.
 
 import shlex
+import contextlib
 
 def numrange(s):
 	'''
@@ -147,6 +148,24 @@ class HabisNoSectionError(HabisConfigError):
 	section does not exist.
 	'''
 	pass
+
+
+@contextlib.contextmanager
+def watchConfigErrors(option, section, required=True):
+	'''
+	Build a context manager to watch for HabisConfigParser errors
+	and, if they occur, raise a descriptive HabisConfigError.
+
+	If required is False, a HabisNoOptionError will be ignored.
+	'''
+	if required: errmsg = f'Error parsing "{option}" in section "{section}"'
+	else: errmsg = f'Error parsing optional "{option}" in section "{section}"'
+
+	try:
+		yield
+	except Exception as e:
+		if required or not isinstance(e, HabisNoOptionError):
+			raise HabisConfigError.fromException(errmsg, e)
 
 
 class HabisConfigParser(object):
