@@ -1452,6 +1452,20 @@ class RytovPathTracer(AbstractPathTracer):
 		return rytov_zone(path, self.box, self.l, self.s, **self.rytov_opts)
 
 
+	def trace(self, path, intonly=False):
+		'''
+		Perform a simple integral through self.get_slowness() according
+		to super().trace(path, intonly), but shift the integral by
+		adding the quantity norm(path[0] - path[1]) * self.s.
+		'''
+		path = _path_as_array(path)
+		tr = super().trace(path, intonly)
+		L = norm(path[0] - path[1])
+		if intonly: tr += L * self.s
+		else: tr = (tr[0], tr[1] + L * self.s)
+		return tr
+
+
 @cython.wraparound(False)
 @cython.boundscheck(False)
 def fresnel_zone(p, Box3D box, double l):
