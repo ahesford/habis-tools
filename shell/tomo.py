@@ -930,6 +930,11 @@ if __name__ == "__main__":
 			atimes.update(getatimes(tf, elements, 0, False,
 						vclip, mask_outliers, st, ln))
 
+	# Convert the scalar slowness or file name into a matrix
+	try: s = float(s)
+	except (ValueError, TypeError): s = np.load(s).astype(np.float64)
+	else: s = s * np.ones(bx.ncell, dtype=np.float64)
+
 	if piecewise:
 		if mask is None:
 			raise ValueError('Slowness mask is required in piecewise mode')
@@ -937,11 +942,6 @@ if __name__ == "__main__":
 		slw = PiecewiseSlowness(mask, s)
 		if not rank: print(f'Using piecewise slowness')
 	else:
-		# Convert the scalar slowness or file name into a matrix
-		try: s = float(s)
-		except (ValueError, TypeError): s = np.load(s).astype(np.float64)
-		else: s = s * np.ones(bx.ncell, dtype=np.float64)
-
 		if mask is not None:
 			mask = np.load(mask).astype(bool)
 			slw = MaskedSlowness(s, mask)
