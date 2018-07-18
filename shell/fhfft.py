@@ -162,19 +162,13 @@ def fhfft(infile, outfile, **kwargs):
 
 	  whenever tgcmap is provided.
 
-	* skip_fht (default: False): Set to True to disable Hadamard decoding.
-
 	* tdout (default: False): Set to True to output time-domain waveforms
 	  rather than spectral samples. Preserves input acquisition windows.
 
 	* signs (default: None): When not None, should be a sequence of length
 	  wset.txgrps.size that specifies a 1 for any local Hadamard index
 	  (corresponding to lines in the file) that should be negated, and 0
-	  anywhere else. Ignored when skip_fht is True.
-
-	* zero_avg (default: False): If True, all input waveforms will have a DC
-	  bias removed prior to processing by subtracting the mean signal value
-	  over the sampling window.
+	  anywhere else. Ignored when an FHT is not performed.
 
 	* trmap (default: None): If provided, must be a map from a label
 	  (referencing an output location in the map outfile) to a map from
@@ -203,7 +197,6 @@ def fhfft(infile, outfile, **kwargs):
 	except KeyError: event = multiprocessing.Event()
 
 	# Grab FFT and FHT switches and options
-	dofht = not kwargs.pop('skip_fht', False)
 	tdout = kwargs.pop('tdout', False)
 	freqs = kwargs.pop('freqs', None)
 	rolloff = kwargs.pop('rolloff', None)
@@ -220,9 +213,6 @@ def fhfft(infile, outfile, **kwargs):
 
 	# Grab sign map information
 	signs = kwargs.pop('signs', None)
-
-	# Determine whether the waveforms should be debiased
-	zero_avg = kwargs.pop('zero_avg', False)
 
 	# Grab the number of samples per TGC value and an optional gain map
 	tgcsamps = kwargs.pop('tgcsamps', None)
@@ -241,30 +231,6 @@ def fhfft(infile, outfile, **kwargs):
 	# Pull default sample count from input file
 	if nsamp is None: nsamp = wset.nsamp
 	elif wset.nsamp < nsamp: wset.nsamp = nsamp
-
-	if grpmap is not None:
-		# Make sure the WaveformSet has a local configuration
-		try:
-			gcount, gsize = wset.txgrps
-		except TypeError:
-			raise ValueError('A valid Tx-group configuration is required')
-
-		# Validate local portion of the group map
-		wset.groupmap = grpmap
-
-		# Map global indices to transmission number
-		outidx = OrderedDict(sorted((k, v[0] + gsize * v[1])
-						for k, v in grpmap.items()))
-	else:
-		# Must specify a group map for FHT decoding
-		if dofht: raise ValueError('A valid Tx-group configuration is required')
-		# Otherwise, with no configuration, use passthrough transmission ordering
-		gsize = 1
-		outidx = OrderedDict((i, i) for i in range(wset.ntx))
-
-	# Prepare a list of input rows to be copied to output
-	outrows = [wset.tx2row(i) for i in outidx.values()]
-	noutrows = len(outrows)
 
 	# Handle TGC compensation if necessary
 	try: tgc = np.asarray(wset.context['tgc'], dtype=np.float32)
@@ -292,9 +258,18 @@ def fhfft(infile, outfile, **kwargs):
 	ftype = _r2c_datatype(itype)
 	otype = ftype if not tdout else itype
 
-	if dofht:
+	if grpmap is not None:
+		# Make sure the WaveformSet has a local configuration
+		try:
+			gcount, gsize = wset.txgrps
+		except TypeError:
+			raise ValueError('A valid Tx-group configuration is required')
+
 		if gsize < 1 or (gsize & (gsize - 1)):
-			raise ValueError('Hadamard length must be a power of 2')
+			raise ValueError('Hadamard length must be a positive power of 2')
+
+		# Validate local portion of the group map and assign
+		wset.groupmap = grpmap
 
 		if signs is not None:
 			# Ensure signs has values 0 or 1 in the right type
@@ -303,20 +278,39 @@ def fhfft(infile, outfile, **kwargs):
 				msg = f'Sign list must have shape ({wset.txgrps[1]},)'
 				raise ValueError(msg)
 
-		# Map input transmission groups to local and global indices
+		# Map group configurations back to element indices
+		invgroups = { (li, g): i for i, (li, g) in wset.groupmap.items() }
+
+		# Identify all FHTs represented in the input transmissions
 		fhts = defaultdict(list)
 		for i in wset.txidx:
 			gi, li = i // gsize, i % gsize
-			fhts[gi].append((li, i))
+			# Find element index for this decoded transmission slot
+			el = invgroups[li, gi]
+			fhts[gi].append((li, el))
 
-		# Sort indices in Hadamard index order
+		# Enforce ordering of the FHT groups
+		fhts = OrderedDict(sorted(fhts.items()))
+
+		# Sort indices in Hadamard index order and verify groups
+		# Also map an element index to a global row index
+		el2row = { }
+		k = 0
 		for i, v in fhts.items():
 			if len(v) != gsize:
 				raise ValueError('Incomplete Hadamard group {i}')
 			v.sort()
-			if any(j != vl[0] for j, vl in enumerate(v)):
-				msg = f'Invalid local index in Hadamard group {i}'
-				raise ValueError(msg)
+			for j, vl in enumerate(v):
+				if j != vl[0]:
+					msg = f'Invalid local index in Hadamard group {i}'
+					raise ValueError(msg)
+				el2row[vl[1]] = k
+				k += 1
+	else:
+		if wset.txgrps is not None:
+			raise ValueError('A groupmap is required when input includes Tx-group configuration')
+		# Dummy map of elements to rows
+		el2row = {i: j for j, i in enumerate(wset.txidx)}
 
 	# Create intermediate (FHT) and output (FHFFT) arrays
 	# FFT axis is contiguous for FFT performance
@@ -359,6 +353,9 @@ def fhfft(infile, outfile, **kwargs):
 
 		# Map receive channels to rows (slabs) in the output
 		row2slab = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
+		# Map transmit channels to decoded FHT rows
+		outrows = [r for (e,r) in sorted(el2row.items())]
+
 		outbin = mio.Slicer(outfile)
 
 	for rxc in rxneeded:
@@ -381,8 +378,8 @@ def fhfft(infile, outfile, **kwargs):
 		# Read the data over the input window
 		data = wset.getrecord(rxc, window=iwin)[1]
 
+		# Time-gain compensation
 		if len(tgc) and iwin.length:
-			# Time-gain compensation
 			twin = (0, len(tgc))
 			try:
 				ostart, istart, dlength = cutil.overlap(twin, iwin)
@@ -391,25 +388,31 @@ def fhfft(infile, outfile, **kwargs):
 				raise ValueError('TGC curve does not encompass data window for channel %d' % (rxc,))
 			data = data * tgc[np.newaxis,ostart:ostart+dlength]
 
-		# Remove a signal bias, if appropriate
-		if zero_avg and iwin.length:
-			data -= np.mean(data, axis=1)[:,np.newaxis]
-
 		# Clear the data array
 		b[:,:] = 0.
 		ws, we = owin.start, owin.end
 
-		if dofht and iwin.length:
+		if wset.groupmap and iwin.length:
 			# Ensure that the FHT axis is contiguous for performance
 			data = np.asarray(data, order='F')
 
 			# Perform the grouped Hadamard transforms
-			for grp, idxmap in sorted(fhts.items()):
-				rows = [wset.tx2row(i[1]) for i in idxmap]
-				b[rows,ws:we] = fwht(data[rows,:], axes=0) / np.sqrt(gsize)
+			k = 0
+			for grp, idxmap in fhts.items():
+				# Input rows require tranmsit-to-row mapping
+				irows = [wset.tx2row(grp * gsize + i)
+							for i in range(gsize)]
+
+				# Perform the decode if necessary
+				if gsize > 1 and iwin.length:
+					d = fwht(data[irows,:], axes=0) / np.sqrt(gsize)
+					b[k:k+gsize,ws:we] = d
+				else: b[k:k+gsize,ws:we] = data[irows,:]
+
+				# Include the sign flips if necessary
 				if signs is not None:
-					# Include the sign flips
-					b[rows,ws:we] *= signs[:,np.newaxis]
+					b[k:k+gsize,ws:we] *= signs[:,np.newaxis]
+				k += gsize
 		else:
 			# With no FHT, just copy the data
 			b[:,ws:we] = data
@@ -449,16 +452,19 @@ def fhfft(infile, outfile, **kwargs):
 
 		for label, trm in trmap.items():
 			# Pull tx list for this tier and rx channel, if possible
-			# Map transmit indices to output rows to pull
-			try: tl = [t for t in trm[rxc] if 0 <= t < noutrows]
-			except KeyError: tl = None
+			try: tl = trm[rxc]
+			except KeyError: tl = [ ]
 
-			if not tl: continue
+			if not len(tl): continue
 
 			# Collect all transmissions for this rx channel
 			wmap = WaveformMap()
 			for t in tl:
-				wave = Waveform(nsamp, dblock[outrows[t]], dstart)
+				# Make sure transmission is represented in output
+				try: row = el2row[t]
+				except KeyError: continue
+
+				wave = Waveform(nsamp, dblock[row], dstart)
 				wmap[t, rxc] = wave
 
 			# Flush the waveform map to disk
@@ -500,9 +506,6 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS,
 			description='Filter, decode and descramble WaveformSet files')
 
-	parser.add_argument('-H', '--skip-fht', action='store_true',
-			help='Do not attempt Hadamard decoding of inputs')
-
 	parser.add_argument('-p', '--procs', type=int,
 			default=process.preferred_process_count(),
 			help='Use PROCS processes in parallel')
@@ -531,9 +534,6 @@ if __name__ == '__main__':
 	parser.add_argument('-m', '--tgc-map',
 			dest='tgcmap', type=nptxtloader(dtype='float32'),
 			help='Two-column file mapping nominal to actual gain')
-
-	parser.add_argument('-z', '--zero-avg', action='store_true',
-			help='Remove DC bias from each Waveform before processing')
 
 	parser.add_argument('-g', '--groupmap', type=ikmloader(),
 			help='Global transmit groupmap to assign to input files')
