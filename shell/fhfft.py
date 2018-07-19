@@ -81,11 +81,16 @@ def mpfhfft(nproc, *args, **kwargs):
 		pool.wait()
 
 
-def fhfft(infile, outfile, **kwargs):
+def fhfft(infile, outfile, groupmap, **kwargs):
 	'''
 	For a real WaveformSet file infile, perform Hadamard decoding and then
 	a DFT of the temporal samples. The Hadamard decoding follows the
-	grouping configuration stored in the file. The resulting transformed
+	grouping configuration stored in groupmap, a map
+
+		(element index) -> (local Hadamard index, group number)
+
+	that defines Hadamard groups and must agree with the local group
+	configuration represented in the input. The resulting transformed
 	records will be stored in the output outfile. The nature of outfile
 	depends on the optional argument trmap (see below).
 
@@ -108,13 +113,6 @@ def fhfft(infile, outfile, **kwargs):
 	applying Hadamard and Fourier transforms.
 
 	The kwargs contain optional values or default overrides:
-
-	* grpmap (default: None): When not None, a mapping from output
-	  transmit index i and input transmit index
-
-	    j = grpmap[i][0] + grpmap[i][1] * wset.txgrps.size
-
-	  that will be applied to each input WaveformSet wset.
 
 	* freqs (default: None): When not None, a sequence (start, end)
 	  to be passed as slice(start, end) to bandpass filter the input after
@@ -220,8 +218,6 @@ def fhfft(infile, outfile, **kwargs):
 
 	trmap = kwargs.pop('trmap', None)
 
-	grpmap = kwargs.pop('groupmap', None)
-
 	if len(kwargs):
 		raise TypeError(f"Unrecognized keyword '{next(iter(kwargs))}'")
 
@@ -258,59 +254,46 @@ def fhfft(infile, outfile, **kwargs):
 	ftype = _r2c_datatype(itype)
 	otype = ftype if not tdout else itype
 
-	if grpmap is not None:
-		# Make sure the WaveformSet has a local configuration
-		try:
-			gcount, gsize = wset.txgrps
-		except TypeError:
-			raise ValueError('A valid Tx-group configuration is required')
+	# Make sure the WaveformSet has a local configuration
+	try:
+		gcount, gsize = wset.txgrps
+	except TypeError:
+		raise ValueError('A valid Tx-group configuration is required')
 
-		if gsize < 1 or (gsize & (gsize - 1)):
-			raise ValueError('Hadamard length must be a positive power of 2')
+	if gsize < 1 or (gsize & (gsize - 1)):
+		raise ValueError('Hadamard length must be a positive power of 2')
 
-		# Validate local portion of the group map and assign
-		wset.groupmap = grpmap
+	# Validate local portion of the group map and assign
+	wset.groupmap = groupmap
 
-		if signs is not None:
-			# Ensure signs has values 0 or 1 in the right type
-			signs = np.asarray([1 - 2 * s for s in signs], dtype=itype)
-			if signs.ndim != 1 or len(signs) != gsize:
-				msg = f'Sign list must have shape ({wset.txgrps[1]},)'
-				raise ValueError(msg)
+	if signs is not None:
+		# Ensure signs has values 0 or 1 in the right type
+		signs = np.asarray([1 - 2 * s for s in signs], dtype=itype)
+		if signs.ndim != 1 or len(signs) != gsize:
+			msg = f'Sign list must have shape ({wset.txgrps[1]},)'
+			raise ValueError(msg)
 
-		# Map group configurations back to element indices
-		invgroups = { (li, g): i for i, (li, g) in wset.groupmap.items() }
+	# Identify all FHTs represented by stored transmission indices
+	fhts = { }
+	for i in wset.txidx:
+		g, l = i // gsize, i % gsize
+		try: fhts[g].append(l)
+		except KeyError: fhts[g] = [l]
 
-		# Identify all FHTs represented in the input transmissions
-		fhts = defaultdict(list)
-		for i in wset.txidx:
-			gi, li = i // gsize, i % gsize
-			# Find element index for this decoded transmission slot
-			el = invgroups[li, gi]
-			fhts[gi].append((li, el))
+	# Verify that all FHTs are complete
+	for g, ll in fhts.items():
+		if len(ll) != gsize:
+			raise ValueError(f'FHT group {gi} is incomplete')
+		if any(i != j for i, j in enumerate(sorted(ll))):
+			raise ValueError(f'FHT group {gi} has improper local indices')
 
-		# Enforce ordering of the FHT groups
-		fhts = OrderedDict(sorted(fhts.items()))
-
-		# Sort indices in Hadamard index order and verify groups
-		# Also map an element index to a global row index
-		el2row = { }
-		k = 0
-		for i, v in fhts.items():
-			if len(v) != gsize:
-				raise ValueError('Incomplete Hadamard group {i}')
-			v.sort()
-			for j, vl in enumerate(v):
-				if j != vl[0]:
-					msg = f'Invalid local index in Hadamard group {i}'
-					raise ValueError(msg)
-				el2row[vl[1]] = k
-				k += 1
-	else:
-		if wset.txgrps is not None:
-			raise ValueError('A groupmap is required when input includes Tx-group configuration')
-		# Dummy map of elements to rows
-		el2row = {i: j for j, i in enumerate(wset.txidx)}
+	# Map each FHT group to a list of row indices for the FHT
+	# and each element corresponding to an FHT output to row indices
+	gidx = lambda l, g: g * gsize + l
+	fhts = { g: [ wset.tx2row(gidx(l, g)) for l in range(gsize) ] for g in fhts }
+	invgroups = { (l, g): i for i, (l, g) in wset.groupmap.items() }
+	el2row = { invgroups[l, g]: wset.tx2row(gidx(l, g))
+			for g in fhts for l in range(gsize) }
 
 	# Create intermediate (FHT) and output (FHFFT) arrays
 	# FFT axis is contiguous for FFT performance
@@ -352,7 +335,7 @@ def fhfft(infile, outfile, **kwargs):
 		event.wait()
 
 		# Map receive channels to rows (slabs) in the output
-		row2slab = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
+		rx2slab = dict((i, j) for (j, i) in enumerate(sorted(wset.rxidx)))
 		# Map transmit channels to decoded FHT rows
 		outrows = [r for (e,r) in sorted(el2row.items())]
 
@@ -392,30 +375,14 @@ def fhfft(infile, outfile, **kwargs):
 		b[:,:] = 0.
 		ws, we = owin.start, owin.end
 
-		if wset.groupmap and iwin.length:
-			# Ensure that the FHT axis is contiguous for performance
-			data = np.asarray(data, order='F')
-
-			# Perform the grouped Hadamard transforms
-			k = 0
-			for grp, idxmap in fhts.items():
-				# Input rows require tranmsit-to-row mapping
-				irows = [wset.tx2row(grp * gsize + i)
-							for i in range(gsize)]
-
-				# Perform the decode if necessary
-				if gsize > 1 and iwin.length:
-					d = fwht(data[irows,:], axes=0) / np.sqrt(gsize)
-					b[k:k+gsize,ws:we] = d
-				else: b[k:k+gsize,ws:we] = data[irows,:]
-
-				# Include the sign flips if necessary
-				if signs is not None:
-					b[k:k+gsize,ws:we] *= signs[:,np.newaxis]
-				k += gsize
-		else:
-			# With no FHT, just copy the data
-			b[:,ws:we] = data
+		if iwin.length and gsize > 1:
+			# Perform grouped Hadamard transforms with optional sign flips
+			for grp, rows in fhts.items():
+				# Ensure FHT axis is contiguous for performance
+				dblk = np.asfortranarray(data[rows,:])
+				b[rows,ws:we] = fwht(dblk, axes=0) / np.sqrt(gsize)
+				if signs is not None: b[rows,ws:we] *= signs[:,np.newaxis]
+		else: b[:,ws:we] = data
 
 		if dofft:
 			fwdfft()
@@ -435,7 +402,7 @@ def fhfft(infile, outfile, **kwargs):
 
 		if not trmap:
 			# Write the binary blob for this receive channel
-			orow = row2slab[rxc]
+			orow = rx2slab[rxc]
 			with lock:
 				if tdout: outbin[orow] = b[outrows,:].T
 				else: outbin[orow] = c[outrows,fswin.start:fswin.end].T
@@ -535,14 +502,14 @@ if __name__ == '__main__':
 			dest='tgcmap', type=nptxtloader(dtype='float32'),
 			help='Two-column file mapping nominal to actual gain')
 
-	parser.add_argument('-g', '--groupmap', type=ikmloader(),
-			help='Global transmit groupmap to assign to input files')
-
 	parser.add_argument('-T', '--trmap', action='append', type=ikmloader(),
 			help='T-R map of measurement pairs to store (multiples OK)')
 
 	parser.add_argument('-L', '--trlabel', action='append',
 			help='Label for provided TR map (one per -T flag)')
+
+	parser.add_argument('groupmap', type=ikmloader(),
+			help='Global transmit groupmap to assign to input files')
 
 	parser.add_argument('input', nargs='+', help='List of input files to process')
 
