@@ -6,6 +6,8 @@
 import os, sys, math, numpy as np
 from numpy.linalg import norm
 
+from scipy.sparse.linalg import lsmr
+
 import time
 
 from mpi4py import MPI
@@ -159,6 +161,9 @@ def tracerEngine(config):
 
 	try: fixbg = config.get(tsec, 'fixbg', mapper=bool, default=False)
 	except Exception as e: _throw('Invalid optional fixbg', e)
+
+	try: separable = config.get(tsec, 'separable', mapper=bool, default=False)
+	except Exception as e: _throw('Invalid optional separable', e)
 
 	try: pathsave = config.get(tsec, 'pathsave', mapper=bool, default=False)
 	except Exception as e: _throw('Invalid optional pathsave', e)
@@ -351,14 +356,27 @@ def tracerEngine(config):
 		x = misses['exlen']
 		vbg = (t @ x) / (t @ t)
 
-	print('Exterior speed: %0.5g (%d paths)' % (vbg, len(misses)))
+	print('Exterior speed from misses: %0.5g (%d paths)' % (vbg, len(misses)))
 
 	# Offset arrival times by contribution from exterior speed
 	rhs = hits['atime'] - hits['exlen'] / vbg
 
 	if bimodal:
-		# Bimodal matrix is a single column
-		x = ((rhs @ hits['inlen']) / (rhs @ rhs), )
+		if separable or fixbg:
+			# If separable or fixed background,
+			# bimodal system is a single-column matrix
+			x = ((rhs @ hits['inlen']) / (rhs @ rhs), )
+		else:
+			# If not separable, bimodal system is a two-column matrix
+			A = np.array([hits['exlen'], hits['inlen']]).T
+			x, istop, itn, *tols = lsmr(A, rhs)
+			if istop > 2:
+				print('LSMR terminated with stop code %d at iteration %d' % (istop, itn))
+			# First component is difference in exterior slowness
+			vbg = vbg / (vbg * x[0] + 1)
+			# Second component is whole interior slowness
+			x = (1 / x[1],)
+			print('Exterior speed from optimization: %0.5g (%d paths)' % (vbg, len(hits)))
 	else:
 		# Multimodal matrix is diagonal
 		x = tuple((hv / rv) if abs(rv) > epsilon else 0.
