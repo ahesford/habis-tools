@@ -250,6 +250,9 @@ def fhfft(infile, outfile, groupmap, **kwargs):
 	if len(tgc): itype = np.dtype(wset.dtype.type(0) * tgc.dtype.type(0))
 	else: itype = wset.dtype
 
+	# Make sure that the data type is always floating-point
+	if not np.issubdtype(itype, np.floating): itype = np.dtype('float64')
+
 	# Create a WaveformSet object to hold the ungrouped data
 	ftype = _r2c_datatype(itype)
 	otype = ftype if not tdout else itype
@@ -361,16 +364,6 @@ def fhfft(infile, outfile, groupmap, **kwargs):
 		# Read the data over the input window
 		data = wset.getrecord(rxc, window=iwin)[1]
 
-		# Time-gain compensation
-		if len(tgc) and iwin.length:
-			twin = (0, len(tgc))
-			try:
-				ostart, istart, dlength = cutil.overlap(twin, iwin)
-				if dlength != iwin.length: raise ValueError
-			except (TypeError, ValueError):
-				raise ValueError('TGC curve does not encompass data window for channel %d' % (rxc,))
-			data = data * tgc[np.newaxis,ostart:ostart+dlength]
-
 		# Clear the data array
 		b[:,:] = 0.
 		ws, we = owin.start, owin.end
@@ -380,9 +373,20 @@ def fhfft(infile, outfile, groupmap, **kwargs):
 			for grp, rows in fhts.items():
 				# Ensure FHT axis is contiguous for performance
 				dblk = np.asfortranarray(data[rows,:])
-				b[rows,ws:we] = fwht(dblk, axes=0) / np.sqrt(gsize)
+				b[rows,ws:we] = fwht(dblk, axes=0) / gsize
 				if signs is not None: b[rows,ws:we] *= signs[:,np.newaxis]
 		else: b[:,ws:we] = data
+
+		# Time-gain compensation, if necessary
+		if len(tgc) and iwin.length:
+			twin = (0, len(tgc))
+			try:
+				tstart, istart, dlength = cutil.overlap(twin, iwin)
+				if dlength != iwin.length: raise ValueError
+			except (TypeError, ValueError):
+				raise ValueError(f'TGC curve does not encompass data for channel {rxc}')
+			b[:,ws:we] *= tgc[np.newaxis,tstart:tstart+dlength]
+
 
 		if dofft:
 			fwdfft()
