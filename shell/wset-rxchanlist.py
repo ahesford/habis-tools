@@ -5,7 +5,7 @@
 
 import sys, numpy as np, os, getopt
 
-import multiprocessing, queue
+import multiprocessing, queue as Queue
 
 from pycwp import process
 from habis.habiconf import matchfiles, buildpaths
@@ -83,7 +83,7 @@ def mpchanlists(infiles, nproc=1):
 			try:
 				results = queue.get(timeout=0.1)
 				responses += 1
-			except queue.Empty:
+			except Queue.Empty:
 				pass
 			else:
 				for chan, rec in results.items():
