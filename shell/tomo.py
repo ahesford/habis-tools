@@ -38,7 +38,7 @@ from habis.pathtracer import PathTracer, TraceError
 
 from habis.habiconf import (HabisConfigParser, 
 				HabisConfigError, matchfiles, watchConfigErrors)
-from habis.formats import loadmatlist as ldmats, savez_keymat
+from habis.formats import loadmatlist as ldmats, savez_keymat, loadkeymat
 from habis.mpdfile import flocshare, getatimes
 from habis.mpfilter import parfilter
 from habis.slowness import Slowness, MaskedSlowness, PiecewiseSlowness
@@ -929,6 +929,17 @@ if __name__ == "__main__":
 		for tf, (st, ln) in tfiles.items():
 			atimes.update(getatimes(tf, elements, 0, False,
 						vclip, mask_outliers, st, ln))
+
+	with watchConfigErrors('exclusions', tsec):
+		# Try to load a list of arrival times to exclude
+		efiles = matchfiles(config.getlist(tsec, 'exclusions'), forcematch=False)
+		exclusions = { (t,r) for f in efiles
+				for r, tl in loadkeymat(f).items() for t in tl }
+		if exclusions:
+			if not rank:
+				print(f'{len(exclusions)} measurement pairs marked for exclusion')
+			goodpairs = set(atimes).difference(exclusions)
+			atimes = { k: atimes[k] for k in goodpairs }
 
 	# Convert the scalar slowness or file name into a matrix
 	try: s = float(s)
