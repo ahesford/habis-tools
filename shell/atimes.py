@@ -131,7 +131,7 @@ def getimertime(sig, osamp=1, threshold=1, window=None, equalize=True,
 	or, if absimer is True, imer = abs(sig.imer(**kwargs)) and find the
 	index of the first sample that is at least as large as:
 
-		threshold * mean(imer), if rmsgap is None, or else
+		threshold * mean(imer), if rmsavg is None, or else
 		threshold * sqrt(RMS * max(abs(imer))),
 
 	where RMS is the RMS value of the IMER function from the beginning of

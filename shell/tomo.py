@@ -841,6 +841,17 @@ if __name__ == "__main__":
 
 	# Try to build a tracer from the configuration
 	tracer = PathTracer.fromconf(config)
+
+	# Add some default tracer options, if appropriate
+	try:
+		minpath_opts = tracer.minpath_opts
+	except AttributeError:
+		pass
+	else:
+		minpath_opts.setdefault('factr', 1e10)
+		minpath_opts.setdefault('maxls', 50)
+		minpath_opts.setdefault('maxiter', 50)
+
 	bx = tracer.box
 
 	if not rank:
@@ -876,17 +887,6 @@ if __name__ == "__main__":
 
 	with watchConfigErrors('hitmaps', tsec):
 		hitmaps = config.getlist(tsec, 'hitmaps', default=None)
-
-	# Load default background slowness
-	with watchConfigErrors('slowdef', tsec):
-		slowdef = config.get(tsec, 'slowdef', mapper=float, default=None)
-
-	# Determine interpolation mode
-	with watchConfigErrors('linear', tsec):
-		linear = config.get(tsec, 'linear', mapper=bool, default=True)
-
-	with watchConfigErrors('tfilter', tsec):
-		tfilter = config.get(tsec, 'tfilter', default=None)
 
 	with watchConfigErrors('csr', tsec):
 		# Read straight-ray tomography options, if provided
