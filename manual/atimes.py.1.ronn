@@ -1,0 +1,337 @@
+# atimes.py(1) -- compute arrival times for waveforms in WaveformMap(7) files
+
+## SYNOPSIS
+
+`atimes.py` <CONFIGURATION>
+
+
+## DESCRIPTION
+
+`atimes.py` computes arrival-time estimates for collections of waveforms in
+WaveformMap(7) files. Configuration is interpreted from a Mako template
+rendered without support for external context variables into a YAML file parsed
+by the arrival-time engine. Arrival-time estimates may be computed using the
+Improved Modified Energy Ratio (IMER) or by maximizing cross-correlation with a
+reference pulse.
+
+
+## CONFIGURATION
+
+The YAML configuration file (or the rendered Mako template that produces valid
+YAML) should define a dictionary with four sections. Each section is, in turn,
+a dictionary that defines configuration options. Some sections are common to
+multiple programs, allowing these programs to share a single configuration file
+without duplicating common options.
+
+The `general` section can specify two keys:
+
+- `nproc` (optional):
+  An integer specifying the number of processes that should be started to
+  distribute computational work. By default, the number of processes is equal
+  to the number of detected CPUs.
+
+- `include` (optional):
+  A single string or a list of strings providing paths to other YAML files that
+  can be used to import options. Once set, an option is not replaced by an
+  include. Thus, an option set in a top-level file will not be overridden by an
+  option in an included file. When multiple includes are specified, options are
+  set from each include file in the order the files are listed.
+
+The `sampling` section can specify three keys:
+
+- `period`:
+  The sampling period of input waveforms, in microsec.
+
+- `offset`:
+  A global time offset added to every estimated arrival time. The first sample
+  of every input waveform starts at the *offset* time.
+
+- `osamp` (optional, default: _1_):
+  When computing arrival times, oversample waveforms by this factor prior to
+  analysis to provide subsample resolution. The value of `osamp` should be a
+  regular number.
+
+The `measurement` section should include a single relevant key:
+
+- `reference`:
+  When using cross-correlation for arrival-time estimates, this should be the
+  path to a WaveformMap(7) file that contains a single waveform. This waveform
+  will be read as the reference which is cross-correlated with test waveforms
+  to determine an arrival time.
+
+  When using IMER for arrival-time estimates, a reference is not used, but the
+  key is still required. Set its value to _null_ in this case.
+
+The `atimes` section includes many specific options:
+
+- `target`:
+  A single path or file glob, or a list of paths or file globs that specify the
+  location(s) of input WaveformMap(7) file(s).
+
+  Instead of a single `target` specifier, mutliple keys of the form
+  `target<SPECIFIER>` can be provided, where `<SPECIFIER>` is some unique
+  string that still allows the string to be a valid YAML dictionary key. In
+  this case, WaveformMap(7) files are read for each key independently, and
+  different keys are assumed to correspond to overlapping sets of
+  transmit-receive pairs. Output arrival times will be tuples of values, one
+  for each transmit-receive pair that is common to all different target
+  specifiers. The order of times in each tuple is determined by the
+  lexicographical ordering of the distinct target specifiers. Transmit-receive
+  pairs missing from WaveformMap(7) files in at least one target specifier will
+  be excluded from the output.
+
+- `outfile`:
+  The name of a single output file to be written as a keymat(7) file. Values
+  will be scalar if a single target is specified, or an array of arrival times
+  if multiple target specifiers are provided.
+
+- `cachedelay` (optional, default: _True_):
+  If _True_, arrival times computed for each input file (regardless of target
+  specifiers) will be saved to a keymat(7) file with a name derived by
+  replacing the input file extension with 'delays.npz'. The keymat(7) file will
+  map transmit-receive pairs to computed arrival times without regard for any
+  temporal offset or sampling period. If the cache file exists at runtime and
+  contains an existing record for a transmit-receive pair being calculated, the
+  cached value will be used instead of computing IMER functions or
+  cross-correlations.
+
+  If _False_, no cache is saved or queried.
+
+  If another value is specified, the program behaves as if it were _True_, but
+  the 'delays.npz' extension is replaced with the value of the `cachedelay`
+  key.
+
+- `window` (optional):
+  A dictionary that specifies windows to be applied to signals prior to
+  arrival-time estimation. Supported subkeys are `map` (optional), the path to
+  a keymat(7) file that maps a transmit-receive index pair to a value pair
+  (<START>, <LENGTH>) indicating the starting sample (relative to global time
+  0) and length of the window to apply for a particular waveform; `tails`
+  (optional), the width of a Hann rolloff applied at the start and end of the
+  applied window; `default` (optional), a default window to be applied if any
+  provided map does not have a key corresponding to the waveform under
+  investigation; and `relative` (optional), allowing default window parameters
+  to be interpreted relative to each signal rather than an absolute time.
+  
+  The `default` window should be a dictionary with exactly two of the following
+  three values: `start`, `length` and `end`. The `start` and `length`
+  parameters are, by default, interpreted relative to global time 0. If an
+  optional `relative` keyword is included in the `window` dictionary, it may be
+  either _datawin_ or _signal_. When `relative` is _signal_, any specified
+  `end` value is added to the _nsamp_ parameter for the waveform to obtain a
+  global end. If `relative` takes the value _datawin_, the `start` and `end`
+  values are respectively added to the starting and ending indices of the
+  waveform data window to obtain global starts and ends. No `relative` mode
+  affects the interpretation of a window `length`.
+
+- `signsquare` (optional, default: _False_):
+  When _True_, each signal (and, in cross-correlation mode, the reference
+  signal) is replaced by the sample-by-sample product of the square of its
+  absolute value and its signum.
+
+- `minsnr` (optional):
+  A space-separated pair of values '<SNR> <WIDTH>' that declares, as a float,
+  the minimum acceptable <SNR> in dB and, as an integer, the <WIDTH> of a
+  sliding window used to find the minimum RMS noise level (as the standard
+  deviation) in each signal. The SNR is estimated as the ratio of the peak
+  envelope amplitude to the minimum RMS noise level. Signals with an estimated
+  SNR below the specified value are rejected prior to arrival-time estimation.
+
+- `eleak` (optional):
+  The maximum allowable ratio of energy appearing before the detected arrival
+  time to the energy in the entire signal. This value should be in the range
+  (0, 1). If the pre-arrival energy ratio exceeds the specified value, the
+  arrival time will be rejected.
+
+- `peaks` (optional):
+  A dictionary that configures cross-correlation estimates of arrival times.
+  See the [CROSS-CORRELATION][] section for more information.
+
+- `imer` (optional):
+  A dictionary that configures IMER estimates of arrival times. See the
+  [IMER][] section for more information.
+
+- `denoise` (optional):
+  A dictionary to configure denoising based on Gabor transforms. Supported keys
+  include `noisewin`, a list [<TS>, <TE>] specifying the bounds of a temporal
+  window in the Gabor transform (referenced to global time 0) assumed to
+  contain only samples of noise; `band`, a list [<FS>, <FE>] specifying the
+  bounds of a spectral window in the Gabor transform (in MHz) assumed to
+  contain only samples of noise; `fs`, the sampling frequency in MHz, used to
+  convert the band frequencies to spectral bin indices; `pfa`, the desired
+  probability of false alarm for classifying high-amplitude Gabor-transform
+  components as signal rather than noise; and `floordb` (optional), a noise
+  amplitude to be added back to the signal after denoising.
+
+  After estimating noise characteristics in the temporal-spectral window [<TS>,
+  <TE>] x [<FS>, <FE>], the probability `pfa` is used to calculate an amplitude
+  threshold between noise excluded from the denoised output and signal to be
+  preserved in the denoised output.
+
+  Because IMER does not perform well in zero-noise environments (the energy
+  ratios become infinite), specify `floordb` to add additive Gaussian white
+  noise back to the denoised signal. The value of `floordb` should be the level
+  of noise relative to the peak signal amplitude, and should be a negative
+  value. A value of _-80_ is generally suitable.
+
+Some keys in `atimes` are no longer supported but may appear in existing
+configurations. These keys should be set to _False_ or omitted from new
+configurations: `optimize`, `maskoutliers`, `compenv`.
+
+
+## CROSS-CORRELATION
+
+When searching for cross-correlation maxima, the signal is windowed to isolate
+a peak of interest prior to cross-correlation with a reference pulse. Options
+to isolate the peak are provided in the *peaks* dictionary of the *atimes*
+section of the configuration file. The following keys are allowed:
+
+- `nearmap` (optional):
+  If provided, a keymat(7) file that maps transmit-receive pairs to lists of
+  expected arrival times. A time for each target specifier should be provided
+  for each transmit-receive key. The time should be in microseconds relative to
+  global time zero. Among peaks that match other criteria, the one closest to
+  the expected arrival time is selected for isolation.
+
+- `neardefault` (optional):
+  If a transmit-receive key is not found in `nearmap` (or `nearmap` is not
+  provided), peaks closest to `neardefault`, if provided, are preferred. Set
+  this to 0 to select the earliest peak that matches all other criteria.
+
+- `minprom` (optional, default: _0_):
+  Only peaks with a prominence greater than the specified value are considered.
+
+- `prommode` (optional, default _absolute_):
+  One of _absolute_, _relative_, _noisedb_, or _rolling_snr_; changes the
+  interpretation of minprom. For _absolute_, the minprom value is interpreted
+  as an absolute threshold. For _relative_, the minprom threshold is specified
+  as a fraction of the prominence of the most prominent peak. For _noisedb_,
+  the minprom threshold specifies a ratio, in dB, between the peak prominence
+  and the noise floor. For _rolling_snr_, the minprom threshold specifies the
+  SNR as estimated over a rolling window with a width defined by `noisewin`.
+
+- `useheight` (optional, default _False_):
+  If _False_, the 'prominence' used to filter peaks according to `minprom` and
+  `prommode` is the topographical prominence (the difference between the height
+  of the peak and the height of its key col); if _True_, 'prominence' is simply
+  the height of the peak above 0.
+
+- `noisewin` (optional, default _100_):
+  If `prommode` is _noisedb_, this specifies the width of the rolling window
+  used to estimate the noise floor. If `prommode` is _rolling_snr_, this
+  specifies the width of a rolling window used to estimate the per-sample SNR.
+  For other values of `prommode`, this parameter is ignored.
+
+- `minwidth` (optional, default _0_):
+  Only peaks with a width (the distance between the index of the peak and the
+  index of the closer of its key or sub cols) no less than the specified value
+  are considered.
+
+- `relaxed` (optional, default: _False_):
+  If _True_, ignore the width and prominence constraints if no peak in the
+  signal satisfies the constraints.
+
+- `maxshift` (optional):
+  If specified, limits the maximum number of samples the isolated peak is
+  allowed to fall from the `neardefault` or `nearmap` value for the signal. If
+  the distance exceeds `maxshift`, the signal will be discarded.
+
+Two additional kwargs control the isolation window:
+
+- `window` (optional):
+  The string _tight_ or a list [<RSTART>, <LENGTH>]. The actual isolation
+  window of the tuple form will be, for an isolated peak with location <PIDX>,
+  (<RSTART> + <PIDX>, <LENGTH>). The default relative window is (-<WIDTH>, 2 *
+  <WIDTH>) for a peak with a specific <WIDTH>.
+
+  If the window is _tight_, the window will span from the lowest point between
+  the peak and any other peak (not just a higher one) to the left, to the
+  lowest point between the peak and any other peak to the right.
+
+  If, in _tight_ mode, there is no other peak to the left (right) of the
+  isolated peak, the window will not clip the signal to the left (right).
+
+- `tails` (optional, default: _0_):
+  The width of a Hann rolloff applied to the end of each window.
+
+
+## IMER
+
+IMER configuration options are provided in the `imer` dictionary of the
+`atimes` section of the configuration file. The following keys are allowed:
+
+- `vpwin`:
+  The width of the far pre-arrival window that governs the far energy ratio in
+  IMER.
+
+- `prewin`:
+  The width of the near pre-arrival window that governs the near energy ratio
+  in IMER.
+  
+- `postwin`:
+  The width of the post-arrival window that governs the near and far energy
+  ratios in IMER.
+
+- `avgwin`:
+  Apply a rolling average with a length `avgwin` (which must be an integer and
+  should be odd; an even length will cause a shift in the location of peaks) to
+  the near and far energy ratios; the IMER function is the difference between
+  the smoothed far and near ratios.
+
+- `envelope` (optional, default: _False_):
+  If _True_, substitute the envelope of the signal in place of the absolute
+  value of the signal in the definition of near and far modified energy ratios.
+
+- `threshold` (optional, defualt: _1.0_):
+  Scale the IMER threshold (either the arithmetic mean of the IMER function or,
+  according to the value of `rmsavg`, a corresponding geometric mean when
+  looking for a threshold crossing.
+
+- `window` (optional):
+  A dictionary containing exactly two of the keys `start`, `length` and `end`,
+  specifying a window with respect to global time 0 in which the search for an
+  IMER crossing will be performed.
+
+- `absimer` (optional, default: _False_):
+  If _True_, replace the standard IMER function with its absolute value, to
+  ignore regions where IMER may be negative because the near pre-arrival
+  baseline noise is lower than the far pre-arrival baseline noise.
+
+- `rmsavg` (optional):
+  If specified, the arithmetic mean of the IMER function is replaced by the
+  geometric mean of the peak IMER value and the RMS signal level from the
+  beginning of time to `rmsavg` samples before the location of the peak.
+
+- `merpeak` (optional):
+  If _True_, the arrival time is the latest location of a peak in the near
+  modified energy ratio with a value at least as high as the value of the near
+  modified energy ratio at the primary IMER threshold crossing.
+
+  If `merpeak` is a numeric value, it should be an integer that specifies the
+  width of a rolling average to be applied to the near modified energy ratio
+  before searching for its peak.
+
+- `breakway` (optional):
+  If provided, specifies a breakaway threshold for secondary IMER crossing
+  searches. After a primary IMER threshold crossing is identified, the actual
+  arrival time is taken to be the latest time before the primary crossing when
+  the IMER function crosses breakaway times its standard deviation over its
+  mean, on a rolling window of length `breaklen`. 
+
+- `breaklen` (required if `breakaway` is defined):
+  The width of the rolling window used in a secondary IMER breakaway search.
+
+The `merpeak` and `breakway` options are mutually exclusive.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+keymat(7) - For a description of the keymat file format
+WaveformMap(7) - For a description of the WaveformMap file format
+
+[Mako Templates for Python](http://www.makotemplates.org)

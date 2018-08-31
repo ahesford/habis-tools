@@ -1,0 +1,34 @@
+# WaveformMap(7) -- file format encoding waveforms keyed by transmit-receive pairs
+
+## SYNOPSIS
+
+`from habis.sigtools import WaveformMap`
+
+
+## DESCRIPTION
+
+A WaveformMap file is a zip file that contains at least one pair of files: a
+header as a JSON string and a binary data block. The header specifies a global
+`nsamp` parameter for the file and list of waveform records that each indicate
+a transmit and receive index for the record, the start and length of the data
+for the waveform (in samples), a datatype code and byte-order indicator, and
+an offset (in bytes) into the data block that points to the start of the data
+for the waveform. The data blob is just the concatenation of byte-for-byte
+representations of the data windows of each waveform.
+
+A single zip container can contain more than one pair of header and data
+files. All pairs start with the common identifying prefixes
+*com.habicoinc.WaveformMap.data* and *com.habicoinc.WaveformMap.header*
+followed by a random UUID that is common to both files in the pair. Any files
+in the zip container with names that do not conform to this format, as well as
+unpaired header or data files, should be ignored on input.
+
+
+## REFERENCE IMPLEMENTATION
+
+In the Python class `habis.sigtools.WaveformMap`, the methods `store` and
+`load` serve as reference implementations for this format.
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.

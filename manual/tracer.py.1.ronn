@@ -1,0 +1,136 @@
+# tracer.py(1) -- use straight-ray tracing to estimate two-medium parameters
+
+## SYNOPSIS
+
+`tracer.py` <CONFIGURATION>
+
+
+## DESCRIPTION
+
+`tracer.py` uses the surface mesh produced by `wavesfc.py` to trace paths
+through a two-medium model. The portions of each path in the interior and
+exterior of the volume, combined with estimates of arrival times for waves
+propagating along the paths, are used to estimate the interior and exterior
+sound speeds in a least-squares sense.
+
+The interior and exterior speeds may be treated as separable or linked in a
+common optimization problem.
+
+For detecting interior and exterior length fractions of each path, the volume
+spanned by the surface mesh is decomposed with an octree to allow for fast
+searching of intersections between paths and surface facets. Paths with an odd
+number of surface intersections (i.e., those that enter the interior but never
+leave) are discarded.
+
+
+## CONFIGURATION
+
+The YAML configuration file (or the rendered Mako template that produces valid
+YAML) should define a dictionary with four sections. Each section is, in turn,
+a dictionary that defines configuration options. Some sections are common to
+multiple programs, allowing these programs to share a single configuration
+file without duplicating common options.
+
+The `measurement` section includes one relevant key:
+
+- `c` (optional, default: _1.4823_):
+  An initial estimate for the sound speed of the background medium surrounding
+  the target.
+
+The `tracer` section includes several options:
+
+- `timefile`:
+  A single path or glob, or a list of paths or globs, to keymat(7) files that
+  map transmit-receive pairs to arrival times. Any transmit-receive pair for
+  which the transmit and receive indices are not equal are discarded. If each
+  transmit-receive pair maps to a list of more than one arrival time, one
+  target positions per arrival time will be determined.
+
+- `targidx` (optional, default: _0_):
+  If `timefile` keymat(7) files specify more than one arrival time for each
+  transmit-receive key, the value of `targidx` determines which time is used
+  for sound-speed estimates.
+
+- `elements`:
+  A keymat(7) file that maps individual element indices (as single integers) to
+  a location as an (x, y, z) array of floats.
+
+- `mesh`:
+  A Numpy *npz* file describing a surface mesh produced by `wavesfc.py`.
+
+- `levels`:
+  Decompose the volume spanned by the mesh into a `levels`-level octree.
+
+- `vclip` (optional):
+  If provided, a list [<MIN>, <MAX>] that specifies the minimum and maximum
+  permissible average sound speed in the optimization problem. Arrival times
+  that impute an average speed outside of the range will be discarded.
+
+- `bimodal` (optional, default: _True_):
+  If _True_, solve an optimization problem to recover exactly one exterior and
+  one interior sound speed from all of the measurements. If _False_, determine
+  a single exterior sound speed from paths that miss the target surface, and
+  then compute individual estimates of interior sound speeds for each traced
+  path that intersects the surface.
+
+- `fixbg` (optional, default: _False_):
+  If _True_, do not attempt to find an optimal background sound speed, instead
+  using the fixed `measurement` value.
+
+- `separable` (optional, default: _False_):
+  If _True_, treat `bimodal` interior and exterior speeds as separable. The
+  exterior sound speed will be estimated from paths that miss the target, and
+  will then be held constant to recover a single, optimal interior sound speed
+  from paths that intersect the surface.
+
+  If _False_, paths that miss the target are used to provide a first guess of
+  the exterior sound speed, but LSMR is used to find optimal interior and
+  exterior sound speeds from paths that intersect the target.
+
+  When `bimodal` is _False_, this option has no effect.
+  
+- `output`:
+  The name of a file that will be written. If `pathsave` is _False_ and
+  `bimodal` is _True_, `output` will be a text file that lists the interior
+  and exterior sound speeds for the bimodal model.
+
+  Otherwise, `output` will be a Numpy *npz* file with at least two constituent
+  files: `exspd`, which is a one-element array that specifies the exterior
+  sound speed; and `inspd`, which lists the interior speed(s) in a format that
+  depends on whether `bimdal` is _True_.
+
+  When `bimodal` is _True_, `inspd` is a one-element array the provides the
+  single interior sound speed. Otherwise, `inspd` is a Numpy record array
+  where each record provides a transmit index `tx`, a receive index `rx` and
+  an interior sound speed `inspd` for that path.
+
+- `pathsave` (optional, default: _False_):
+  When _True_, `output` will always be a Numpy *npz* file. In addition to the
+  standard constituent files, two additional constituent files will be added.
+  Both constituent files describe individual paths as Numpy record arrays
+  where each record provides a transmit index `tx`, a receive index `rx`, an
+  exterior length `exlen`, an interior length `inlen`, and an associated
+  arrival time `atime`. The first constituent file, `hits`, describes paths
+  determined to have hit the target. The second constituent file, `misses`,
+  describes those paths determined to have missed the target.
+
+- `epsilon` (optional, default: _1.0e-3_):
+  A tolerance such that any path with an interior-to-exterior length ratio
+  less than `epsilon` will be considered to have missed the target.
+
+- `mask_outliers` (optional, default: _False_):
+  When _True_, arrival times from each input `timefile` will be removed if
+  they fall more than 1.5 IQR above the third quartile or below the first
+  quartile. Note that the IQR and quartiles are calculated on a per-file
+  basis.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+wavesfc.py(1) - For a description of the surface mapping process  
+keymat(7) - For a description of the keymat file format

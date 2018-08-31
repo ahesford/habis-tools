@@ -1,0 +1,62 @@
+# wmap-extract.py(1) -- extract subsets of WaveformMap(7) files
+
+## SYNOPSIS
+
+`wmap-extract.py` [`-h`] [`-m` <TRMAP>] [`-r` <RANDOM>] [`-c` <COMPRESSION>]
+                  [`-b`] [`-o` <OUTPUT>] <INPUT> [<INPUT> ...]
+
+
+
+## DESCRIPTION
+
+Given one or more WaveformMap(7) files <INPUT>, extract a subset of waveforms
+and store to a new WaveformMap(7) output. The subset of waveforms to extract
+may be backscatter (when the transmit and receive indices of the input
+waveforms are identical) or may be specified in a TRMAP-formatted file as
+described in `fhfft.py(1)`. For extractions defined in a TRMAP file, a random
+subset of the TRMAP pairs may optionally be selected.
+
+
+## OPTIONS
+
+- `-h`, `--help`:
+  Print a help message and exit.
+
+- `-m` <TRMAP>, `--trmap` <TRMAP>:
+  The path to a collection of desired transmit-receive pairs in a
+  TRMAP-formatted file.
+
+- `-r` <RANDOM>, `--random` <RANDOM>:
+  When in the range (0, 1), <RANDOM> specifies the desired fraction of input
+  waveforms common to <INPUT> and <TRMAP> that will be randomly selected for
+  output.
+
+  When greater than or equal to 1, <RANDOM> should be an integer that specifies
+  the total number of transmit-receive pairs from <TRMAP> desired in the
+  output. Waveforms will be randomly extracted from each <INPUT> in proportion
+  such that, if all <INPUT> files provide waveforms for all transmit-receive
+  pairs in <TRMAP>, the total number of extracted waveforms will be
+  approximately equal to <RANDOM>.
+
+- `-c` <COMPRESSION>, `--compression` <COMPRESSION>:
+  Enable compression of the output WaveformMap(7) file. <COMPRESSION> must be
+  one of _bzip2_, _lzma_ or _deflate_.
+  
+- `-b`, `--backscatter`:
+  Rather than extract waveforms according to <RANDOM> and <TRMAP>, just extract
+  backscatter waveforms.
+
+- `-o` <OUTPUT>, `--output` <OUTPUT>:
+  Save extracted waveforms to <OUTPUT> (default: replace <INPUT> extension with
+  'extract.wmz').
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+fhfft.py(1) - For a description of the TRMAP format  
+WaveformMap(7) - For a description of the WaveformMap format

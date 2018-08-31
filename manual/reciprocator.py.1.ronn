@@ -1,0 +1,79 @@
+# reciprocator.py(1) -- compute reciprocal averages of waveforms
+
+## SYNOPSIS
+
+`habismpi` `reciprocator.py` [`-h`] [`-s` <OSAMP>] [`-o` <OUTPUT>]
+          [`-w` <START> <END>] [`-T` TAILS] [`-R` {_datawin_,_signal_}]
+	  [`-c`] [`-g` <GROUPSIZE>] <INPUT> [<INPUT> ...]
+
+
+## DESCRIPTION
+
+`reciprocator.py` reads a collection of input WaveformMap(7) files and produces
+WaveformMap(7) outputs containing averages of aligned reciprocal waveforms.
+
+After parsing locally available inputs to identify which waveforms are
+present, the MPI program communicates with other ranks to identify remote
+waveforms that correspond to reciprocal pairs and attempts to distribute the
+averaging evenly over all ranks. On any given rank, the set of output
+measurement pairs is not guaranteed to overlap at all with the set of input
+measurement pairs.
+
+For the purposes of averaging, all input waveforms with identical keys or with
+reversed keys (i.e., T, R and R, T) are assumed to be reciprocal pairs.
+`reciprocator.py` does not attempt to ensure that exactly two waveforms
+participate in an average.
+
+
+## OPTIONS
+
+- `-h`, `--help`:
+  Print a help message and exit
+
+- `-s` <OSAMP>, `--osamp` <OSAMP>:
+  Align waveforms to be averaged by maximizing cross-correlation after
+  oversampling by <OSAMP>; when <OSAMP> is 0, no alignment is performed
+
+- `-o` <OUTPUT>, `--output` <OUTPUT>:
+  Store output averages to <OUTPUT> (required if more than one input is
+  provided; if a single input is provided and no output is specified, a default
+  output is derived by replacing the input file extension with
+  'reciprocal.wmz')
+
+- `-w` <START> <END>, `--window` <START> <END>:
+  Prior to alignment and averaging, zero samples before sample <START> and
+  after sample <END>
+
+- `-T` <TAILS>, `--tails` <TAILS>:
+  When windowing with `-w`, apply a Hann rolloff of width <TAILS> approaching
+  the <START> and <END> of the window
+
+- `-R` {_datawin_,_signal_}, `--relative` {_datawin_,_signal_}:
+  When _datawin_ is specified, the window <START> and <END> are relative to
+  each waveform data window; <START> is added to the index of the first
+  recorded sample of the waveform, and <END> is added to the last recorded
+  sample of the waveform.
+
+  When _signal_ is specified, the window <START> and <END> are relative to the
+  global acquisition window in the WaveformMap(7); <START> is considered an
+  absolute index, while <END> is added to the <nsamp> parameter of the input to
+  determine the absolute end of the window
+
+- `-c`, `--clip`:
+  After alignment and averaging, window the output to the intersection of the
+  nonzero input windows; this avoids including shifting artifacts in the output
+
+- `-g` <GROUPSIZE>, `--groupsize` <GROUPSIZE>:
+  When distributing output waveforms, ensure that all transmit and receive
+  indices falling within a contiguous block of <GROUPSIZE> indices reside on
+  the same MPI rank
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+fhfft.py(1) - For WaveformMap format description

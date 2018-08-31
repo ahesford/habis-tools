@@ -1,0 +1,290 @@
+# tomo.py(1) -- compute arrival-time tomograms using stochastic gradient descent
+
+## SYNOPSIS
+
+`habismpi` `tomo.py` <CONFIGURATION>
+
+
+## DESCRIPTION
+
+`tomo.py` computes arrival-time tomograms using stochastic gradient descent
+that relates path integrals over straight or bent rays to minimum travel
+times.
+
+A secondary mode uses LSMR to solve the straight-ray tomography problem with
+optional iterative adjustments to arrival-time data using a model for
+wavefront curvature with respect to the straight path. However, this mode is
+deprecated and is not described in this manual.
+
+
+## CONFIGURATION
+
+Configuration of `tomo.py` is accomplished through a YAML file (or a Mako
+template that can be rendered without context arguments into a YAML file) that
+represents a dictionary with two primary keys: `tomo` and `pathtrace`.
+
+The `tomo` key specifies a dictionary of options to govern the tomography
+solver:
+
+- `timefile`:
+  A path, glob, or list of paths or globs to keymat(7) files providing the
+  arrival times to use for computing a tomogram. Arrival times are keyed on
+  pairs of transmit-receive indices.
+
+- `elements`:
+  A path to the keymat(7) file providing the coordinates of all elements
+  represented by the arrival times in `timefile`. Coordinates are keyed on
+  element index and consist of three-element sequences (x, y, z).
+
+- `maskoutliers` (optional, default: _False_):
+  If _True_, eliminate outlier arrival times on a per-input-file basis.
+  Outliers are classified based on the distribution of average sound speed
+  imputed from arrival times and element positions, and are those average
+  speeds that fall more than 1.5 IQR above the third quartile or below the
+  first quartile.
+
+- `output`:
+  The path of the output file which will store, in Numpy *npy* format, the
+  final tomogram.
+
+- `slowness`:
+  Either a constant value representing the initial homogeneous slowness, or a
+  path to a Numpy *npy* file that specifies a pointwise slowness everywhere on
+  the image grid.
+
+- `piecewise` (optional, default: _False_):
+  Set to _True_ to enable _piecewise_ slowness modeling. See `slowmask`.
+
+- `slowmask` (optional):
+  When omitted, the tomography solver will treat every voxel in the image grid
+  as an unknown to be rcovered.
+
+  If `piecewise` is False, this may be a Numpy *npy* file representing
+  pointwise Boolean values everywhere on the image grid. In this case, every
+  voxel with a _True_ mask value will be treated as an unknown, while voxels
+  with a _False_ mask value will be fixed throughout the imaging process.
+
+  If `piecewise` is _True_, the mask may be a Numpy *npz* file. Each
+  constituent file in the *npz* file should contain a numeric matrix. Each
+  constituent file represents a separate unknown to the tomographic solver,
+  and all voxels with a _True_ mask in the corresponding constituent file are
+  assumed to share that same unknown value, but with a weight governed by that
+  voxel's mask value. Weights do not affect the *value* of the slowness, but
+  affect the *emphasis* of each voxel on the tomography problem.
+
+  As a special case, a constituent file named _unconstrained_ that describes a
+  numeric matrix may be included in the *npz* file. All voxels in the
+  _unconstrained_ matrix with a nonzero mask are treated as separate unknowns,
+  with the unknowns weighted by the mask value to allow varying emphasis on
+  different voxels.
+
+  Any constituent file in the *npz* may have a name ending with the text
+  '_`<SCALE>`x'. The image grid in such matrices should be scaled down by the
+  factor `<SCALE>`. When interpreting these matrices, the tomography solver
+  will scale this grid (using nearest-neighbor interpolation) to the true
+  image size, meaning that each input value will represent a contiguous
+  cluster of (`<SCALE>` x `<SCALE>` x `<SCALE>`) voxels in the image. The
+  weighting rules still apply to these scaled constituents.
+
+- `mfilter` (optional):
+  Apply a median filter of width `mfilter` prior to saving any images.
+
+- `hitmaps` (optional):
+  If provided, a list of two paths to Numpy *npy* files that will be written on
+  exit. The first file will contain a matrix, on the same voxel grid as the
+  tomogram, that specifies the count of rays that pass through each voxel. The
+  second file contains a similar matrix, except the count for each voxel is
+  replaced by the sum of the lengths of the intersections of the voxel and each
+  path that encounters the voxel.
+
+- `partial_output` (optional):
+  A path template that, when specified, will cause the image after each SGD
+  epoch to be written. The template is rendered into a per-epoch file name
+  using, in Python,
+
+  `partial_output.format(epoch=<EPOCH>)`,
+
+  where `<EPOCH>` is the current epoch number.
+
+- `vclip` (optional):
+  If specified, a list [<MIN>, <MAX>] that excludes all arrival times that
+  would impute an average sound speed outside the limits of `vclip`.
+
+- `exclusions` (optional):
+  A path, glob, or list of paths or globs that specify keymat(7) files of
+  transmit-receive pairs to discard from the set of arrival times. Keys of the
+  keymat should be receive indices, and values should be lists of transmission
+  indices that are should be discarded for the receive channel.
+
+- `sgd`:
+  Options to control the stochastic gradient descent. See [SGD][].
+
+The `pathtrace` key specifies a dictionary of options to govern path tracing,
+which can use Rytov zones with straight rays or a general bent/straight tracer
+with optional Fresnel zones. Two global options are available regardless of
+the tracing mode:
+
+- `grid`: A dictionary with keys `lo`, `hi`, and `ncell`. The value for each of
+  these keys should be a numeric, three-element list. For `lo` and `hi`, these
+  lists are the (x, y, z) coordinates of the lower and upper corners,
+  respectively, of the image domain. The `ncell` list, as [nx, ny, nz],
+  specifies the number of voxels along the x, y and z axes, respectively.
+
+- `instance` (optional): If specified, this should be _rytov_, which will use
+  Rytov straight-ray tracing. If omitted, standard straight- or bent-ray
+  tracing, with or without Fresnel zones, will be used.
+
+In general tracing mode (when `instance` is not specified), valid options are:
+
+- `atol`, `rtol`:
+  The absolute (`atol`) and relative (`rtol`) tolerance for adapative
+  quadrature of a slowness field over a particular path. When an estimate of
+  the quadrature error is less than the absolute tolerance or is less than the
+  relative tolerance times the estimate of the integral, the adaptive
+  quadrature will terminate.
+
+- `ptol`:
+  Optimization of bent-ray paths through a slowness field is iterative. In the
+  first iteraton, the path is bisected, and only the central joint between the
+  two segments may be moved to find a minimum path integral. In each
+  subsequent iteration, previously optimal path segments are all bisected,
+  with the original joints and the new bisection joints allowed to move in a
+  new optimization search. The iterations terminate when the optimum path
+  integral changes (absolutely) by less than `ptol` from the optimum in the
+  previous iteration.
+
+- `fresnel`:
+  Use Fresnel zones for a wavelength of `fresnel` instead of 1-D paths for
+  path integrals. During optimal path searches, paths are always 1-D. However,
+  when computing final path integrals in the tomography routine, integration
+  will be performed over the entire Fresnel zone, with a weight that varies
+  linearly from a maximum along the ray axis to zero at the zone boundary.
+
+- `nmax`:
+  Optimization of bent-ray paths through a slowness field is iterative, with
+  each iteration doubling the number of path segments (which, in turn,
+  introduce additional control points that may be moved in the search). The
+  value `nmax` specifies the maximum number of segments allowed to describe a
+  single path. The path will be recursively subdivided
+
+- `pathint_opts`:
+  A dictionary of options to control the integration of slowness over paths.
+  Valid options are `damp`, which can be a nonnegative floating-point weight
+  for a length penalty in the path integral (useful during path optimization
+  to limit the amount of curvature allowed in the search); `gk`, which is a
+  Boolean that, when _True_, uses adaptive Gauss-Kronrod quadrature instead of
+  adaptive Simpson quadrature; and `reclimit`, which should be a positive
+  integer that limits the allowable recursion depth of the adaptive quadrature
+  routines.
+
+- `minpath_opts` (expert use only):
+  A dictionary of keyword arguments passed to the Python method
+
+  `habis.pathtracer.PathIntegrator.minpath`
+
+  to govern the search for minimum-time paths. See the docstring of this
+  method for more details. The method arguments `path`, `atol`, `rtol`,
+  `ptol`, `nmax`, and `h` are provided or configured elsewhere and should not
+  be specified in this dictionary.
+
+  The default setting for this dictionary is
+
+  `{ factr: 1.0e+10, maxls: 50, maxiter: 50 }`.
+
+In Rytov tracing mode (when `instance` is _rytov_), valid options are:
+
+- `l`:
+  The wavelength used to define the Rytov zone.
+
+- `s`:
+  The background slowness used to define the Rytov zone.
+
+- `rytov_opts`:
+  A dictionary of options to customize the Rytov zone. Valid keys are `width`,
+  which truncates the width of the Rytov zone to the width of the Fresnel zone
+  for a frequency (`l` * `width`); and `alpha`, which smooths the kernel by a
+  Gaussian of width `alpha`.
+
+
+## SGD
+
+The `sgd` dictionary of the `tomo` configuration section provides options that
+govern the stochastic gradient descent:
+
+- `nmeas`:
+  Randomly sample a total of `nmeas` arrival-time measurements for each
+  tomography update for each MPI rank participating in the solution.
+
+- `updates`:
+  Number of image `updates` per SGD epoch. In the Barzilai-Borwein step-size
+  estimate, gradients for each epoch are rolling averages of gradients for each
+  update in the epoch. The averaged gradients for the last two epochs are used
+  to estimate an optimal gradient descent step.
+
+- `epochs`:
+  Terminate the SGD after no more than `epochs` imaging epochs have passed.
+
+- `beta` (optional, default: _0.5_):
+  Rolling average weight. When updating a per-epoch average gradient with the
+  gradient for a current update, the new average is `beta` times the current
+  gradient plus (1 - `beta`) times the existing average.
+
+- `tol` (optional, default: _1.0e-6_):
+  Terminate the SGD if the current SGD cost functional falls below `tol` times
+  the maximum observed value for the cost functional. The SGD cost functional
+  is half the mean-squared arrival-time error for the tomographic model.
+
+- `maxstep` (optional):
+  Although the Barzilai-Borwein scheme is used to estimate an optimal step size
+  for gradient descent, the `maxstep` parameter limits the maximum allowable
+  step size.
+
+- `regularizer` (optional):
+  See [REGULARIZATION][] for more details about regularization.
+
+- `maxerr` (optional):
+  Dynamically discard arrival-time estimates on a per-update basis if the error
+  between the measured value and that predicted by the current tomographic
+  model is larger than `maxerr`.
+
+
+## REGULARIZATION
+
+The SGD cost functional may optionall be regularized to alter the
+characteristics of the solution. The `regularizer` option to the `sgd`
+dictionary should be a dictionary with the follownig keys:
+
+- `weight`:
+  An initial numerical weight for the regularization term. The weight may
+  changed after each SGD epoch according to the `scale`, `every` and `min`
+  options.
+
+- `method` (optional, default: _totvar_):
+  The form of regularizer to use. Can be _totvar_ for total-variation
+  regularization, _epr_ for edge-preserving regularization, or _tikhonov_ for
+  standard Tikhonov (L2) regularization.
+
+- `scale` (optional):
+  If specified, the current regularization weight (starting with the specified
+  `weight` value) will be periodically multiplied by `scale` to adjust the
+  weight. See `scale` and `min` for more details about the periodic scaling.
+
+- `every` (optional, default: _1_):
+  Apply the `scale` parameter whenever the epoch number (starting from 1)
+  modulo `every` is zero. Ignored when `scale` is omitted.
+
+- `min` (optional, default: _0_):
+  Limit (clip) the minimum allowable regularization weight to the value `min`.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+keymat(7) - For a description of the keymat file format
+
+[Mako Templates for Python](http://www.makotemplates.org)  
+[LSMR Solver](https://web.stanford.edu/group/SOL/software/lsmr/)

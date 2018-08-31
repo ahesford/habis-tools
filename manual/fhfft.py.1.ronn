@@ -1,0 +1,139 @@
+# fhfft.py(1) -- filter, decode and descramble HABIS WaveformSet files
+
+## SYNOPSIS
+
+`fhfft.py` [`-h`] [`-p` <PROCS>] [`-t`] [`-f` <START> <END>] [`-r` <ROLLOFF>]
+           [`-n` <NSAMP>] [`-o` <OUTPATH>] [`-s` <SIGNS>] [`-l` <TGCSAMPS>]
+	   [`-m` <TGCMAP>] [`-T` <TRMAP>] [`-L` <TRLABEL>]
+	   <GROUPMAP> <INPUT> [<INPUT> ...] 
+
+
+## DESCRIPTION
+
+`fhfft.py` parses WaveformSet files produced by HABIS scans, Hadamard decodes
+and Fourier transforms the data as necessary, and will produce either
+WaveformMap(7) files or unstructured binary matrices of waveform samples. In
+either output format, the data can be temporal or spectral samples.
+
+If the WaveformSet inputs specify a time-gain-compensation (TGC) curve and
+samples are recorded as integers, the output will consist of floating-point
+samples with the TGC applied.
+
+Regardless of output format, a bandpass filter can be applied during the rest
+of the descrambling and decoding operation.
+
+Each input file is mapped to a unique output file with a name derived by
+replacing the input extension with a new extension. In binary output mode, the
+new extension is 'fhfft.mat'. In WaveformMap(7) output mode, the extension is
+based on TRLABEL options. See [OPTIONS][] for more details.
+
+
+## OPTIONS
+
+- `-h`, `--help`:
+  Print a help message and exit
+
+- `-p` <PROCS>, `--procs` <PROCS>:
+  Use <PROCS> processes in parallel; will use one per CPU by default
+
+- `-t`, `--tdout`:
+  Produce time-domain, not spectral, output
+
+- `-n` <NSAMP>, `--nsamp` <NSAMP>:
+  Override length of acquisition window specified in each file
+
+- `-f` <START> <END>, `--freqs` <START> <END>:
+  Apply a bandpass filter that zeros DFT bins less than the <START> index or
+  greater than the <END> index
+
+- `-r` <ROLLOFF>, `--rolloff` <ROLLOFF>:
+  Apply a Hann rolloff of width <ROLLOFF> bins to the DFT bins approaching the
+  <START> and <END> indices of the bandpass filter
+
+- `-o` <OUTPATH>, `--outpath` <OUTPATH>:
+  Store output files in <OUTPATH> (default: alongside input)
+
+- `-s` <SIGNS>, `--signs` <SIGNS>:
+  Compensate for random transmit inversions using the transmit invert bits in
+  the file <SIGNS>. Each line in <SIGNS> should be 0 if the transmission was
+  not inverted and 1 if the transmission was inverted. There must be as many
+  lines in <SIGNS> as there are channels in a Hadamard group.
+
+- `-l` <TGCSAMPS>, `--tgc-length` <TGCSAMPS>:
+  Number of waveform samples represented by each TGC value in a WaveformSet
+
+- `-m` <TGCMAP>, `--tgc-map` <TGCMAP>:
+  Two-column file mapping nominal to actual gain to override stored TGC values
+  in each WaveformSet; values stored in the file are linearly interpolated
+  along the TGC curve in this file
+
+- `-T` <TRMAP>, `--trmap` <TRMAP>:
+  T-R map of measurement pairs to store (see [TRMAP FORMAT][])
+
+- `-L` <TRLABEL>, `--trlabel` <TRLABEL>:
+  Label to apply to output files when extracting measurement pairs according to
+  a <TRMAP> file
+
+If at least one <TRMAP> is specified, the output will be in WaveformMap(7)
+format. More than one <TRMAP> (`-T`) argument may be specified, but each
+specified <TRMAP> must be matched with a corresponding <TRLABEL> (`-L`)
+argument. Each <TRMAP> is mapped to a <TRLABEL> in order of argument
+specification (thus, the first <TRMAP> is paired with the first <TRLABEL>, the
+second <TRMAP> with the second <TRLABEL> and so on). On output, the
+measurements extracted for a given input and a given <TRMAP> are stored in a
+file whose output name is produced by replacing the input extension with
+'<TRLABEL>.wmz'.
+
+If no <TRMAP> or <TRLABEL> options are specified, the output will be in binary
+matrix format. See [BINARY MATRIX FORMAT][] for details about this format.
+
+
+## GROUPMAP FORMAT
+
+The <GROUPMAP> argument must be provided to map global channel indices to
+Hadamard group numbers and a group-local firing index. In single-element
+captures, the groupmap declares the order in which elements are fired and is
+used to descramble the output into element order. In Hadamard captures, the
+groupmap determines which elements participate in which Hadamard firings so in
+addition to allowing decoded output to be recorded in element order. The
+groupmap file is plain text with one line per element and three columns per
+line, in order: global element index, group-local index, and group number.
+
+Each input WaveformSet file records a portion of the groupmap used to perform
+the scan; however, only records for the receive channels stored in the file
+are available. The groupmap provided to `fhfft.py` must specify all elements.
+For each input file, the locally recorded portion of the map will be checked
+against the provided global map for consistency.
+
+
+## TRMAP FORMAT
+
+The <TRMAP> file format is a keymat(7) file that maps single receive-channel
+indices to a list of corresponding transmit-channel indices that should be
+recorded for that receive channel.
+
+
+## BINARY MATRIX FORMAT
+
+Binary matrix files are simple structures consisting of a header of three int32
+values: (`Ns`, `Nt`, `Nr`), where `Ns` is the number of samples, `Nt` is the
+number of transmissions and `Nr` is the number of receive channels in the file.
+Following the header, all waveform samples are stored in FORTRAN order (samples
+varying most rapidly, receive channels least rapidly). If the output is
+spectral, samples will be stored as complex64 records. When a bandpass filter
+is applied in spectral mode, only the nonzero (passband) samples will be
+recorded. Otherwise, all spectral samples will be recorded. If the output is
+temporal, all samples will be stored. Transmissions numbers and receive
+channels are sorted by element index, even though the indices are not recorded
+in the file.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+keymat(7) - For a description of the keymat format used by TRMAP files
+WaveformMap(7) - For a description of the WaveformMap file format

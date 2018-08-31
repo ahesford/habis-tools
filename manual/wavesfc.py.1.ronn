@@ -1,0 +1,118 @@
+# wavesfc.py(1) -- from arrival times and a trilaterated model, produce an irregular surface mesh
+
+
+## SYNOPSIS
+
+`wavesfc.py` <CONFIGURATION>
+
+
+## DESCRIPTION
+
+`wavesfc.py` uses the center, sound speed and radius recovered from a model
+trilaterated by `trilateration.py`, along with the backscatter arrival times
+estimated by `atimes.py`, to develop an irregular surface model represented as
+a Delaunay triangulation. Along the straight from each element to the
+center of a trilaterated model, the backscatter arrival time and exterior
+sound speed are used to determine the round-trip propagation distance that
+element. Half of this round-trip propagation distance is interpreted as the
+position of a mesh node along the element-to-center line.
+
+
+## CONFIGURATION
+
+The YAML configuration file (or the rendered Mako template that produces valid
+YAML) should define a dictionary with four sections. Each section is, in turn,
+a dictionary that defines configuration options. Some sections are common to
+multiple programs, allowing these programs to share a single configuration
+file without duplicating common options.
+
+The `general` section can include one relevant key:
+
+- `include`:
+  A single string or a list of strings providing paths to other YAML
+  configuration files that can be used to import options. Once set, an option
+  is not replaced by an include. Thus, an option set in a top-level file will
+  not be overridden by an option in an included file. When multiple includes
+  are specified, options are set from each include file in the order the files
+  are listed.
+
+The `measurement` section include two relevant keys:
+
+- `radius`:
+  The initial estimate for the radius of the target (or several identical targets).
+
+- `c`:
+  The initial estimate for the sound speed of the background medium surrounding
+  the target (or several identical targets).
+
+The `wavesfc` section includes several options:
+
+- `timefile`:
+  A single path or glob, or a list of paths or globs, to keymat(7) files that
+  map transmit-receive pairs to arrival times. Any transmit-receive pair for
+  which the transmit and receive indices are not equal are discarded. If each
+  transmit-receive pair maps to a list of more than one arrival time, one
+  target positions per arrival time will be determined.
+
+- `elements`:
+  A keymat(7) file that maps individual element indices (as single integers) to
+  a location as an (x, y, z) array of floats.
+
+- `reflectors`:
+  A text file representing an N-by-M matrix, where N is the number of targets
+  (arrival times) for each measurement and M is 3, 4 or 5. If M is 3, the row
+  specificies the (x, y, z) coordinates of the center of the target. The
+  exterior radius and sound speed for that target will use the values specified
+  in `radius` and `c` values in the `measurement` section, respectively. If M
+  is 4, the fourth column specifies a sound speed that overrides the
+  `measurement` value and may be unique to each target location. If M is 5, the
+  fifth column specifies a radius that overrides the `measurement` value and
+  may be unique to each target location.
+
+- `output`:
+  The name of a file that will be written to store the Delaunay triangulation
+  of the surface, as a Numpy *npz* file with constituent files `nodes`,
+  `triangles`, and `elements`. The `nodes` and `triangles` arguments are
+  standard mesh parameters. Because the mesh may not contain nodes derived from
+  some elements that contain missing or bad arrival times, each row of (x, y,
+  z) coordinates in the `nodes` array has a corresponding row in the `elements`
+  array that indicates the index of the element used to determine that node.
+
+  If `reflectors` specifies more than a single target, one mesh file will be
+  written for each target. A string 'Target`<INDEX>`' will be prepended to any
+  extension in the output file, where `<INDEX>` indicates the corresponding row
+  in `reflectors` (starting from zero). The width of the index field will be
+  dynamically chosen based on the total number of targets and zero-padded as
+  necessary.
+
+- `usemiss` (optional, default _False_):
+  If _True_, any nodes that cannot be placed because backscatter times for the
+  corresponding element are either missing or discarded as outliers will be
+  placed by a node on the hemispheric model implied by the trilteration. This
+  avoids very large patches in the mesh caused by missing nodes, at the expense
+  of forcing a hemispheric representation in the neighborhood of those nodes.
+
+- `olgroup` (optional, default _64_):
+  For arrival times corresponding to element indices in contiguous blocks of
+  size `olgroup`, determine the interquartile range and discard outlier arrival
+  times (see `olrange`).
+
+- `olrange` (optional, default _None_):
+  If specified, an arrival time in each contiguous group of `olgroup` elements
+  is considered an outlier and excluded if it falls more than `olrange` IQR
+  above the third quartile or below the first quartile. If `olrange` is
+  omitted, no outliers are excluded.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+atimes.py(1) - For a descrption of arrival-time estimation  
+trilateration.py(1) - For a description of the trilateration process  
+keymat(7) - For a description of the keymat file format
+
+[Mako Templates for Python](http://www.makotemplates.org)

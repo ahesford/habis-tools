@@ -1,0 +1,73 @@
+# keymat(7) -- file format and structure to map an integer or tuple of integers to an array of arbitrary numerical values
+
+## SYNOPSIS
+
+`from habis.formats import loadz_keymat, savez_keymat`  
+`from habis.formats import loadtxt_keymat, savetxt_keymat`
+
+
+## DESCRIPTION
+
+The keymat file format serializes a Python dictionary that maps one or more
+integers to a scalar or array of arbitrary numeric values. All keys in the
+dictionary must consist of an equal number of integers. If the number of
+integers is one, each key is always a scalar value. If the number of integers
+is greater than one, each key is a tuple of integers.
+
+On disk, the format is a Numpy *npz* file with three mandatory constituent
+files: `keys`, `values` and `lengths`. Optionally, a fourth file, `comment`,
+can contain arbitrary bytes that should be ignored on load. If the npz file is
+missing any of the three mandatory constituents or contains additional
+constituents, the file is nonconformant and will not be parsed.
+
+The `keys` file should be an N-by-M array of integer values, where each row
+specifies an M-integer record key and a total of N records are recorded. The
+`lengths` file should be a 1-D integer array of length N, where the j-th value
+indicates the number of values associated with the record corresponding to key
+`keys[j]`. The `values` file should be a 1-D array of arbitrary type with
+length `sum(lengths)` and is a simple concatenation of the values associated
+with the keys in the order implied by the rows of the `keys` array.
+
+If all dictionary values consist of exactly one numeric value, then the values
+can be treated either as length-1 arrays or as scalar values. If at least one
+dictionary value in the keymat consists of more than one numeric value, all
+values should be treated as arrays. The length of the arrays does not need to
+be consistent across keys.
+
+
+## SIMPLE (RESTRICTED) DISK FORMAT
+
+As a special case, if the number of values for each key is constant, the
+keymat may be stored as a text file, with one line (row) per record. Each line
+contains one column for each integer in a key and each numerical value in the
+list associated with the key. The content of the columns should be a
+concatenation of the integer values that make up the key and the general
+numeric values that make up the value.
+
+This format cannot specify the number of integers that compose a key. By
+default, the assumption is that a single integer key is used to describe each
+record. If key consisting of more than one integer are desired, methods to
+parse the simple format should provide an option to override this default
+behavior and strip the appropriate number of leading columns to interpret as
+a key.
+
+Because the reference implementation of the simple format (see [REFERENCE
+IMPLEMENTATIONS][]) uses the Numpy function `loadtxt`, which constructs a
+simple matrix representation of the text file and requires all lines to have
+the same number of columns, variable-length values are considered nonstandard
+and are not supported in the simple format.
+
+
+## REFERENCE IMPLEMENTATIONS
+
+The Python functions `loadz_keymat` and `savez_keymat` in the Python module
+`habis.formats` serve as the reference implementation for the general keymat
+format.
+
+The Python functions `loadtxt_keymat` and `savetxt_keymat` in the Python module
+`habis.formats` serve as the reference implementation for the simplified keymat
+format.
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.

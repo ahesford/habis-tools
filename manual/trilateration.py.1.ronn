@@ -1,0 +1,188 @@
+# trilateration.py(1) -- create a trilaterated model from backscatter arrival times
+
+## SYNOPSIS
+
+`trilateration.py` <configuration>
+
+
+## DESCRIPTION
+
+`trilateration.py` computes the center and, optionally, a target radius or
+external sound speed of a hemispheric scatterer based on backscatter arrival
+times computed with `atimes.py`. With multiple targets, `trilateration.py` can
+also perform a leapfrog iteration between odd and even cycles where element
+positions are fixed and several target positions are recovered in odd cycles,
+then target positions are fixed and element positions are recovered in even
+cycles. The iteration can proceed until all targets and elements stop shifting
+by more than some specified absolute distance.
+
+
+## CONFIGURATION
+
+The YAML configuration file (or the rendered Mako template that produces valid
+YAML) should define a dictionary with four sections. Each section is, in turn,
+a dictionary that defines configuration options. Some sections are common to
+multiple programs, allowing these programs to share a single configuration
+file without duplicating common options.
+
+The `general` section can specify two keys:
+
+- `nproc`:
+  An integer specifying the number of processes that should be started to
+  distribute computational work. By default, the number of processes is equal
+  to the number of detected CPUs.
+
+- `include`:
+  A single string or a list of strings providing paths to other YAML
+  configuration files that can be used to import options. Once set, an option
+  is not replaced by an include. Thus, an option set in a top-level file will
+  not be overridden by an option in an included file. When multiple includes
+  are specified, options are set from each include file in the order the files
+  are listed.
+
+The `sampling` section can specify three keys:
+
+- `period`:
+  The sampling period of input waveforms, in microsec.
+
+- `offset`:
+  A global time offset added to every estimated arrival time. The first sample
+  of every input waveform starts at the `offset` time.
+
+- `osamp`:
+  When computing arrival times, oversample waveforms by this factor prior to
+  analysis to provide subsample resolution. The value of `osamp` should be a
+  regular number.
+
+The `measurement` section include two relevant keys:
+
+- `radius`:
+  The initial estimate for the radius of the target (or several identical
+  targets).
+
+- `c`:
+  The initial estimate for the sound speed of the background medium surrounding
+  the target (or several identical targets).
+
+Either or both of the radius and sound speed may be held constant throughout
+trilateration or updated as part of the optimization problem.
+
+The `trilateration` section includes many specific options:
+
+- `timefile`:
+  A single path or glob, or a list of paths or globs, to keymat(7) files that
+  map transmit-receive pairs to arrival times. Any transmit-receive pair for
+  which the transmit and receive indices are not equal are discarded.  If each
+  transmit-receive pair maps to a list of more than one arrival time, one
+  target positions per arrival time will be determined.
+
+- `inelements`:
+  A keymat(7) file that maps individual element indices (as single integers) to
+  a location as an (x, y, z) array of floats.
+
+- `guessfile`:
+  A text file representing an N-by-M floating-point matrix, where N is the
+  number of targets (arrival times) for each measurement and M is 3, 4 or 5. If
+  M is 3, the row specificies the (x, y, z) coordinates of the center of the
+  target. The exterior radius and sound speed for that target will use the
+  values specified in `radius` and `c` values in the `measurement` section,
+  respectively. If M is 4, the fourth column specifies a sound speed that
+  overrides the `measurement` value and may be unique to each target location.
+  If M is 5, the fifth column specifies a radius that overrides the
+  `measurement` value and may be unique to each target location.
+
+- `outreflector`:
+  The name of a text file that will be written to store the optimized location
+  (and, if desired, the optimized sound speed and radius) of each target in the
+  trilateration. If multiple odd-even cycles are specified, this file is
+  overwritten after each odd cycle. The format is always the same as the
+  5-column `guessfile` input. If the sound speed or radius is not allowed to be
+  updated, the corresponding column in the `outreflector` file will simply
+  repeat the input *measurement* value.
+
+- `outelements` (optional):
+  If specified, the name of a file that will be written to store, as a text
+  keymat(7), updated element positions after every even cycle of iterative
+  trilateration. If `outelements` is not specified, the trilateration
+  terminates after the first odd cycle, and new element positions are never
+  computed.
+
+  Because multiple targets are usually involved in an even-cycle element
+  update, and each target may be associated with a unique radius and sound
+  speeed, the arrival times used in the trilateration problem that optimizes
+  element positions are adjusted to compensate for differences in the radius
+  and sound speed. The trilateration then proceeds with fixed, uniform radius
+  and sound speed in the even cycle.
+
+- `tolerance` (optional, default _0.0_):
+  The trilateration problem in the odd-even scheme is solved by Newton-Raphson
+  iteration. When the norm of a Newton-Raphson update is less than `tolerance`
+  times the norm of the guess used to produce the update, iteration will
+  terminate and the problem will be considered solved.
+
+  If the desired `tolerance` cannot be achieved, the Newton-Raphson method will
+  terminate according to its default behavior; it is not possible to configure
+  the total number of N-R iterations in `trilateration.py`.
+
+- `stopdist` (optional, default _0.0_):
+  In an odd-even trilateration scheme, cycles will terminate when the maximum
+  shift (of any target or element) is less than `stopdist`.
+
+- `maxiter` (optional, default _1_):
+  If at least one element or target continues to shift by more than the desired
+  `stopdist`, the trilateration will still terminate after `maxiter` odd-even
+  cycles.
+
+- `fctsize` (optional, default _1_):
+  When trilaterating element positions, a penalty is included to force elements
+  onto a plane. All elements with continguous indices in a group of `fctsize`
+  are confined by the penalty to fall (approximately) within the same plane.
+
+- `planewt` (optional, default _1.0_):
+  The element trilateration is forced to trade its desire to adjust each
+  element independently with its desire to minimize an out-of-plane penalty.
+  The value of `planewt` can be adjusted to alter the relative importance of
+  the out-of-plane penalty.
+
+- `exclusions` (optional):
+  A dictionary that configures groups of elements to discard from arrival
+  times, containing the keys `groups`, a list of integer group numbers to be
+  excluded from the times; and `groupsize`, the number of contiguous elements
+  in each group.
+
+  The backscatter arrival time for an element I will be discarded if its group
+  number, defined as int(I / `groupsize`), is in the `groups` list.
+
+- `optc` (optional, default _False_):
+  If _True_, allow the external sound speed associated with each target to be
+  optimized along with the target position in each odd trilateration cycle. If
+  _False_, always fix the sound speed at the `measurement` value.
+
+- `optr` (optional, default _False_):
+  If _True_, allow the radius associated with each target to be optimized along
+  with the target position in each odd trilateration cycle. If _False_, always
+  fix the radius at the `measurement` value.
+
+
+## CAVEAT
+
+In some cases, the `optc` and `optr` values can both be _True_ with good
+results. However, in many cases, the cost functional optimized by the
+trilateration problem is not sensitive enough (or unmodeled influences on
+arrival-time measurements such as element directivity unpredictably alter the
+character of the cost functional) and simultaneous optimization of sound speed
+and radius will produce unrealistic results. In that case, the more precisely
+determined of radius and sound speed should be fixed, while the other may be
+optimized.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+keymat(7) - For a description of the keymat file format
+
+[Mako Templates for Python](http://www.makotemplates.org)

@@ -1,0 +1,35 @@
+# sfc2mask.py(1) -- from a surface mesh, make a volume interior/exterior mask
+
+## SYNOPSIS
+
+`sfc2mask.py` [`-h`] [`-z` <ZMAX>] <LX> <LY> <LZ> <HX> <HY> <HZ>
+              <NX> <NY> <NZ> <MESHFILE> <MASKFILE>
+
+
+## DESCRIPTION
+
+Given a `wavesfc.py` backscatter surface described by the mesh <MESHFILE>,
+prepare a binary mask on an <NX> x <NY> x <NZ> voxel grid that spans the cube
+with low corner (<LX>, <LY>, <LZ>) and high corner (<HX>, <HY>, <HZ>). The
+output mask, which is _True_ inside the surface and _False_ outside, will be
+saved as a 3-D Numpy matrix in the *npy* output <MASKFILE>.
+
+
+## OPTIONS
+
+- `-h`, `--help`:
+  Print a help messsage and exit
+
+- `-z` <ZMAX>:
+  If specified, all _z_-slabs with indices larger than <ZMAX> will be assumed
+  to fall in the exterior of the surface.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+wavesfc.py(1) - For a description of the surface mapping process

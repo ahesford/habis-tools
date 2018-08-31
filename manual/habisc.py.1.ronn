@@ -1,0 +1,175 @@
+# habisc.py(1) -- invoke HABIS conductor commands on remote hosts
+
+## SYNOPSIS
+
+`habisc.py` <CONFIGURATION> [ <ARGUMENT>=<OPTION> ... ]
+
+
+## DESCRIPTION
+
+The script `habisc.py` reads a Mako-templated YAML configuration file to parse
+a series HABIS conductor commands and execute the commands on a collection of
+remote hosts.
+
+
+## CONFIGURATION FORMAT
+
+The best reference for the `habisc.py` configuration-file format is existing
+configurations in '/opt/habis/share/habisc'. In particular, the files
+'echo.yaml' and 'block_echo.yaml' show typical usage. Because the configuration
+file is a Mako template, Python code can be added to the configuration to allow
+dynamic generation.
+
+During rendering of the Mako template, the `habisc.py` command line is parsed
+for additional arguments. Command arguments of the form <ARGUMENT>=<OPTION> are
+mapped to a Python dictionary keyed on <ARGUMENT>, with <OPTION> specifying the
+corresponding value. The dictionary is passed as keyword arguments to the
+`render` method of the Mako template.
+
+As YAML, the `habisc.py` configuration file should represent a dictionary with
+two required keys: `connect` and `commands`.
+
+The `connect` key should map to a dictionary with at least two subkeys: the
+`hosts` key should specify a list of remote hosts to which `habisc.py` should
+connect, and the `port` key should specify an integer TCP port number to use
+for connections.
+
+The `commands` key should map to a list of dictionary objects, each
+representing a command to be run on the remote conductors. The important keys
+of each command dictionary are:
+
+- `cmd` (required):
+  The name of the command to run, which must be an executable file residing in
+  '/opt/habis/share/conductor'.
+
+- `argmap` (optional):
+  A dictionary mapping remote host names to arguments passed to the `cmd` to be
+  run. See [REMOTE ARGUMENT SPECIFICATION][].
+
+- `kwargmap` (optional):
+  A dictionary mapping remote host names to keyword argument dictionaries that
+  govern the way in which *cmd* is invoked. See [REMOTE ARGUMENT
+  SPECIFICATION][] and [KEYWORD ARGUMENTS][].
+
+- `fatalError` (optional):
+  If _True_, a failure to successfully run this `cmd` will cause the conductor
+  to terminate with an error, rather to continue to execute subsequent
+  sections. If _False_ or omitted, a failure to successfully run this `cmd`
+  will be ignored, and subsequent command entries will be processed.
+
+
+## BLOCK COMMANDS
+
+Standard conductor commands are invoked exactly once on each remote conductor.
+However, the conductor is also aware of **block** commands, which will be run
+multiple times through each conductor. Block commands are indicated by `cmd`
+names (and, thus, executable names in '/opt/habis/share/conductor') that begin
+with the text 'block_'. As the name implies, block commands are designed to
+independently process a group of distinct execution **blocks**. The group of
+blocks is subdivided into a number of **chunks**, with each conductor acting on
+a specific chunk. Each chunk may actually represent multiple blocks (for
+example, breaking a group of 160 blocks into 20 chunks will result in each
+chunk representing 8 blocks).
+
+The conductor will execute (serially or in parallel) on command for each block
+in its assigned chunk. Parallel execution can be enabled by configuring
+multiple **actors** for each conductor. The conductor spawns an independent
+thread for each conductor, invoking a separate block command on each thread.
+In the above example, where 160 blocks are split into 20 chunks of 8 blocks
+each, specifying 4 actors will cause the conductor to process 4 of the 8 chunks
+simultaneously, then process the remaining 4 chunks (again simultaneously) when
+the first batch is finished.
+
+The number of blocks reflects the underlying subdivision of work units in a
+task and may generally be unrelated to the number of remote conductors or
+actors employed. Usually, the number of chunks should equal the number of
+remote conductors specified in a configuration file; each conductor should then
+receive a unique chunk index on which to operate.
+
+When block commands are run, the conductor _prepends_ numerical arguments to
+indicate the block to be processed for each execution, along with
+(optionally) the actor number for the thread used to invoke the command. See
+[KEYWORD ARGUMENTS][] for more information about controlling block execution.
+
+
+## REMOTE ARGUMENT SPECIFICATION
+
+Both the `argmap` and `kwargmap` dictionaries in a `command` record map host
+names to specific program (`argmap`) or control (`kwargmap`) arguments. The
+hosts that key these dictionaries should normally match the host names
+specified in the *hosts* key of the *connect* section of the file. However, two
+special host keys are also recognized: `__DEFAULT__` and `__ALL_HOSTS__`.
+
+The `__DEFAULT__` key specifies arguments that should be used if a specific
+host is not found in the argument dictionary. If a specific host is found, the
+`__DEFAULT__` entry is ignored.
+
+The `__ALL_HOSTS__` key specifies arguments that will be used in addition to
+specific arguments that may be specified for each host. (If a specific key is
+not identified for a particular, but a `__DEFAULT__` key exists, that host will
+use the `__DEFAULT__` key _instead_ of the `__ALL_HOSTS__` key. If no
+`__DEFAULT__` key exists, the `__ALL_HOSTS__` key will be used even for hosts
+with no specific entry.) When specified in the `argmap` section, the contents
+of the `__ALL_HOSTS__` key are _appended_ to the contents of a host-specific
+key if one exists. When specified in the `kwargmap` section, the
+keyword-argument dictionaries for a host-specific entry and the `__ALL_HOSTS__`
+entry are _merged_, with conflicts favoring the host-specific entry.
+
+
+## KEYWORD ARGUMENTS
+
+Keyword arguments in `kwargmap` are not passed to the command to be run, but
+instead control its execution. Two keyword arguments can be used for any type
+of command:
+
+- `context` (optional):
+  If specified, should provide a string of space-separated names that identify
+  particular execution contexts to be used when invoking the command. The HABIS
+  conductor ensures that only one process can run in each named context.
+  Typical context names are _mem_ for high-memory tasks, _gpu_ for GPU-bound
+  tasks, and _habis_ for tasks that access HABIS hardware.
+
+- `contextWait` (optional, default: _True_):
+  If _True_, the conductor will wait to process this command until all specified
+  execution contexts are free for use. If _False_, the command will fail if at
+  least one of the specified execution contexts is not immediately available.
+
+For block commands, additional keyword arguments control the distribution of
+blocks among the conductors:
+
+- `actors` (optional, default: _1_):
+  An integer or list of arbitrary unique values, each optionally passed as a
+  dynamic 'actor argument' to the wrapped command upon execution. The actor
+  argument, when passed, will precede all other arguments. A dedicated thread
+  is spawned for each actor to parallelize command execution.
+
+- `blocks` (optional, default: _1_):
+  An integer or a list of arbitrary unique values, each passed in turn as a
+  dynamic 'block argument' to the wrapped command upon execution. The block
+  argument will precede all other arguments except for the optional actor
+  argument. All actor threads share the block list for each conductor.
+
+- `chunk` (optional, default: _0_):
+  When distributing block arguments to the actor threads, restrict block
+  arguments to those that fall in the listed chunk of consecutive values.
+
+- `nchunks` (optional, default: _1_):
+  The number of chunks into which consecutive values of the block list will be
+  broken when selecting the desired chunk index.
+
+- `hideactor` (optional, default: _False_):
+  If _True_, the actor argument will not be passed to the wrapped command.
+  Instead, the first and only dynamic argument will be the block argument.
+
+Note: For each of actors and blocks, if an integer `I` is specified in place of
+a list, a list `[0..<I]` is substituted.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+[Mako Templates for Python](http://www.makotemplates.org)

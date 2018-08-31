@@ -1,0 +1,143 @@
+# waveviz.py(1) -- plot waveforms in videos or PDF images
+
+## SYNOPSIS
+
+`waveviz.py` [`-h`] [`-l`] [`-z`] [`-s`] [`-w` <START> <END>] [`-a` <ATIMES>]
+             [`-c` <COL>] [`-t` <THRESH>] [`-f` <FREQ>] [`-n` <NSAMP>]
+	     [`-b` <BITRATE>] [`--one-sided`] [`-r`] [`-e`] [`-E`]
+	     <OUTPUT> <INPUT> [<INPUT> ...]
+
+## DESCRIPTION
+
+Given one or more WaveformMap(7) files <INPUT>, create a 2-D color image of
+waveforms or a video that compares waveforms frame-by-frame.
+
+In image mode, which is enabled when <OUTPUT> has a _pdf_ extension, all
+waveforms will be plotted on the same axes with waveform index along the _x_
+axis, sample index along the _y_ axis and waveform amplitude shown as color
+variations. The <INPUT> files should provide one waveform per transmit-receive
+key. The order in which waveforms appear along the _x_ axis is determined by
+the numerical sort order of their transmit-receive keys.
+
+In video mode, which is enabled when <OUTPUT> has an _mp4_ extension, one
+_class_ of waveforms will be displayed per video frame. The <INPUT> files may
+specify more than one waveform per transmit-receive key; a class of waveforms
+is all waveforms that have a common key. All classes must have the same number
+of constituent waveforms. Ordering of waveforms within each class is determined
+by the lexicographical sorting of the names of the files containing the
+waveforms.
+
+
+## OPTIONS
+
+- `-h`, `--help`:
+  Print a help message and exit.
+
+- `-E`, `--envelope`:
+  Display waveform envelopes instead of signed waveform amplitude. Implies
+  `--one-sided`.
+
+- `-l`, `--log` (image mode only):
+  Display log-magnitude plots (implies `-E`).
+
+- `-z`, `--zero` (image mode only):
+  When aligning waveforms based on arrival times provided as <ATIMES>, zero
+  waveforms for which no arrival time is available. The zeroed waveforms are
+  still plotted.
+
+- `-s`, `--suppress`:
+  When aligning waveforms based on arrival times provided as <ATIMES>, discard
+  (do not plot) waveforms for which no arrival time is available.
+
+- `-a` <ATIMES>, `--atimes` <ATIMES>:
+  A path or glob to an arrival-time map as a keymat(7) to align waves. More
+  than one `-a` argument may be provided to allow specification of multiple
+  globs or files.
+  
+  When <ATIMES> is provided in image mode, waveforms will be aligned by
+  shifting each waveform by the difference between its indicated arrival time
+  and the mean of all arrival times for displayed waveforms.
+  
+  When <ATIMES> is provided in video mode, the bounds of the temporal axis will
+  be chosen to start at the minimum displayed arrival time and end at the
+  maximum displayed arrival time. Within each class, waveforms will be aligned
+  by shifting each waveform in the class by the difference between its arrival
+  time and that for the first member of the class. A marker will be placed on
+  each frame to indicate the common aligned arrival time.
+
+  If the number of arrival times for each transmit-receive key is more than one
+  in image mode or does not equal the size of each waveform class in video
+  mode, the `-c` flag will be required to indicate which values in an <ATIMES>
+  record specify the times to use for alignment.
+
+- `-w` <START> <END>, `--window` <START> <END>:
+  Only display samples from <START> to <END>.
+  
+  If <ATIMES> is provided in image mode, <START> and <END> are added to the
+  average arrival time to determine an absolute window about the aligned
+  waveforms. If <ATIMES> is provided in video mode, <START> is added to the
+  earliest displayed arrival time and <END> is added to the latest displayed
+  arrival time to determine bounds for the temporal axis.
+
+- `-c` <COL>, `--cols` <COL>:
+  Select from <ATIMES> the indicated column <COL> to use for aligning
+  waveforms. In image mode, at most one <COL> may be provided.
+  
+  In video mode, one `-c` specifier should be provided for every member of a
+  waveform class. The order of <COL> specifications corresponds to the lexical
+  ordering of waveforms in each class. It is acceptable to repeat <COL> values.
+
+- `-t` <THRESH>, `--thresh` <THRESH>:
+  Set the amplitude limit (color scale for image mode, y axis for video mode).
+
+  For linear display modes, a color limit <CMAX> is established from <THRESH>
+  as <CMAX> = <MEAN> + <THRESH> * <STD>, where <MEAN> and <STD> are,
+  respectively, the mean and standard deviation of the peak amplitudes of all
+  displayed waveforms. When the display is one-sided (by specifying either
+  `--one-sided` or `-E`), the amplitude limit is (0, <CMAX>). When the display
+  is two-sided, the amplitude limit is (-<CMAX>, <CMAX>).
+
+  For the logarithmic image display mode, teh value of <THRESH> should be
+  negative. The high end of the color scale will also be the peak amplitude of
+  all plotted waves, and the low end of the color scale will be a value
+  <THRESH> dB below the peak.
+
+- `-f` <FREQ>, `--freq` <FREQ>:
+  Frequency of samples in waveform files; used to convert absolute arrival
+  times to samples.
+
+- `-n` <NSAMP>, `--nsamp` <NSAMP>:
+  Force all waveform files to have <NSAMP> samples, instead of a value encoded
+  the input file.
+
+- `-b` <BITRATE>, `--bitrate` <BITRATE> (video mode only):
+  Set bitrate for video output in kbps
+
+- `--one-sided`:
+  Use a one-sided color or amplitude scale.
+
+- `-r`, `--skip-alignment` (video mode only):
+  Do not align waveforms based on <ATIMES>, but show the arrival times in video
+  frames. One marker will be shown for every waveform in the class, rather than
+  showing a single marker for the common arrival time when waveforms are
+  aligned.
+
+- `-e`, `--equalize`:
+  Equalize waveforms to have unit peak amplitude.
+  
+  In video mode, a single `-e` flag will cause the relative amplitudes of
+  waveforms in a single class to be preserved (thus, all waveforms in a class
+  are divided by the highest peak amplitude in the class). If a second `-e`
+  flag is provided in video mode, all waveforms within a class will be
+  equalized independently, discarding relative amplitude variations.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+keymat(7) - For a description of the keymat format  
+WaveformMap(7) - For a description of the WaveformMap format
