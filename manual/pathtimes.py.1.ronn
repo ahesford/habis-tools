@@ -1,0 +1,59 @@
+# pathtimes.py(1) -- evaluate arrival-time integrals at arbitrary points
+
+## SYNOPSIS
+
+`pathtimes.py` [`-h`] [`-t`] [`-s`] [`-b`] [`-q`] [`-j` <JOINTS>]
+               <ELEMENTS> <TARGETS> <TRACER> <SLOWNESS> <OUTPUT>
+
+## DESCRIPTION
+
+Compute path integrals through a slowness image <SLOWNESS> using bent-ray
+tracing as well as compensated and uncompensated straight-ray tracing. Start
+points for path integrals are elements with (x, y, z) coordinates in the
+keymat(7) file <ELEMENTS>, keyed by element index. End points for path
+integrals are described in the file <TARGETS>, which is either a binary matrix
+of (x, y, z) coordinates or a TRMAP file of element indices that describe
+desired and end indices in <ELEMENTS>. Path tracer options are specified in the
+`pathtracer` section of the YAML configuration file <TRACER>, and <OUTPUT> is
+either a binary matrix of path integrals for every element in <ELEMENTS> and
+every target in the binary matrix <TARGETS> (with target index varying most
+rapidly) or, when <TARGETS> is a TRMAP file, a keymat(7) file mapping
+transmit-receive index pairs to path integrals.
+
+
+## OPTIONS
+
+- `-h`, `--help`:
+  Print a help message and exit.
+
+- `-t`, `--trlist`:
+  Treat <TARGETS> as a TRMAP instead of coordinates. See fhfft.py(1) for
+  details about TRMAP files. The transmit-receive pairs in <TARGETS> index into
+  <ELEMENTS>.
+
+- `-s`, `--nostraight`:
+  Disable compensated and uncompensated straight-ray tracing in the output.
+
+- `-b`, `--nobent`:
+  Disable bent-ray tracing in the output.
+
+- `-q`, `--quiet`:
+  Disable printing of status bar during computation.
+
+- `-j` <JOINTS>, `--joints` <JOINTS>:
+  Save interior joints in bent paths with at least 3 segments to the keymat(7)
+  file <JOINTS> (requires bent tracing). For each transmit-receive index pair
+  describing a traced path, the (x, y, z) coordinates of all interior joints
+  are concatenated into a value list.
+
+
+## COPYRIGHT
+
+Copyright (c) 2014--2018 Andrew J. Hesford. All rights reserved.
+
+
+## SEE ALSO
+
+fhfft.py(1) - For a description of TRMAP files  
+keymat(7) - For a description of the keymat format  
+WaveformMap(7) - For a description of the WaveformMap format
