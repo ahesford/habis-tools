@@ -2,23 +2,31 @@
 
 ## SYNOPSIS
 
-`pathtimes.py` [`-h`] [`-t`] [`-s`] [`-b`] [`-q`] [`-j` <JOINTS>]
-               <ELEMENTS> <TARGETS> <TRACER> <SLOWNESS> <OUTPUT>
+`pathtimes.py` [`-h`] [`-t`] [`-q`] <ELEMENTS> <TARGETS> <TRACER>
+               <SLOWNESS> <OUTPUT>
 
 ## DESCRIPTION
 
-Compute path integrals through a slowness image <SLOWNESS> using bent-ray
-tracing as well as compensated and uncompensated straight-ray tracing. Start
-points for path integrals are elements with (x, y, z) coordinates in the
-keymat(7) file <ELEMENTS>, keyed by element index. End points for path
-integrals are described in the file <TARGETS>, which is either a binary matrix
-of (x, y, z) coordinates or a TRMAP file of element indices that describe
-desired and end indices in <ELEMENTS>. Path tracer options are specified in the
-`pathtracer` section of the YAML configuration file <TRACER>, and <OUTPUT> is
-either a binary matrix of path integrals for every element in <ELEMENTS> and
-every target in the binary matrix <TARGETS> (with target index varying most
-rapidly) or, when <TARGETS> is a TRMAP file, a keymat(7) file mapping
-transmit-receive index pairs to path integrals.
+Compute path integrals through a slowness image <SLOWNESS> using tracing as
+configured in the `pathtracer` section of the YAML file <TRACER>.
+
+Paths start at elements with (x, y, z) coordinates in the keymat(7) file
+<ELEMENTS>, keyed by element index. Paths end at points described in <TARGETS>,
+which may either be a binary matrix of (x, y, z) coordinates of end points or a
+TRMAP file (see fhfft.py(1) for a description of TRMAP files) of
+transmit-receive (start-end) indices into <ELEMENTS>.
+
+When <TARGETS> is a binary matrix, <OUTPUT> will be a 1-D binary matrix of path
+integral values from every element in <ELEMENTS> to every point in <TARGETS>,
+sorted by increasing indices with target index varying most rapidly. If tracing
+fails for a particular path, the time recorded for that pair will be NaN. The
+binary matrix specifies an int32 header that indicates the number of integral
+values to follow, followed by that many float32 values.
+
+When <TARGETS> is a TRMAP file, <OUTPUT> will be a keymat(7) file mapping
+transmit-receive indices in <TARGETS> to the path integral for that pair of
+elements in <ELEMENTS>. If tracing fails for any transmit-receive pair, the
+path integral will be omitted from the output.
 
 
 ## OPTIONS
@@ -31,20 +39,8 @@ transmit-receive index pairs to path integrals.
   details about TRMAP files. The transmit-receive pairs in <TARGETS> index into
   <ELEMENTS>.
 
-- `-s`, `--nostraight`:
-  Disable compensated and uncompensated straight-ray tracing in the output.
-
-- `-b`, `--nobent`:
-  Disable bent-ray tracing in the output.
-
 - `-q`, `--quiet`:
   Disable printing of status bar during computation.
-
-- `-j` <JOINTS>, `--joints` <JOINTS>:
-  Save interior joints in bent paths with at least 3 segments to the keymat(7)
-  file <JOINTS> (requires bent tracing). For each transmit-receive index pair
-  describing a traced path, the (x, y, z) coordinates of all interior joints
-  are concatenated into a value list.
 
 
 ## COPYRIGHT
