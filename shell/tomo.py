@@ -932,7 +932,7 @@ if __name__ == "__main__":
 
 	with watchConfigErrors('exclusions', tsec):
 		# Try to load a list of arrival times to exclude
-		efiles = matchfiles(config.getlist(tsec, 'exclusions'), forcematch=False)
+		efiles = matchfiles(config.getlist(tsec, 'exclusions', default=[]), forcematch=False)
 		exclusions = { (t,r) for f in efiles
 				for r, tl in loadkeymat(f).items() for t in tl }
 		if exclusions:
