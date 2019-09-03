@@ -30,7 +30,14 @@ if __name__ == '__main__':
 			long_description='\n'.join(DOCLINES[2:]),
 			author='Andrew J. Hesford',
 			author_email='ajh@sideband.org',
-			platforms=['any'], license='Closed',
+			platforms=['any'],
+			classifiers=[
+				'License :: OSI Approved :: BSD License',
+				'Programming Language :: Python :: 3',
+				'Intended Audience :: Developers',
+				'Topic :: Scientific/Engineering',
+				'Development Status :: 4 - Beta'
+			],
 			packages=['habis'],
 			scripts=glob('shell/*.py'),
 			ext_modules=cythonize(extensions,
